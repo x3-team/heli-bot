@@ -6,14 +6,16 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app.llm.client import HeliClient
-from app.llm.router import Router
+from app.llm.router import Router, classification_messages, parse_classification
 from app.models import Task, User
+from app.quota import metered_complete, remaining_ratio, snapshot
 from app.trajectories import add_step
 
 _ANSWER = (
     "Ты ассистент Heli для рабочей задачи. Отвечай по-русски и по делу. "
     "Не называй другие модели. Если действие опасное, опиши его и остановись."
 )
+_ANSWER_MAX_TOKENS = 256
 
 
 @dataclass
@@ -28,9 +30,16 @@ class Turn:
 
 
 def run_turn(session: Session, user: User, task: Task, client: HeliClient) -> Turn:
-    router = Router(client)
-    task_type, complexity, classified = router.classify(task.request_text)
-    route = router.route(phase="execute", complexity=complexity)
+    classified = metered_complete(
+        session,
+        user,
+        task.id,
+        client,
+        "heli-fast",
+        classification_messages(task.request_text),
+        max_tokens=80,
+    )
+    task_type, complexity = parse_classification(classified.text)
     add_step(
         session,
         user,
@@ -43,12 +52,20 @@ def run_turn(session: Session, user: User, task: Task, client: HeliClient) -> Tu
         cost_rub=classified.cost_rub,
         attempt=1,
     )
-    answer = client.complete(
+    session.commit()
+    ratio = remaining_ratio(snapshot(session, user))
+    route = Router(client).route(phase="execute", complexity=complexity, quota_remaining=ratio)
+    answer = metered_complete(
+        session,
+        user,
+        task.id,
+        client,
         route.alias,
         [
             {"role": "system", "content": _ANSWER},
             {"role": "user", "content": task.request_text},
         ],
+        max_tokens=_ANSWER_MAX_TOKENS,
     )
     add_step(
         session,

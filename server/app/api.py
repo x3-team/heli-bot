@@ -12,9 +12,10 @@ from sqlalchemy.orm import Session
 from app.auth import AuthError, issue_login_code, issue_token, read_user_id, verify_login_code
 from app.config import get_settings
 from app.db import get_db
-from app.models import User
+from app.models import TaskStep, User
 from app.llm.client import HeliClient, HeliError
 from app.llm.run import run_turn
+from app.quota import QuotaError, public_usage, snapshot
 from app.trajectories import (
     TrajectoryError,
     add_step,
@@ -47,10 +48,11 @@ _STATUS = {
     "bad_rating": 400,
     "bad_acceptance": 400,
     "bad_screenshot": 400,
+    "limit_reached": 403,
 }
 
 
-def _fail(exc: AuthError | TrajectoryError) -> None:
+def _fail(exc: AuthError | TrajectoryError | QuotaError) -> None:
     status = _STATUS.get(exc.code, 400)
     raise HTTPException(status_code=status, detail=exc.code)
 
@@ -248,6 +250,63 @@ def create_step(
     return {"id": str(step.id), "position": step.position, "model": step.model_alias}
 
 
+class LimitBody(BaseModel):
+    monthly_limit_rub: Decimal = Field(gt=0, le=Decimal("1000000"))
+    weekly_limit_rub: Decimal | None = Field(default=None, gt=0, le=Decimal("1000000"))
+
+
+@router.get("/usage")
+def usage(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    return public_usage(snapshot(session, user))
+
+
+@router.get("/admin/quotas")
+def admin_quotas(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="admin_required")
+    from sqlalchemy import func, select
+
+    people = []
+    for person in session.scalars(select(User).order_by(User.created_at)):
+        view = public_usage(snapshot(session, person))
+        people.append({"id": str(person.id), "email": person.email, **view})
+    totals = session.execute(
+        select(TaskStep.task_id, func.sum(TaskStep.cost_rub))
+        .group_by(TaskStep.task_id)
+        .order_by(func.sum(TaskStep.cost_rub).desc())
+        .limit(10)
+    ).all()
+    return {
+        "users": people,
+        "top_tasks": [{"id": str(task_id), "cost_rub": str(cost or 0)} for task_id, cost in totals],
+    }
+
+
+@router.patch("/admin/users/{user_id}/limit")
+def set_user_limit(
+    user_id: uuid.UUID,
+    body: LimitBody,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="admin_required")
+    target = session.get(User, user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="not_found")
+    target.monthly_limit_rub = body.monthly_limit_rub
+    if body.weekly_limit_rub is not None:
+        target.weekly_limit_rub = body.weekly_limit_rub
+    session.flush()
+    return public_usage(snapshot(session, target))
+
+
 @router.post("/tasks/{task_id}/run")
 def run(
     task_id: uuid.UUID,
@@ -261,6 +320,8 @@ def run(
         task = _own_task(session, user, task_id)
         turn = run_turn(session, user, task, client)
     except TrajectoryError as exc:
+        _fail(exc)
+    except QuotaError as exc:
         _fail(exc)
     except HeliError as exc:
         status = 503 if exc.code == "missing_api_key" else 502

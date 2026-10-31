@@ -2,6 +2,7 @@ export interface Usage {
   weekPercent: number;
   monthPercent: number;
   blocked: boolean;
+  warning: boolean;
 }
 
 export interface SessionUser {
@@ -18,6 +19,7 @@ const ERRORS: Record<string, string> = {
   missing_api_key: "На сервере не задан ключ модели.",
   request_failed: "Модель не ответила. Попробуйте ещё раз.",
   unknown_alias: "Сервер не принял шаг.",
+  limit_reached: "Лимит исчерпан",
 };
 
 export class ApiError extends Error {
@@ -87,17 +89,21 @@ export async function loadUsage(base: string, token: string): Promise<Usage> {
   const response = await send(base, "/v1/usage", {
     headers: { authorization: `Bearer ${token}` },
   });
-  if (response.status === 404) return { weekPercent: 0, monthPercent: 0, blocked: false };
+  if (response.status === 404) {
+    return { weekPercent: 0, monthPercent: 0, blocked: false, warning: false };
+  }
   if (!response.ok) throw new ApiError(await readError(response));
   const body = (await response.json()) as {
     week_percent?: number;
     month_percent?: number;
     blocked?: boolean;
+    warning?: boolean;
   };
   return {
     weekPercent: body.week_percent ?? 0,
     monthPercent: body.month_percent ?? 0,
     blocked: Boolean(body.blocked),
+    warning: Boolean(body.warning),
   };
 }
 

@@ -182,7 +182,7 @@ function Workspace({
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState<string | null>(null);
   const [mascot, setMascot] = useState<MascotState>("waiting");
-  const [usage, setUsage] = useState<Usage>({ weekPercent: 0, monthPercent: 0, blocked: false });
+  const [usage, setUsage] = useState<Usage>({ weekPercent: 0, monthPercent: 0, blocked: false, warning: false });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [abort, setAbort] = useState<AbortController | null>(null);
@@ -247,6 +247,7 @@ function Workspace({
     } finally {
       setBusy(false);
       setAbort(null);
+      void loadUsage(apiBase, token).then(setUsage).catch(() => undefined);
     }
   }
 
@@ -456,7 +457,7 @@ function Limits({ usage }: { usage: Usage }) {
   const month = clampPercent(usage.monthPercent);
   const weekTone = limitTone(week);
   const monthTone = limitTone(month);
-  const warned = weekTone === "warn" || monthTone === "warn";
+  const warned = usage.warning || weekTone === "warn" || monthTone === "warn";
   return (
     <div className="page">
       <div>
