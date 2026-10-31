@@ -46,13 +46,10 @@ class Router:
     def classify(self, task: str) -> tuple[str, int, Completion]:
         completion = self._client.complete(
             "heli-fast",
-            [
-                {"role": "system", "content": _CLASSIFY},
-                {"role": "user", "content": task},
-            ],
+            classification_messages(task),
             max_tokens=80,
         )
-        return (*_parse(completion.text), completion)
+        return (*parse_classification(completion.text), completion)
 
     def route(
         self,
@@ -73,7 +70,14 @@ class Router:
         return Route(alias=alias, phase=phase)
 
 
-def _parse(text: str) -> tuple[str, int]:
+def classification_messages(task: str) -> list[dict]:
+    return [
+        {"role": "system", "content": _CLASSIFY},
+        {"role": "user", "content": task},
+    ]
+
+
+def parse_classification(text: str) -> tuple[str, int]:
     try:
         data = json.loads(text)
         complexity = int(data.get("complexity", 2))

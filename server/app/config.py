@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -19,6 +21,11 @@ class Settings(BaseSettings):
         validation_alias="TRAJECTORY_HASH_PEPPER",
     )
     smtp_host: str = Field(default="", validation_alias="SMTP_HOST")
+    daily_limit_rub: Decimal = Field(default=Decimal("1000"), validation_alias="DAILY_LIMIT_RUB")
+    default_monthly_limit_rub: Decimal = Field(
+        default=Decimal("1000"),
+        validation_alias="DEFAULT_MONTHLY_LIMIT_RUB",
+    )
 
     def __repr__(self) -> str:
         return f"Settings(app_env={self.app_env!r}, port={self.port})"

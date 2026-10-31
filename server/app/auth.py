@@ -107,6 +107,7 @@ def verify_login_code(session: Session, email: str, code: str) -> User:
             consent_pdn=False,
             consent_training=False,
             is_admin=False,
+            monthly_limit_rub=get_settings().default_monthly_limit_rub,
             created_at=now,
         )
         session.add(user)

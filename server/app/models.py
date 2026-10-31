@@ -12,6 +12,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
     Uuid,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -29,6 +30,13 @@ class User(Base):
     consent_pdn: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     consent_training: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    monthly_limit_rub: Mapped[Decimal] = mapped_column(
+        Numeric(14, 6),
+        nullable=False,
+        default=Decimal("1000"),
+        server_default="1000",
+    )
+    weekly_limit_rub: Mapped[Decimal | None] = mapped_column(Numeric(14, 6), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     tasks: Mapped[list["Task"]] = relationship(back_populates="user")
@@ -132,3 +140,33 @@ class Trajectory(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     task: Mapped[Task] = relationship(back_populates="trajectory")
+
+
+class UsageLedger(Base):
+    """Actual model spend. A row is reserved until the call returns."""
+
+    __tablename__ = "usage_ledger"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False, index=True)
+    task_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("tasks.id"), nullable=True)
+    alias: Mapped[str] = mapped_column(String(64), nullable=False)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    amount_rub: Mapped[Decimal] = mapped_column(Numeric(14, 6), nullable=False)
+    reserved: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+
+class QuotaAlert(Base):
+    __tablename__ = "quota_alerts"
+    __table_args__ = (
+        UniqueConstraint("user_id", "window", "threshold", "period_key", name="uq_quota_alert"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False, index=True)
+    window: Mapped[str] = mapped_column(String(8), nullable=False)
+    threshold: Mapped[int] = mapped_column(Integer, nullable=False)
+    period_key: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
