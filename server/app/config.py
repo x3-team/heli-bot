@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
     app_env: str = Field(default="development", validation_alias="APP_ENV")
+    host: str = Field(default="0.0.0.0", validation_alias="HOST")
     port: int = Field(default=8000, validation_alias="PORT")
     database_url: str = Field(
         default="sqlite:///./var/heli.db",

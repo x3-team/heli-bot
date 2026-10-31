@@ -1,0 +1,21 @@
+# Install on the host by an administrator if user systemd (linger) is unavailable.
+# Does not modify Fili or Heli (getheli) services.
+
+[Unit]
+Description=Heli bot API (FastAPI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=helibot
+Group=helibot
+WorkingDirectory=/opt/heli-bot/server
+EnvironmentFile=-/opt/heli-bot/.env
+ExecStart=/opt/heli-bot/venv/bin/python -m app.main
+Restart=on-failure
+RestartSec=5
+Slice=helibot.slice
+
+[Install]
+WantedBy=multi-user.target
