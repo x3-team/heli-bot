@@ -20,8 +20,9 @@ pub fn screenshot_png_base64() -> Result<String, String> {
         encoder.set_color(ColorType::Rgba);
         encoder.set_depth(BitDepth::Eight);
         let mut writer = encoder.write_header().map_err(|err| err.to_string())?;
+        // screenshots 0.8 returns image::RgbaImage; ImageBuffer has no `rgba()` (E0599 on macOS CI).
         writer
-            .write_image_data(shot.as_raw())
+            .write_image_data(shot.as_raw().as_slice())
             .map_err(|err| err.to_string())?;
     }
     Ok(STANDARD.encode(buf))
