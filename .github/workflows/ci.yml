@@ -37,3 +37,11 @@ jobs:
         run: pnpm --filter @heli/ui test
       - name: Build web
         run: pnpm build:web
+
+  agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test local agent
+        run: cargo test --manifest-path crates/local-agent/Cargo.toml
