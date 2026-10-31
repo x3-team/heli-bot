@@ -455,7 +455,13 @@ function Chat({
 }
 
 function Computer({ apiBase, token, state }: { apiBase: string; token: string; state: MascotState }) {
-  const [browser, setBrowser] = useState<BrowserView>({ status: "stopped", novncUrl: null });
+  const [browser, setBrowser] = useState<BrowserView>({
+    status: "stopped",
+    mode: "cloud",
+    novncUrl: null,
+    localBrowser: null,
+    localPort: null,
+  });
   const [note, setNote] = useState("");
 
   useEffect(() => {
@@ -465,10 +471,20 @@ function Computer({ apiBase, token, state }: { apiBase: string; token: string; s
   async function toggle() {
     setNote("");
     try {
-      const next = browser.status === "running"
-        ? await stopBrowser(apiBase, token)
-        : await startBrowser(apiBase, token);
-      setBrowser(next);
+      if (browser.status === "running") {
+        setBrowser(await stopBrowser(apiBase, token));
+        return;
+      }
+      try {
+        setBrowser(await startBrowser(apiBase, token, true));
+      } catch (err) {
+        if (err instanceof ApiError && err.message === "Нужен локальный Chrome или Edge на этом компьютере.") {
+          setBrowser(await startBrowser(apiBase, token, false));
+          setNote("Запущен облачный браузер. В приложении предпочтителен ваш Chrome или Edge.");
+          return;
+        }
+        throw err;
+      }
     } catch (err) {
       setNote(err instanceof ApiError ? err.message : "Браузер на сервере сейчас недоступен.");
     }
@@ -483,6 +499,13 @@ function Computer({ apiBase, token, state }: { apiBase: string; token: string; s
       <div className="screen">
         <Mascot state={state} />
       </div>
+      {browser.status === "running" ? (
+        <p className="muted">
+          {browser.mode === "local"
+            ? `Локальный ${browser.localBrowser ?? "браузер"} · порт ${browser.localPort ?? "—"}`
+            : "Облачный браузер"}
+        </p>
+      ) : null}
       <div className="row">
         <button type="button" onClick={() => void toggle()}>
           {browser.status === "running" ? "Остановить браузер" : "Запустить браузер"}

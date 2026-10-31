@@ -24,6 +24,9 @@ const ERRORS: Record<string, string> = {
   browser_busy: "Свободных браузеров нет. Попробуйте позже.",
   vault_unavailable: "Хранилище доступов на сервере не настроено.",
   bad_schedule: "Нужна фраза «каждый понедельник в 9:00» или пять полей cron.",
+  local_browser_required: "Нужен локальный Chrome или Edge на этом компьютере.",
+  bad_browser: "Поддерживаются только Chrome и Edge.",
+  cloud_running: "Сначала остановите облачный браузер.",
 };
 
 export class ApiError extends Error {
@@ -143,7 +146,10 @@ export async function runTask(
 
 export interface BrowserView {
   status: "running" | "stopped";
+  mode: "local" | "cloud";
   novncUrl: string | null;
+  localBrowser: string | null;
+  localPort: number | null;
 }
 
 export async function loadBrowser(base: string, token: string): Promise<BrowserView> {
@@ -154,8 +160,27 @@ export async function loadBrowser(base: string, token: string): Promise<BrowserV
   return readBrowser(response);
 }
 
-export async function startBrowser(base: string, token: string): Promise<BrowserView> {
-  const response = await send(base, "/v1/browser/start", {
+export async function attachLocalBrowser(
+  base: string,
+  token: string,
+  browser: "chrome" | "edge",
+  port: number,
+): Promise<BrowserView> {
+  const response = await send(base, "/v1/browser/local/attach", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ browser, port }),
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+  return readBrowser(response);
+}
+
+export async function startBrowser(
+  base: string,
+  token: string,
+  preferLocal = true,
+): Promise<BrowserView> {
+  const response = await send(base, `/v1/browser/start?prefer_local=${preferLocal ? "true" : "false"}`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}` },
   });
@@ -259,9 +284,18 @@ export async function deleteCredential(base: string, token: string, id: string):
 }
 
 async function readBrowser(response: Response): Promise<BrowserView> {
-  const body = (await response.json()) as { status?: string; novnc_url?: string | null };
+  const body = (await response.json()) as {
+    status?: string;
+    mode?: string;
+    novnc_url?: string | null;
+    local_browser?: string | null;
+    local_port?: number | null;
+  };
   return {
     status: body.status === "running" ? "running" : "stopped",
+    mode: body.mode === "local" ? "local" : "cloud",
     novncUrl: body.novnc_url ?? null,
+    localBrowser: body.local_browser ?? null,
+    localPort: body.local_port ?? null,
   };
 }
