@@ -1,0 +1,13 @@
+{
+  "name": "heli-bot",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.33.4",
+  "scripts": {
+    "typecheck": "pnpm -r --if-present typecheck",
+    "build:web": "pnpm --filter @heli/web build"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  }
+}
