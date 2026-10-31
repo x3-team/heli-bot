@@ -23,6 +23,7 @@ const ERRORS: Record<string, string> = {
   browser_unavailable: "Браузер на сервере сейчас недоступен.",
   browser_busy: "Свободных браузеров нет. Попробуйте позже.",
   vault_unavailable: "Хранилище доступов на сервере не настроено.",
+  bad_schedule: "Нужна фраза «каждый понедельник в 9:00» или пять полей cron.",
   local_browser_required: "Нужен локальный Chrome или Edge на этом компьютере.",
   bad_browser: "Поддерживаются только Chrome и Edge.",
   cloud_running: "Сначала остановите облачный браузер.",
@@ -225,6 +226,53 @@ export async function saveCredential(
   });
   if (!response.ok) throw new ApiError(await readError(response));
   return (await response.json()) as CredentialItem;
+}
+
+export interface ScheduleItem {
+  id: string;
+  label: string;
+  expression: string;
+  enabled: boolean;
+  nextRun: string;
+  lastResult: string | null;
+  lastError: string | null;
+}
+
+export async function loadSchedules(base: string, token: string): Promise<ScheduleItem[]> {
+  const response = await send(base, "/v1/schedules", {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+  const body = (await response.json()) as { schedules?: Array<Record<string, unknown>> };
+  return (body.schedules ?? []).map(readSchedule);
+}
+
+export async function saveSchedule(
+  base: string,
+  token: string,
+  label: string,
+  expression: string,
+  request: string,
+): Promise<ScheduleItem> {
+  const response = await send(base, "/v1/schedules", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ label, expression, request }),
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+  return readSchedule((await response.json()) as Record<string, unknown>);
+}
+
+function readSchedule(body: Record<string, unknown>): ScheduleItem {
+  return {
+    id: String(body.id ?? ""),
+    label: String(body.label ?? ""),
+    expression: String(body.expression ?? ""),
+    enabled: Boolean(body.enabled),
+    nextRun: String(body.next_run ?? ""),
+    lastResult: body.last_result ? String(body.last_result) : null,
+    lastError: body.last_error ? String(body.last_error) : null,
+  };
 }
 
 export async function deleteCredential(base: string, token: string, id: string): Promise<void> {
