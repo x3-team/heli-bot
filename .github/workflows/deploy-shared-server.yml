@@ -76,15 +76,23 @@ jobs:
           username: ${{ secrets.HELI_DEPLOY_SSH_USER }}
           key: ${{ secrets.HELI_DEPLOY_SSH_PRIVATE_KEY }}
           port: ${{ secrets.HELI_DEPLOY_SSH_PORT || 22 }}
+          debug: true
           script_stop: true
           script: |
-            set -eu
+            set -euxo pipefail
+            exec 2>&1
             APP_DIR="${{ secrets.HELI_DEPLOY_APP_DIR }}"
             if [ -z "$APP_DIR" ]; then APP_DIR="/opt/heli-bot"; fi
             ENV_FILE="${{ secrets.HELI_DEPLOY_ENV_FILE }}"
             if [ -z "$ENV_FILE" ]; then ENV_FILE="$APP_DIR/.env"; fi
-            test -f "$ENV_FILE"
-            chmod +x "$APP_DIR/infra/deploy/remote-install.sh"
+            echo "[heli-deploy] APP_DIR=$APP_DIR ENV_FILE=$ENV_FILE"
+            if [ ! -f "$ENV_FILE" ]; then
+              echo "[heli-deploy] missing env file: $ENV_FILE" >&2
+              exit 1
+            fi
+            if [ ! -x "$APP_DIR/infra/deploy/remote-install.sh" ] && [ -f "$APP_DIR/infra/deploy/remote-install.sh" ]; then
+              chmod +x "$APP_DIR/infra/deploy/remote-install.sh"
+            fi
             if ! "$APP_DIR/infra/deploy/remote-install.sh" "$APP_DIR" "$ENV_FILE"; then
               status=$?
               if [ "$status" -eq 2 ]; then

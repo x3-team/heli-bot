@@ -39,6 +39,8 @@ Workflow: `.github/workflows/deploy-shared-server.yml`
 |---|---|
 | `HELI_PUBLIC_API_BASE` | Public HTTPS API origin for `VITE_HELI_API_BASE` in installers |
 
-Create `/opt/heli-bot/.env` from `env.venv.example` before the first deploy.
+Create `/opt/heli-bot/.env` from `env.venv.example` before the first deploy (deploy fails immediately if it is missing).
+
+If `python3 -m venv` fails (no `python3-venv` package), `remote-install.sh` bootstraps pip via `--without-pip` + get-pip.py (no root required).
 
 If **`systemctl --user`** fails (no linger), the job exits **2** and logs **`systemd-system/`** templates for an admin.
