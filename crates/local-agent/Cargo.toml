@@ -1,0 +1,14 @@
+[package]
+name = "local-agent"
+version = "0.1.0"
+edition = "2021"
+description = "Local computer actions with confirmation rules"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[features]
+default = []
+# Screen capture and input are OS-specific and stay off in CI.
+os = []
