@@ -8,7 +8,7 @@ on:
 
 jobs:
   server:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, beget-light]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -22,7 +22,7 @@ jobs:
         run: python -m pytest server/tests
 
   web:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, beget-light]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -42,12 +42,54 @@ jobs:
         run: pnpm build:web
 
   agent:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, beget-light]
+    needs: [server, web]
+    env:
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@v4
+      - name: Ensure C linker for Rust tests
+        run: |
+          if command -v cc >/dev/null 2>&1; then
+            exit 0
+          fi
+          if command -v gcc >/dev/null 2>&1; then
+            echo "CC=gcc" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          if [ "$(id -u)" -eq 0 ] && command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential
+            exit 0
+          fi
+          ver=0.13.0
+          arch=$(uname -m)
+          case "$arch" in
+            x86_64) zarch=x86_64 ;;
+            aarch64) zarch=aarch64 ;;
+            *) echo "unsupported runner arch: $arch" >&2; exit 1 ;;
+          esac
+          root="/tmp/zig-linux-${zarch}-${ver}"
+          if [ ! -x "$root/zig" ]; then
+            curl -fsSL "https://ziglang.org/download/${ver}/zig-linux-${zarch}-${ver}.tar.xz" \
+              | tar -xJ -C /tmp
+          fi
+          printf '%s\n' '#!/usr/bin/env bash' "exec \"$root/zig\" cc \"\$@\"" > /tmp/heli-zig-cc
+          printf '%s\n' '#!/usr/bin/env bash' "exec \"$root/zig\" c++ \"\$@\"" > /tmp/heli-zig-cxx
+          chmod +x /tmp/heli-zig-cc /tmp/heli-zig-cxx
+          echo "CC=/tmp/heli-zig-cc" >> "$GITHUB_ENV"
+          echo "CXX=/tmp/heli-zig-cxx" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.90.0
+      - name: Point Cargo at Zig linker (self-hosted fallback)
+        run: |
+          if [ ! -x /tmp/heli-zig-cc ]; then
+            exit 0
+          fi
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          mkdir -p .cargo
+          printf '%s\n' "[target.${host}]" 'linker = "/tmp/heli-zig-cc"' > .cargo/config.toml
       - name: Test local agent
         run: cargo test --manifest-path crates/local-agent/Cargo.toml
 
