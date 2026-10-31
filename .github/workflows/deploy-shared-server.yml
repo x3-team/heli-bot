@@ -17,6 +17,7 @@ jobs:
         run: |
           bash -n infra/deploy/remote-install.sh
           bash -n infra/deploy/write-env-if-missing.sh
+          bash -n infra/deploy/ensure-port-in-env.sh
           test -f infra/deploy/systemd-user/heli-bot-api.service
           test -f infra/deploy/systemd-system/heli-bot-api.service
 
@@ -94,6 +95,8 @@ jobs:
             echo "[heli-deploy] APP_DIR=$APP_DIR ENV_FILE=$ENV_FILE"
             chmod +x "$APP_DIR/infra/deploy/write-env-if-missing.sh" 2>/dev/null || true
             "$APP_DIR/infra/deploy/write-env-if-missing.sh" "$ENV_FILE" "$APP_DIR"
+            chmod +x "$APP_DIR/infra/deploy/ensure-port-in-env.sh" 2>/dev/null || true
+            "$APP_DIR/infra/deploy/ensure-port-in-env.sh" "$ENV_FILE" 8001
             if [ ! -f "$ENV_FILE" ]; then
               echo "[heli-deploy] env file still missing after bootstrap" >&2
               exit 1
@@ -110,3 +113,5 @@ jobs:
               fi
               exit "$status"
             fi
+            curl -fsS "http://127.0.0.1:8001/health" >/dev/null
+            echo "[heli-deploy] health OK at http://127.0.0.1:8001/health"

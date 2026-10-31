@@ -1,6 +1,6 @@
 # Reverse proxy (existing server)
 
-Heli bot does **not** open new host ports. The `api` service joins your existing reverse-proxy Docker network under the hostname **`heli-bot-api`** (port `8000` inside the network).
+Heli bot listens on **`127.0.0.1:8001`** only (user systemd). Point **`https://bot-api.getheli.ru`** (or your chosen subdomain) at that upstream — do not use port **8000** (used by other services on the shared host).
 
 Add a **new subdomain** in the proxy you already run (Caddy, nginx, Traefik, etc.). Example shapes only — use the subdomain and TLS settings Vitalii chooses:
 
@@ -8,7 +8,7 @@ Add a **new subdomain** in the proxy you already run (Caddy, nginx, Traefik, etc
 
 ```caddyfile
 # api.example.com {
-#   reverse_proxy heli-bot-api:8000
+#   reverse_proxy 127.0.0.1:8001
 # }
 ```
 
@@ -18,7 +18,7 @@ Add a **new subdomain** in the proxy you already run (Caddy, nginx, Traefik, etc
 # server {
 #   server_name api.example.com;
 #   location / {
-#     proxy_pass http://heli-bot-api:8000;
+#     proxy_pass http://127.0.0.1:8001;
 #     proxy_set_header Host $host;
 #     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 #     proxy_set_header X-Forwarded-Proto $scheme;

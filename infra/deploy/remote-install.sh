@@ -70,7 +70,7 @@ set -u
 
 export DATABASE_URL="${DATABASE_URL:-sqlite:///$APP_DIR/var/heli.db}"
 export HOST="${HOST:-127.0.0.1}"
-export PORT="${PORT:-8000}"
+export PORT="${PORT:-8001}"
 export APP_ENV="${APP_ENV:-production}"
 
 log "DATABASE_URL=$DATABASE_URL HOST=$HOST PORT=$PORT"
