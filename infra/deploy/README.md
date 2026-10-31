@@ -32,6 +32,9 @@ Workflow: `.github/workflows/deploy-shared-server.yml`
 | `HELI_DEPLOY_SSH_PORT` | Optional; default `22` |
 | `HELI_DEPLOY_APP_DIR` | Optional; default `/opt/heli-bot` |
 | `HELI_DEPLOY_ENV_FILE` | Optional; default `/opt/heli-bot/.env` |
+| `HELI_DEPLOY_JWT_SECRET` | JWT signing secret (bootstrap when `.env` is absent) |
+| `HELI_DEPLOY_TRAJECTORY_HASH_PEPPER` | Pepper for login codes and password hashing |
+| `HELI_API_KEY` | getheli upstream key (CI tests + `.env` bootstrap) |
 
 ### Repository variables (desktop CI)
 
@@ -39,7 +42,7 @@ Workflow: `.github/workflows/deploy-shared-server.yml`
 |---|---|
 | `HELI_PUBLIC_API_BASE` | Public HTTPS API origin for `VITE_HELI_API_BASE` in installers |
 
-Create `/opt/heli-bot/.env` from `env.venv.example` before the first deploy (deploy fails immediately if it is missing).
+If `/opt/heli-bot/.env` is missing, deploy runs `write-env-if-missing.sh` (mode **600**, never overwritten). Otherwise copy from `env.venv.example` manually.
 
 If `python3 -m venv` fails (no `python3-venv` package), `remote-install.sh` bootstraps pip via `--without-pip` + get-pip.py (no root required).
 
