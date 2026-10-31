@@ -29,7 +29,7 @@ Workflow: `.github/workflows/deploy-shared-server.yml`
 | `HELI_DEPLOY_SSH_PRIVATE_KEY` | Private key (PEM), no passphrase recommended for CI |
 | `HELI_DEPLOY_SSH_PORT` | Optional; default `22` if unset |
 | `HELI_DEPLOY_APP_DIR` | Remote directory for this project (e.g. `/opt/heli-bot`) |
-| `HELI_DEPLOY_ENV_FILE` | Remote path to the production `.env` file (use `<APP_DIR>/infra/deploy/.env` so the API container loads the same file) |
+| `HELI_DEPLOY_ENV_FILE` | Remote path to the production `.env` file passed to `docker compose --env-file` (same keys as `.env.example`) |
 
 Server-side `.env` is created on the host from `.env.example` (includes `HELI_PROXY_NETWORK`, `POSTGRES_PASSWORD`, `JWT_SECRET`, `HELI_API_KEY`, etc.). The workflow does **not** print env contents or keys.
 

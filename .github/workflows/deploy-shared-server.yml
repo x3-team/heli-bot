@@ -18,6 +18,7 @@ jobs:
         env:
           HELI_PROXY_NETWORK: ci-validate-placeholder
           POSTGRES_PASSWORD: ci-validate-placeholder
+          JWT_SECRET: ci-validate-placeholder
         run: docker compose -f infra/deploy/docker-compose.prod.yml config --quiet
 
   server-tests:

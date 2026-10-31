@@ -8,12 +8,19 @@ services:
     build:
       context: ../../server
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
       APP_ENV: production
       PORT: "8000"
       DATABASE_URL: postgresql+psycopg://heli:${POSTGRES_PASSWORD}@postgres:5432/heli
+      JWT_SECRET: ${JWT_SECRET}
+      TRAJECTORY_HASH_PEPPER: ${TRAJECTORY_HASH_PEPPER:-}
+      HELI_API_KEY: ${HELI_API_KEY:-}
+      HELI_BASE_URL: ${HELI_BASE_URL:-https://getheli.ru/v1}
+      VAULT_MASTER_KEY: ${VAULT_MASTER_KEY:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_OWNER_CHAT_ID: ${TELEGRAM_OWNER_CHAT_ID:-}
+      DAILY_LIMIT_RUB: ${DAILY_LIMIT_RUB:-1000}
+      DEFAULT_MONTHLY_LIMIT_RUB: ${DEFAULT_MONTHLY_LIMIT_RUB:-1000}
     depends_on:
       postgres:
         condition: service_healthy
