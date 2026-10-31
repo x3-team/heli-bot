@@ -11,6 +11,21 @@ export interface SessionUser {
   consentTraining: boolean;
 }
 
+export interface AuthResult {
+  accessToken: string;
+  trialActive: boolean;
+}
+
+export function parseAuthResponse(body: {
+  access_token: string;
+  trial_active?: boolean;
+}): AuthResult {
+  return {
+    accessToken: body.access_token,
+    trialActive: Boolean(body.trial_active),
+  };
+}
+
 import { readApiError } from "./errors";
 
 export class ApiError extends Error {
@@ -44,7 +59,7 @@ export async function registerAccount(
   password: string,
   consentPdn: boolean,
   consentTraining: boolean,
-): Promise<string> {
+): Promise<AuthResult> {
   const response = await send(base, "/v1/auth/register", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -56,19 +71,17 @@ export async function registerAccount(
     }),
   });
   if (!response.ok) throw new ApiError(await readError(response));
-  const body = (await response.json()) as { access_token: string };
-  return body.access_token;
+  return parseAuthResponse((await response.json()) as { access_token: string; trial_active?: boolean });
 }
 
-export async function loginPassword(base: string, email: string, password: string): Promise<string> {
+export async function loginPassword(base: string, email: string, password: string): Promise<AuthResult> {
   const response = await send(base, "/v1/auth/login", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ email, password }),
   });
   if (!response.ok) throw new ApiError(await readError(response));
-  const body = (await response.json()) as { access_token: string };
-  return body.access_token;
+  return parseAuthResponse((await response.json()) as { access_token: string; trial_active?: boolean });
 }
 
 export async function recoverRequest(base: string, email: string): Promise<void> {
@@ -85,26 +98,24 @@ export async function recoverReset(
   email: string,
   code: string,
   password: string,
-): Promise<string> {
+): Promise<AuthResult> {
   const response = await send(base, "/v1/auth/recover/reset", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ email, code, password }),
   });
   if (!response.ok) throw new ApiError(await readError(response));
-  const body = (await response.json()) as { access_token: string };
-  return body.access_token;
+  return parseAuthResponse((await response.json()) as { access_token: string; trial_active?: boolean });
 }
 
-export async function verifyCode(base: string, email: string, code: string): Promise<string> {
+export async function verifyCode(base: string, email: string, code: string): Promise<AuthResult> {
   const response = await send(base, "/v1/auth/verify", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ email, code }),
   });
   if (!response.ok) throw new ApiError(await readError(response));
-  const body = (await response.json()) as { access_token: string };
-  return body.access_token;
+  return parseAuthResponse((await response.json()) as { access_token: string; trial_active?: boolean });
 }
 
 export async function saveConsents(
