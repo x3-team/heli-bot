@@ -22,6 +22,7 @@ const ERRORS: Record<string, string> = {
   limit_reached: "Лимит исчерпан",
   browser_unavailable: "Браузер на сервере сейчас недоступен.",
   browser_busy: "Свободных браузеров нет. Попробуйте позже.",
+  vault_unavailable: "Хранилище доступов на сервере не настроено.",
 };
 
 export class ApiError extends Error {
@@ -168,6 +169,45 @@ export async function stopBrowser(base: string, token: string): Promise<BrowserV
   });
   if (!response.ok) throw new ApiError(await readError(response));
   return readBrowser(response);
+}
+
+export interface CredentialItem {
+  id: string;
+  site: string;
+  username: string;
+}
+
+export async function loadCredentials(base: string, token: string): Promise<CredentialItem[]> {
+  const response = await send(base, "/v1/credentials", {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+  const body = (await response.json()) as { credentials?: CredentialItem[] };
+  return body.credentials ?? [];
+}
+
+export async function saveCredential(
+  base: string,
+  token: string,
+  site: string,
+  username: string,
+  secret: string,
+): Promise<CredentialItem> {
+  const response = await send(base, "/v1/credentials", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ site, username, secret }),
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+  return (await response.json()) as CredentialItem;
+}
+
+export async function deleteCredential(base: string, token: string, id: string): Promise<void> {
+  const response = await send(base, `/v1/credentials/${id}`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
 }
 
 async function readBrowser(response: Response): Promise<BrowserView> {
