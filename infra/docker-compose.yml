@@ -1,0 +1,64 @@
+services:
+  api:
+    build:
+      context: ../server
+    environment:
+      APP_ENV: development
+      PORT: "8000"
+      DATABASE_URL: postgresql+psycopg://heli:heli@postgres:5432/heli
+      REDIS_URL: redis://redis:6379/0
+      HELI_BASE_URL: ${HELI_BASE_URL:-https://getheli.ru/v1}
+      HELI_API_KEY: ${HELI_API_KEY:-}
+      JWT_SECRET: ${JWT_SECRET:-}
+      VAULT_MASTER_KEY: ${VAULT_MASTER_KEY:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_OWNER_CHAT_ID: ${TELEGRAM_OWNER_CHAT_ID:-}
+      DAILY_LIMIT_RUB: ${DAILY_LIMIT_RUB:-1000}
+      DEFAULT_MONTHLY_LIMIT_RUB: ${DEFAULT_MONTHLY_LIMIT_RUB:-1000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    ports:
+      - "8000:8000"
+    networks:
+      - heli
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: heli
+      POSTGRES_PASSWORD: heli
+      POSTGRES_DB: heli
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U heli -d heli"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - heli
+
+  redis:
+    image: redis:7-alpine
+    networks:
+      - heli
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - api
+    networks:
+      - heli
+
+networks:
+  heli:
+
+volumes:
+  pgdata:
