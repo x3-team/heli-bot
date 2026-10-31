@@ -65,6 +65,24 @@ def test_weekly_limit_is_monthly_over_four_times_1_25(session) -> None:
     assert weekly_limit_of(user) == Decimal("312.500000")
 
 
+def test_task_estimate_returns_reserve(client, session) -> None:
+    invite = create_invite(session)
+    session.commit()
+    issued = client.post("/v1/auth/request-code", json={"email": "est@example.com", "invite_code": invite})
+    code = client.app.state.mail_sink[-1]
+    token = client.post("/v1/auth/verify", json={"email": "est@example.com", "code": code}).json()["access_token"]
+    response = client.post(
+        "/v1/tasks/estimate",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"request": "Собери отчёт за неделю", "context": {}},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert "reserve_rub" in body
+    assert float(body["reserve_rub"]) > 0
+    assert "note" in body
+
+
 def test_warns_at_80_and_stops_at_100(session) -> None:
     user = _user(session)
     record_charge(session, user, Decimal("250"))

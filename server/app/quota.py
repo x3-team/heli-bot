@@ -118,6 +118,23 @@ def estimate_input_tokens(messages: list[dict]) -> int:
     return max(1, chars // 4)
 
 
+def estimate_turn_reserve(request: str) -> Decimal:
+    """Worst-case reserve for one classify + answer pass (matches run_turn metering)."""
+    from app.llm.router import classification_messages
+
+    classify = cost_rub(
+        "heli-fast",
+        estimate_input_tokens(classification_messages(request)),
+        80,
+    )
+    answer = cost_rub(
+        "heli-fast",
+        estimate_input_tokens([{"role": "user", "content": request}]),
+        256,
+    )
+    return classify + answer
+
+
 def metered_complete(
     session: Session,
     user: User,

@@ -192,6 +192,25 @@ export interface TaskRunResult {
   reply: string;
 }
 
+export interface TaskCostEstimate {
+  reserveRub: string;
+  note: string;
+}
+
+export async function estimateTask(base: string, token: string, text: string): Promise<TaskCostEstimate> {
+  const response = await send(base, "/v1/tasks/estimate", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ request: text, context: {} }),
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+  const body = (await response.json()) as { reserve_rub?: string; note?: string };
+  return {
+    reserveRub: body.reserve_rub ?? "0",
+    note: body.note ?? "",
+  };
+}
+
 export async function runTask(
   base: string,
   token: string,

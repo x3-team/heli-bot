@@ -45,7 +45,7 @@ from app.models import TaskStep, User
 from app.llm.client import HeliClient, HeliError
 from app.llm.run import run_turn
 from app.memory import MemoryError, delete_memory, list_memory, remember
-from app.quota import QuotaError, public_usage, snapshot
+from app.quota import QuotaError, estimate_turn_reserve, public_usage, snapshot
 from app.schedules import ScheduleError, create_schedule, delete_schedule, list_schedules, run_due
 from app.support import SupportError, create_incident
 from app.trajectories import (
@@ -316,6 +316,15 @@ def delete_trajectories(
 ) -> dict:
     removed = delete_my_trajectories(session, user)
     return {"deleted": removed}
+
+
+@router.post("/tasks/estimate")
+def estimate_task(body: TaskBody, user: User = Depends(get_current_user)) -> dict:
+    reserve = estimate_turn_reserve(body.request)
+    return {
+        "reserve_rub": format(reserve, "f"),
+        "note": "Оценка максимума за один шаг (классификация и ответ).",
+    }
 
 
 @router.post("/tasks", status_code=201)

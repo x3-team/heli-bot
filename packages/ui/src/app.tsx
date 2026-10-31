@@ -14,6 +14,7 @@ import {
   recoverReset,
   registerAccount,
   requestCode,
+  estimateTask,
   finishTask,
   runTask,
   saveConsents,
@@ -331,6 +332,7 @@ function Workspace({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [abort, setAbort] = useState<AbortController | null>(null);
+  const [costHint, setCostHint] = useState<string | null>(null);
   const [feedbackTask, setFeedbackTask] = useState<{ taskId: string; reply: string } | null>(null);
   const [consents, setConsents] = useState({ pdn: true, training: false });
 
@@ -343,6 +345,24 @@ function Workspace({
       .then((me) => setConsents({ pdn: me.consentPdn, training: me.consentTraining }))
       .catch(() => undefined);
   }, [apiBase, token]);
+
+  useEffect(() => {
+    const text = draft.trim();
+    if (!text || busy || stopped) {
+      setCostHint(null);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void estimateTask(apiBase, token, text)
+        .then((estimate) => {
+          const rub = Number.parseFloat(estimate.reserveRub);
+          const label = Number.isFinite(rub) ? rub.toFixed(2) : estimate.reserveRub;
+          setCostHint(`До ~${label} ₽ за шаг · ${estimate.note}`);
+        })
+        .catch(() => setCostHint(null));
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [apiBase, token, draft, busy, stopped]);
 
   function newThread() {
     const thread: Thread = { id: crypto.randomUUID(), title: "Новая задача", messages: [] };
@@ -497,6 +517,10 @@ function Workspace({
                 setError(err instanceof ApiError ? err.message : "Не получилось сохранить отзыв.");
               }
             }}
+            costHint={costHint}
+            onPause={() => {
+              void handControlBack();
+            }}
             onStop={() => {
               void handControlBack();
               abort?.abort();
@@ -538,7 +562,9 @@ function Chat({
   onApprove,
   onEdit,
   onReject,
+  onPause,
   onStop,
+  costHint,
   feedback,
   onFeedback,
 }: {
@@ -548,12 +574,14 @@ function Chat({
   stopped: boolean;
   error: string;
   pending: string | null;
+  costHint: string | null;
   feedback: { taskId: string; reply: string } | null;
   onDraft: (value: string) => void;
   onSubmit: () => void;
   onApprove: () => void;
   onEdit: () => void;
   onReject: () => void;
+  onPause: () => void;
   onStop: () => void;
   onFeedback: (worked: boolean, comment: string) => Promise<void>;
 }) {
@@ -605,6 +633,7 @@ function Chat({
           </article>
         ) : null}
         {error ? <p className="error">{error}</p> : null}
+        {costHint && !busy ? <p className="muted">{costHint}</p> : null}
       </div>
       <form
         className="composer"
@@ -626,7 +655,10 @@ function Chat({
           }}
         />
         {busy ? (
-          <button type="button" onClick={onStop}>Стоп / пауза</button>
+          <div className="row">
+            <button type="button" onClick={onPause}>Пауза</button>
+            <button type="button" data-emphasis="danger" onClick={onStop}>Стоп</button>
+          </div>
         ) : (
           <button type="submit" data-emphasis="primary" disabled={stopped || !draft.trim()}>
             Отправить
