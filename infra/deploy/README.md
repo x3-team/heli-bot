@@ -20,6 +20,12 @@ Workflow: `.github/workflows/deploy-shared-server.yml`
 - **Pull requests:** validate Compose and run server tests.
 - **Manual deploy:** `workflow_dispatch` only (after secrets exist), SSH sync + `docker compose up --build`.
 
+### Repository variables (desktop CI)
+
+| Variable | Purpose |
+|---|---|
+| `HELI_PUBLIC_API_BASE` | Public HTTPS origin for the Heli API (no trailing slash), baked into the Windows/macOS installer as `VITE_HELI_API_BASE`. Example: `https://your-subdomain.example.com` |
+
 ### Repository secrets (coordinator / Vitalii — values not in repo)
 
 | Secret | Purpose |
