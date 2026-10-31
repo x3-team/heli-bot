@@ -40,7 +40,9 @@ Workflow: `.github/workflows/deploy-shared-server.yml`
 
 | Variable | Purpose |
 |---|---|
-| `HELI_PUBLIC_API_BASE` | Public HTTPS API origin for `VITE_HELI_API_BASE` in installers |
+| `HELI_PUBLIC_API_BASE` | Public HTTPS API origin for installers (default **`https://bot-api.getheli.ru`**) |
+
+API listens on **`127.0.0.1:8001`**; reverse-proxy that hostname to the host loopback port (not **8000**).
 
 If `/opt/heli-bot/.env` is missing, deploy runs `write-env-if-missing.sh` (mode **600**, never overwritten). Otherwise copy from `env.venv.example` manually.
 
