@@ -70,9 +70,12 @@ impl Action {
 
 pub fn risk_of(tool: &str) -> Risk {
     match tool {
-        "screenshot" | "read_file" | "list_dir" => Risk::Read,
-        "write_file" | "open_app" | "move_file" => Risk::Write,
-        "delete_file" | "run_command" | "send_mail" | "pay" => Risk::Danger,
+        "screenshot" | "read_file" | "list_dir" | "wait" => Risk::Read,
+        "write_file" | "open_app" | "move_file" | "click" | "type" | "browser_click" | "browser_type" => {
+            Risk::Write
+        }
+        "browser_navigate" => Risk::Read,
+        "delete_file" | "run_command" | "send_mail" | "pay" | "confirm" => Risk::Danger,
         _ => Risk::Danger,
     }
 }
@@ -102,6 +105,9 @@ pub fn decide(policy: &Policy, action: &Action) -> Decision {
         Risk::Danger => Decision::Confirm,
     }
 }
+
+#[cfg(feature = "os")]
+pub mod computer;
 
 fn path_allowed(allow: &[String], raw: &str) -> bool {
     let path = Path::new(raw);
