@@ -213,6 +213,38 @@ export interface ScheduleItem {
   lastError: string | null;
 }
 
+export interface MemoryItem {
+  id: string;
+  text: string;
+}
+
+export async function loadMemory(base: string, token: string): Promise<MemoryItem[]> {
+  const response = await send(base, "/v1/memory", {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+  const body = (await response.json()) as { facts?: MemoryItem[] };
+  return body.facts ?? [];
+}
+
+export async function saveMemory(base: string, token: string, text: string): Promise<MemoryItem> {
+  const response = await send(base, "/v1/memory", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ text }),
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+  return (await response.json()) as MemoryItem;
+}
+
+export async function deleteMemory(base: string, token: string, id: string): Promise<void> {
+  const response = await send(base, `/v1/memory/${id}`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+}
+
 export async function loadSchedules(base: string, token: string): Promise<ScheduleItem[]> {
   const response = await send(base, "/v1/schedules", {
     headers: { authorization: `Bearer ${token}` },

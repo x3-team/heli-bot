@@ -2,14 +2,17 @@ import { useEffect, useMemo, useState } from "react";
 import {
   ApiError,
   deleteCredential,
+  deleteMemory,
   loadBrowser,
   loadCredentials,
   loadMe,
+  loadMemory,
   loadSchedules,
   loadUsage,
   requestCode,
   runTask,
   saveConsents,
+  saveMemory,
   saveCredential,
   saveSchedule,
   startBrowser,
@@ -17,13 +20,14 @@ import {
   verifyCode,
   type BrowserView,
   type CredentialItem,
+  type MemoryItem,
   type ScheduleItem,
   type Usage,
 } from "./api";
 import { clampPercent, confirmationNeeded, limitTone } from "./behavior";
 import { Mascot, avatarFor, mascotLabel, type MascotState } from "./mascot";
 
-type View = "chat" | "limits" | "schedules" | "settings";
+type View = "chat" | "limits" | "schedules" | "memory" | "settings";
 type Theme = "light" | "dark";
 
 interface Message {
@@ -315,6 +319,9 @@ function Workspace({
           <button type="button" aria-current={view === "schedules" ? "page" : undefined} onClick={() => setView("schedules")}>
             Расписания
           </button>
+          <button type="button" aria-current={view === "memory" ? "page" : undefined} onClick={() => setView("memory")}>
+            Память
+          </button>
           <button type="button" aria-current={view === "settings" ? "page" : undefined} onClick={() => setView("settings")}>
             Настройки
           </button>
@@ -347,6 +354,7 @@ function Workspace({
         ) : null}
         {view === "limits" ? <Limits usage={usage} /> : null}
         {view === "schedules" ? <Schedules apiBase={apiBase} token={token} /> : null}
+        {view === "memory" ? <Memory apiBase={apiBase} token={token} /> : null}
         {view === "settings" ? (
           <Settings
             apiBase={apiBase}
@@ -531,6 +539,58 @@ function Meter({ label, percent, tone }: { label: string; percent: number; tone:
       <div className={`bar ${tone}`} aria-hidden="true">
         <span style={{ width: `${percent}%` }} />
       </div>
+    </div>
+  );
+}
+
+function Memory({ apiBase, token }: { apiBase: string; token: string }) {
+  const [facts, setFacts] = useState<MemoryItem[]>([]);
+  const [text, setText] = useState("");
+  const [note, setNote] = useState("");
+
+  useEffect(() => {
+    void loadMemory(apiBase, token).then(setFacts).catch(() => undefined);
+  }, [apiBase, token]);
+
+  return (
+    <div className="page">
+      <h1>Память</h1>
+      <p className="muted">Факты подставляются в задачу. Их можно удалить.</p>
+      <form
+        className="stack"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const next = text.trim();
+          if (!next) return;
+          setText("");
+          void saveMemory(apiBase, token, next)
+            .then((fact) => setFacts((list) => [...list, fact]))
+            .catch((err: unknown) => {
+              setNote(err instanceof ApiError ? err.message : "Не получилось сохранить.");
+            });
+        }}
+      >
+        <textarea aria-label="Факт" placeholder="Факт о компании" value={text} onChange={(event) => setText(event.target.value)} />
+        <button type="submit" data-emphasis="primary">Запомнить</button>
+      </form>
+      {note ? <p className="error">{note}</p> : null}
+      <ul>
+        {facts.map((fact) => (
+          <li key={fact.id}>
+            {fact.text}
+            <button
+              type="button"
+              onClick={() => {
+                void deleteMemory(apiBase, token, fact.id).then(() => {
+                  setFacts((list) => list.filter((item) => item.id !== fact.id));
+                }).catch(() => undefined);
+              }}
+            >
+              Удалить
+            </button>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

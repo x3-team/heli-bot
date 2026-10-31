@@ -24,6 +24,7 @@ from app.db import get_db
 from app.models import TaskStep, User
 from app.llm.client import HeliClient, HeliError
 from app.llm.run import run_turn
+from app.memory import MemoryError, delete_memory, list_memory, remember
 from app.quota import QuotaError, public_usage, snapshot
 from app.schedules import ScheduleError, create_schedule, delete_schedule, list_schedules, run_due
 from app.trajectories import (
@@ -356,6 +357,44 @@ def credentials_fill(
     except VaultError as exc:
         _vault_fail(exc)
     return {"placeholder": placeholder}
+
+
+class MemoryBody(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+
+
+@router.get("/memory")
+def memory_list(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    return {"facts": list_memory(session, user)}
+
+
+@router.post("/memory", status_code=201)
+def memory_create(
+    body: MemoryBody,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    try:
+        row = remember(session, user, body.text)
+    except MemoryError as exc:
+        raise HTTPException(status_code=400, detail=exc.code) from None
+    return {"id": str(row.id), "text": row.text}
+
+
+@router.delete("/memory/{fact_id}")
+def memory_delete(
+    fact_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    try:
+        delete_memory(session, user, fact_id)
+    except MemoryError as exc:
+        raise HTTPException(status_code=404, detail=exc.code) from None
+    return {"deleted": True}
 
 
 class ScheduleBody(BaseModel):
