@@ -78,3 +78,18 @@ class HeliClient:
             output_tokens=output_tokens,
             cost_rub=cost_rub(alias, input_tokens, output_tokens),
         )
+
+    def embed(self, text: str) -> list[float]:
+        try:
+            model = upstream("heli-embed")
+        except CatalogError as exc:
+            raise HeliError(exc.code) from None
+        try:
+            response = self._client.embeddings.create(model=model, input=text)
+        except Exception:
+            log.info("embedding request failed")
+            raise HeliError("request_failed") from None
+        data = getattr(response, "data", None) or []
+        if not data:
+            raise HeliError("request_failed")
+        return [float(value) for value in data[0].embedding]

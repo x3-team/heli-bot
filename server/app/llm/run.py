@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.llm.client import HeliClient
 from app.llm.router import Router, classification_messages, parse_classification
+from app.memory import relevant, with_memory
 from app.models import Task, User
 from app.quota import metered_complete, remaining_ratio, snapshot
 from app.trajectories import add_step
@@ -30,13 +31,14 @@ class Turn:
 
 
 def run_turn(session: Session, user: User, task: Task, client: HeliClient) -> Turn:
+    prompt = with_memory(task.request_text, relevant(session, user, task.request_text))
     classified = metered_complete(
         session,
         user,
         task.id,
         client,
         "heli-fast",
-        classification_messages(task.request_text),
+        classification_messages(prompt),
         max_tokens=80,
     )
     task_type, complexity = parse_classification(classified.text)
@@ -63,7 +65,7 @@ def run_turn(session: Session, user: User, task: Task, client: HeliClient) -> Tu
         route.alias,
         [
             {"role": "system", "content": _ANSWER},
-            {"role": "user", "content": task.request_text},
+            {"role": "user", "content": prompt},
         ],
         max_tokens=_ANSWER_MAX_TOKENS,
     )
