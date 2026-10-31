@@ -8,7 +8,11 @@
     "./tokens.css": "./src/tokens.css"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test src/behavior.test.ts"
+  },
+  "dependencies": {
+    "@fontsource/onest": "^5.2.8"
   },
   "peerDependencies": {
     "react": "^19.0.0",

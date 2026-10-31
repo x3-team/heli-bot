@@ -5,7 +5,13 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   clearScreen: false,
-  server: { host: "127.0.0.1", port: 1420, strictPort: true },
+  server: {
+    host: "127.0.0.1",
+    port: 1420,
+    strictPort: true,
+    fs: { allow: [path.resolve(__dirname, "../..")] },
+    proxy: { "/v1": "http://127.0.0.1:8000" },
+  },
   resolve: {
     alias: [
       {

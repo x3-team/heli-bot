@@ -1,4 +1,6 @@
-export { Shell, MascotSlot } from "./shell";
+export { Shell } from "./app";
+export { Mascot, mascotLabel, type MascotState } from "./mascot";
+export { clampPercent, confirmationNeeded, limitTone } from "./behavior";
 export type {
   AppView,
   ChatMessage,
@@ -6,7 +8,6 @@ export type {
   ConfirmDecision,
   ConfirmationView,
   CredentialView,
-  MascotState,
   MemoryView,
   Risk,
   ScheduleView,

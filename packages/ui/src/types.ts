@@ -1,12 +1,3 @@
-export type MascotState =
-  | "idle"
-  | "thinking"
-  | "working"
-  | "needs-help"
-  | "done"
-  | "error"
-  | "limit";
-
 export type AppView =
   | "chat"
   | "usage"
