@@ -74,12 +74,22 @@ jobs:
             curl -fsSL "https://ziglang.org/download/${ver}/zig-linux-${zarch}-${ver}.tar.xz" \
               | tar -xJ -C /tmp
           fi
-          echo "CC=$root/zig cc" >> "$GITHUB_ENV"
-          echo "CXX=$root/zig c++" >> "$GITHUB_ENV"
-          echo "AR=$root/zig ar" >> "$GITHUB_ENV"
+          printf '%s\n' '#!/usr/bin/env bash' "exec \"$root/zig\" cc \"\$@\"" > /tmp/heli-zig-cc
+          printf '%s\n' '#!/usr/bin/env bash' "exec \"$root/zig\" c++ \"\$@\"" > /tmp/heli-zig-cxx
+          chmod +x /tmp/heli-zig-cc /tmp/heli-zig-cxx
+          echo "CC=/tmp/heli-zig-cc" >> "$GITHUB_ENV"
+          echo "CXX=/tmp/heli-zig-cxx" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.90.0
+      - name: Point Cargo at Zig linker (self-hosted fallback)
+        run: |
+          if [ ! -x /tmp/heli-zig-cc ]; then
+            exit 0
+          fi
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          mkdir -p .cargo
+          printf '%s\n' "[target.${host}]" 'linker = "/tmp/heli-zig-cc"' > .cargo/config.toml
       - name: Test local agent
         run: cargo test --manifest-path crates/local-agent/Cargo.toml
 
