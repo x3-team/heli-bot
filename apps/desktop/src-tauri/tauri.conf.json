@@ -30,12 +30,16 @@
       "endpoints": [
         "https://github.com/x3-team/heli-bot/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDBFNTI2MzMwRTkzMEJDNTMKUldSVHZERHBNR05TRHZxRC9PQ0RlWXFIL0VmSHdEZUZsY204a2tiLzRYYjFaYjJrS00xS3JvenkK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlGMzUyMjUzODMyQjBFRUEKUldUcURpdURVeUkxbjd1NW9DallBV0ZjczNXSThDZk5lTm1hdzB0bkN5OVFNZFVRYjZoSDhJSXIK"
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "app", "dmg"],
+    "targets": [
+      "nsis",
+      "app",
+      "dmg"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
