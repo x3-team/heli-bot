@@ -13,6 +13,8 @@ from app.auth import AuthError, issue_login_code, issue_token, read_user_id, ver
 from app.config import get_settings
 from app.db import get_db
 from app.models import User
+from app.llm.client import HeliClient, HeliError
+from app.llm.run import run_turn
 from app.trajectories import (
     TrajectoryError,
     add_step,
@@ -51,6 +53,14 @@ _STATUS = {
 def _fail(exc: AuthError | TrajectoryError) -> None:
     status = _STATUS.get(exc.code, 400)
     raise HTTPException(status_code=status, detail=exc.code)
+
+
+def get_heli_client() -> HeliClient:
+    try:
+        return HeliClient.from_env()
+    except HeliError as exc:
+        status = 503 if exc.code == "missing_api_key" else 502
+        raise HTTPException(status_code=status, detail=exc.code) from None
 
 
 def get_current_user(
@@ -236,6 +246,31 @@ def create_step(
     except TrajectoryError as exc:
         _fail(exc)
     return {"id": str(step.id), "position": step.position, "model": step.model_alias}
+
+
+@router.post("/tasks/{task_id}/run")
+def run(
+    task_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+    client: HeliClient = Depends(get_heli_client),
+) -> dict:
+    from app.trajectories import _own_task
+
+    try:
+        task = _own_task(session, user, task_id)
+        turn = run_turn(session, user, task, client)
+    except TrajectoryError as exc:
+        _fail(exc)
+    except HeliError as exc:
+        status = 503 if exc.code == "missing_api_key" else 502
+        raise HTTPException(status_code=status, detail=exc.code) from None
+    return {
+        "alias": turn.alias,
+        "reply": turn.text,
+        "task_type": turn.task_type,
+        "complexity": turn.complexity,
+    }
 
 
 @router.post("/tasks/{task_id}/finish")
