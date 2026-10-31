@@ -16,6 +16,7 @@ from app.config import get_settings
 from app.llm.client import Completion, HeliClient
 from app.llm.prices import cost_rub
 from app.models import QuotaAlert, UsageLedger, User
+from app.notify import notify
 
 log = logging.getLogger(__name__)
 
@@ -208,6 +209,8 @@ def record_alerts(session: Session, user: User, now: datetime | None = None) -> 
                 )
             )
             log.info("quota alert window=%s threshold=%s", window, threshold)
+            label = "недели" if window == "week" else "месяца"
+            notify(f"Лимит {label} достиг {threshold}%.")
     session.flush()
 
 
