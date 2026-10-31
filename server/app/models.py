@@ -170,3 +170,19 @@ class QuotaAlert(Base):
     threshold: Mapped[int] = mapped_column(Integer, nullable=False)
     period_key: Mapped[str] = mapped_column(String(16), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class BrowserSlot(Base):
+    """One cloud browser per user. The profile volume outlives the container."""
+
+    __tablename__ = "browser_slots"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), primary_key=True)
+    container_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    novnc_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    mode: Mapped[str] = mapped_column(String(8), nullable=False, default="cloud")
+    local_browser: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    local_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="stopped")
+    last_activity: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

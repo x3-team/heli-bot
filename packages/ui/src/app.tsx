@@ -1,12 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   ApiError,
+  loadBrowser,
   loadMe,
   loadUsage,
   requestCode,
   runTask,
   saveConsents,
+  startBrowser,
+  stopBrowser,
   verifyCode,
+  type BrowserView,
   type Usage,
 } from "./api";
 import { clampPercent, confirmationNeeded, limitTone } from "./behavior";
@@ -345,7 +349,7 @@ function Workspace({
           />
         ) : null}
       </section>
-      <Computer state={stopped ? "waiting" : mascot} />
+      <Computer apiBase={apiBase} token={token} state={stopped ? "waiting" : mascot} />
     </div>
   );
 }
@@ -437,7 +441,42 @@ function Chat({
   );
 }
 
-function Computer({ state }: { state: MascotState }) {
+function Computer({ apiBase, token, state }: { apiBase: string; token: string; state: MascotState }) {
+  const [browser, setBrowser] = useState<BrowserView>({
+    status: "stopped",
+    mode: "cloud",
+    novncUrl: null,
+    localBrowser: null,
+    localPort: null,
+  });
+  const [note, setNote] = useState("");
+
+  useEffect(() => {
+    void loadBrowser(apiBase, token).then(setBrowser).catch(() => undefined);
+  }, [apiBase, token]);
+
+  async function toggle() {
+    setNote("");
+    try {
+      if (browser.status === "running") {
+        setBrowser(await stopBrowser(apiBase, token));
+        return;
+      }
+      try {
+        setBrowser(await startBrowser(apiBase, token, true));
+      } catch (err) {
+        if (err instanceof ApiError && err.message === "Нужен локальный Chrome или Edge на этом компьютере.") {
+          setBrowser(await startBrowser(apiBase, token, false));
+          setNote("Запущен облачный браузер. В приложении предпочтителен ваш Chrome или Edge.");
+          return;
+        }
+        throw err;
+      }
+    } catch (err) {
+      setNote(err instanceof ApiError ? err.message : "Браузер на сервере сейчас недоступен.");
+    }
+  }
+
   return (
     <aside className="computer">
       <div className="status">
@@ -447,6 +486,22 @@ function Computer({ state }: { state: MascotState }) {
       <div className="screen">
         <Mascot state={state} />
       </div>
+      {browser.status === "running" ? (
+        <p className="muted">
+          {browser.mode === "local"
+            ? `Локальный ${browser.localBrowser ?? "браузер"} · порт ${browser.localPort ?? "—"}`
+            : "Облачный браузер"}
+        </p>
+      ) : null}
+      <div className="row">
+        <button type="button" onClick={() => void toggle()}>
+          {browser.status === "running" ? "Остановить браузер" : "Запустить браузер"}
+        </button>
+        {browser.novncUrl ? (
+          <a href={browser.novncUrl} target="_blank" rel="noreferrer">Смотреть</a>
+        ) : null}
+      </div>
+      {note ? <p className="error">{note}</p> : null}
     </aside>
   );
 }

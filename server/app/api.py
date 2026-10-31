@@ -10,6 +10,15 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.auth import AuthError, issue_login_code, issue_token, read_user_id, verify_login_code
+from app.browser import (
+    BrowserError,
+    attach_local,
+    detach_local,
+    get_browser_driver,
+    pool_start,
+    pool_status,
+    pool_stop,
+)
 from app.config import get_settings
 from app.db import get_db
 from app.models import TaskStep, User
@@ -49,6 +58,10 @@ _STATUS = {
     "bad_acceptance": 400,
     "bad_screenshot": 400,
     "limit_reached": 403,
+    "local_browser_required": 409,
+    "bad_browser": 400,
+    "bad_port": 400,
+    "cloud_running": 409,
 }
 
 
@@ -253,6 +266,68 @@ def create_step(
 class LimitBody(BaseModel):
     monthly_limit_rub: Decimal = Field(gt=0, le=Decimal("1000000"))
     weekly_limit_rub: Decimal | None = Field(default=None, gt=0, le=Decimal("1000000"))
+
+
+@router.get("/browser")
+def browser_status(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+    driver=Depends(get_browser_driver),
+) -> dict:
+    return pool_status(session, user.id, driver)
+
+
+class LocalBrowserBody(BaseModel):
+    browser: str = Field(min_length=1, max_length=16)
+    port: int = Field(ge=1, le=65535)
+
+
+@router.post("/browser/local/attach")
+def browser_local_attach(
+    body: LocalBrowserBody,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    try:
+        return attach_local(session, user.id, body.browser.strip().lower(), body.port)
+    except BrowserError as exc:
+        status = _STATUS.get(exc.code, 409)
+        raise HTTPException(status_code=status, detail=exc.code) from None
+
+
+@router.post("/browser/local/detach")
+def browser_local_detach(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    return detach_local(session, user.id)
+
+
+@router.post("/browser/start")
+def browser_start(
+    prefer_local: bool = True,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+    driver=Depends(get_browser_driver),
+) -> dict:
+    try:
+        return pool_start(session, user.id, driver, prefer_local=prefer_local)
+    except BrowserError as exc:
+        status = _STATUS.get(exc.code, 503 if exc.code == "browser_unavailable" else 409)
+        raise HTTPException(status_code=status, detail=exc.code) from None
+
+
+@router.post("/browser/stop")
+def browser_stop(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+    driver=Depends(get_browser_driver),
+) -> dict:
+    try:
+        return pool_stop(session, user.id, driver)
+    except BrowserError as exc:
+        status = 503 if exc.code == "browser_unavailable" else 409
+        raise HTTPException(status_code=status, detail=exc.code) from None
 
 
 @router.get("/usage")

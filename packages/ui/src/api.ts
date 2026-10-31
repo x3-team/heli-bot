@@ -20,6 +20,11 @@ const ERRORS: Record<string, string> = {
   request_failed: "Модель не ответила. Попробуйте ещё раз.",
   unknown_alias: "Сервер не принял шаг.",
   limit_reached: "Лимит исчерпан",
+  browser_unavailable: "Браузер на сервере сейчас недоступен.",
+  browser_busy: "Свободных браузеров нет. Попробуйте позже.",
+  local_browser_required: "Нужен локальный Chrome или Edge на этом компьютере.",
+  bad_browser: "Поддерживаются только Chrome и Edge.",
+  cloud_running: "Сначала остановите облачный браузер.",
 };
 
 export class ApiError extends Error {
@@ -135,4 +140,74 @@ export async function runTask(
     signal,
   });
   return body.reply ?? "";
+}
+
+export interface BrowserView {
+  status: "running" | "stopped";
+  mode: "local" | "cloud";
+  novncUrl: string | null;
+  localBrowser: string | null;
+  localPort: number | null;
+}
+
+export async function loadBrowser(base: string, token: string): Promise<BrowserView> {
+  const response = await send(base, "/v1/browser", {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+  return readBrowser(response);
+}
+
+export async function attachLocalBrowser(
+  base: string,
+  token: string,
+  browser: "chrome" | "edge",
+  port: number,
+): Promise<BrowserView> {
+  const response = await send(base, "/v1/browser/local/attach", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ browser, port }),
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+  return readBrowser(response);
+}
+
+export async function startBrowser(
+  base: string,
+  token: string,
+  preferLocal = true,
+): Promise<BrowserView> {
+  const response = await send(base, `/v1/browser/start?prefer_local=${preferLocal ? "true" : "false"}`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+  return readBrowser(response);
+}
+
+export async function stopBrowser(base: string, token: string): Promise<BrowserView> {
+  const response = await send(base, "/v1/browser/stop", {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+  return readBrowser(response);
+}
+
+async function readBrowser(response: Response): Promise<BrowserView> {
+  const body = (await response.json()) as {
+    status?: string;
+    mode?: string;
+    novnc_url?: string | null;
+    local_browser?: string | null;
+    local_port?: number | null;
+  };
+  return {
+    status: body.status === "running" ? "running" : "stopped",
+    mode: body.mode === "local" ? "local" : "cloud",
+    novncUrl: body.novnc_url ?? null,
+    localBrowser: body.local_browser ?? null,
+    localPort: body.local_port ?? null,
+  };
 }
