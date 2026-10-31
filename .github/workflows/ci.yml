@@ -42,7 +42,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.85.0
       - name: Test local agent
         run: cargo test --manifest-path crates/local-agent/Cargo.toml
 
@@ -71,8 +73,9 @@ jobs:
         with:
           node-version: "22"
           cache: pnpm
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.85.0
           targets: ${{ matrix.target }}
       - name: Install
         run: pnpm install --frozen-lockfile
@@ -80,6 +83,7 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
         with:
           projectPath: apps/desktop
           tauriScript: pnpm tauri

@@ -181,12 +181,23 @@ export async function loadUsage(base: string, token: string): Promise<Usage> {
   };
 }
 
+export class TaskAbortedError extends Error {
+  constructor() {
+    super("aborted");
+  }
+}
+
+export interface TaskRunResult {
+  taskId: string;
+  reply: string;
+}
+
 export async function runTask(
   base: string,
   token: string,
   text: string,
   signal: AbortSignal,
-): Promise<string> {
+): Promise<TaskRunResult> {
   const created = await send(base, "/v1/tasks", {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
@@ -200,15 +211,66 @@ export async function runTask(
     headers: { authorization: `Bearer ${token}` },
     signal,
   });
+  if (signal.aborted) {
+    await finishTask(base, token, task.id, "aborted", "");
+    throw new TaskAbortedError();
+  }
   if (!run.ok) throw new ApiError(await readError(run));
   const body = (await run.json()) as { reply?: string };
-  await send(base, `/v1/tasks/${task.id}/finish`, {
+  return { taskId: task.id, reply: body.reply ?? "" };
+}
+
+export async function finishTask(
+  base: string,
+  token: string,
+  taskId: string,
+  outcome: "success" | "fail" | "aborted",
+  finalAnswer: string,
+): Promise<void> {
+  const response = await send(base, `/v1/tasks/${taskId}/finish`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-    body: JSON.stringify({ outcome: "success", final_answer: body.reply ?? "" }),
-    signal,
+    body: JSON.stringify({ outcome, final_answer: finalAnswer }),
   });
-  return body.reply ?? "";
+  if (!response.ok) throw new ApiError(await readError(response));
+}
+
+export async function submitTaskFeedback(
+  base: string,
+  token: string,
+  taskId: string,
+  worked: boolean,
+  comment: string,
+): Promise<void> {
+  const response = await send(base, `/v1/tasks/${taskId}/feedback`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      rating: worked ? 1 : -1,
+      acceptance: worked ? "accepted" : "rejected",
+      comment: comment.trim() || undefined,
+    }),
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+}
+
+export async function submitIncidentReport(
+  base: string,
+  token: string,
+  message: string,
+  logExcerpt: string,
+  screenshotBase64?: string | null,
+): Promise<void> {
+  const response = await send(base, "/v1/reports/incident", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      message,
+      log_excerpt: logExcerpt,
+      screenshot_base64: screenshotBase64 ?? null,
+    }),
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
 }
 
 export interface BrowserView {

@@ -47,6 +47,7 @@ from app.llm.run import run_turn
 from app.memory import MemoryError, delete_memory, list_memory, remember
 from app.quota import QuotaError, public_usage, snapshot
 from app.schedules import ScheduleError, create_schedule, delete_schedule, list_schedules, run_due
+from app.support import SupportError, create_incident
 from app.trajectories import (
     TrajectoryError,
     add_step,
@@ -88,6 +89,7 @@ _STATUS = {
     "credentials_invalid": 401,
     "password_weak": 400,
     "user_not_found": 404,
+    "bad_message": 400,
 }
 
 
@@ -708,6 +710,32 @@ def feedback(
     except TrajectoryError as exc:
         _fail(exc)
     return {"rating": row.rating, "acceptance": row.acceptance}
+
+
+class IncidentBody(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    log_excerpt: str = Field(default="", max_length=32000)
+    screenshot_base64: str | None = None
+
+
+@router.post("/reports/incident", status_code=201)
+def report_incident(
+    body: IncidentBody,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    try:
+        row = create_incident(
+            session,
+            user,
+            message=body.message,
+            log_excerpt=body.log_excerpt,
+            screenshot_base64=body.screenshot_base64,
+        )
+    except SupportError as exc:
+        status = _STATUS.get(exc.code, 400)
+        raise HTTPException(status_code=status, detail=exc.code) from None
+    return {"id": str(row.id)}
 
 
 @router.get("/admin/trajectories.jsonl")

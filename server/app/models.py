@@ -191,6 +191,17 @@ class BrowserSlot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class IncidentReport(Base):
+    __tablename__ = "incident_reports"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False, index=True)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    log_excerpt: Mapped[str] = mapped_column(Text, nullable=False)
+    screenshot: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class Credential(Base):
     """Encrypted login. The plaintext never sits in this row."""
 

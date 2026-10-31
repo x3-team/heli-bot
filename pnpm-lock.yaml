@@ -16,6 +16,9 @@ importers:
       '@tauri-apps/api':
         specifier: ^2.2.0
         version: 2.12.4
+      '@tauri-apps/plugin-updater':
+        specifier: ^2.2.0
+        version: 2.14.1
       react:
         specifier: ^19.0.0
         version: 19.3.1
@@ -79,6 +82,12 @@ importers:
         specifier: ^5.12.2
         version: 5.13.0
     devDependencies:
+      '@tauri-apps/api':
+        specifier: ^2.2.0
+        version: 2.12.4
+      '@tauri-apps/plugin-updater':
+        specifier: ^2.2.0
+        version: 2.14.1
       '@types/react':
         specifier: ^19.0.0
         version: 19.3.0
@@ -586,6 +595,9 @@ packages:
     resolution: {integrity: sha512-JI9bHfudSRJikGOrjbXEm6RjzzvmKuLc+JixB1NE8hNzQkNlCCIC3pTES3uypkR9lxHrsbxzcnSwhI2IxBQphw==}
     engines: {node: '>= 10'}
     hasBin: true
+
+  '@tauri-apps/plugin-updater@2.14.1':
+    resolution: {integrity: sha512-Hr7nlBm1wT6xbwzjZ/S36YULazu8MNlj5vvOwMl47fXI7HTa5Bjl1PbDEwVHaZTAKzE1VZsUy35UqnbrQxmYQw==}
 
   '@types/babel__core@7.20.5':
     resolution: {integrity: sha512-qoQprZvz5wQFJwMDqeseRXWv3rqMvhgpbXFfVyWhbx9X47POIA6i/+dXefEmZKoAgOaTdaIgNSMqMIU61yRyzA==}
@@ -1147,6 +1159,10 @@ snapshots:
       '@tauri-apps/cli-win32-arm64-msvc': 2.12.4
       '@tauri-apps/cli-win32-ia32-msvc': 2.12.4
       '@tauri-apps/cli-win32-x64-msvc': 2.12.4
+
+  '@tauri-apps/plugin-updater@2.14.1':
+    dependencies:
+      '@tauri-apps/api': 2.12.4
 
   '@types/babel__core@7.20.5':
     dependencies:

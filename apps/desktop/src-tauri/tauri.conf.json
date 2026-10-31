@@ -20,7 +20,17 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*; img-src 'self' data: blob:"
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:* https://github.com; img-src 'self' data: blob:"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": false,
+      "dialog": true,
+      "endpoints": [
+        "https://github.com/x3-team/heli-bot/releases/latest/download/latest.json"
+      ],
+      "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBKEY"
     }
   },
   "bundle": {

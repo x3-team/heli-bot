@@ -14,8 +14,13 @@ import {
   recoverReset,
   registerAccount,
   requestCode,
+  finishTask,
   runTask,
   saveConsents,
+  submitIncidentReport,
+  submitTaskFeedback,
+  TaskAbortedError,
+  attachLocalBrowser,
   saveMemory,
   saveCredential,
   saveSchedule,
@@ -29,6 +34,13 @@ import {
   type Usage,
 } from "./api";
 import { clampPercent, confirmationNeeded, limitTone } from "./behavior";
+import {
+  captureScreenshotBase64,
+  handControlBack,
+  readClientLog,
+  resetAgentControl,
+  tryLaunchLocalBrowser,
+} from "./desktop";
 import { INTEGRATION_LOGOS } from "./integrations";
 import { Mascot, avatarFor, mascotLabel, type MascotState } from "./mascot";
 
@@ -319,6 +331,7 @@ function Workspace({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [abort, setAbort] = useState<AbortController | null>(null);
+  const [feedbackTask, setFeedbackTask] = useState<{ taskId: string; reply: string } | null>(null);
   const [consents, setConsents] = useState({ pdn: true, training: false });
 
   const active = threads.find((thread) => thread.id === activeId) ?? null;
@@ -338,10 +351,13 @@ function Workspace({
     setView("chat");
     setMascot("waiting");
     setPending(null);
+    setFeedbackTask(null);
   }
 
   async function send(text: string, threadId: string) {
     if (stopped) return;
+    setFeedbackTask(null);
+    void resetAgentControl();
     const controller = new AbortController();
     setAbort(controller);
     setBusy(true);
@@ -362,17 +378,19 @@ function Workspace({
     setDraft("");
     try {
       setMascot("working");
-      const reply = await runTask(apiBase, token, text, controller.signal);
-      const answer: Message = { id: crypto.randomUUID(), role: "assistant", text: reply };
+      const result = await runTask(apiBase, token, text, controller.signal);
+      const answer: Message = { id: crypto.randomUUID(), role: "assistant", text: result.reply };
       setThreads((list) =>
         list.map((thread) =>
           thread.id === threadId ? { ...thread, messages: [...thread.messages, answer] } : thread,
         ),
       );
+      setFeedbackTask(result);
       setMascot("done");
     } catch (err) {
-      if (controller.signal.aborted) {
+      if (err instanceof TaskAbortedError || controller.signal.aborted) {
         setMascot("waiting");
+        setError("Остановлено. Управление снова у вас.");
       } else {
         setError(err instanceof ApiError ? err.message : "Не получилось выполнить задачу.");
         setMascot("waiting");
@@ -468,7 +486,21 @@ function Workspace({
               setPending(null);
             }}
             onReject={() => setPending(null)}
-            onStop={() => abort?.abort()}
+            feedback={feedbackTask}
+            onFeedback={async (worked, comment) => {
+              if (!feedbackTask) return;
+              try {
+                await submitTaskFeedback(apiBase, token, feedbackTask.taskId, worked, comment);
+                await finishTask(apiBase, token, feedbackTask.taskId, "success", feedbackTask.reply);
+                setFeedbackTask(null);
+              } catch (err) {
+                setError(err instanceof ApiError ? err.message : "Не получилось сохранить отзыв.");
+              }
+            }}
+            onStop={() => {
+              void handControlBack();
+              abort?.abort();
+            }}
           />
         ) : null}
         {view === "limits" ? <Limits usage={usage} /> : null}
@@ -507,6 +539,8 @@ function Chat({
   onEdit,
   onReject,
   onStop,
+  feedback,
+  onFeedback,
 }: {
   messages: Message[];
   draft: string;
@@ -514,13 +548,16 @@ function Chat({
   stopped: boolean;
   error: string;
   pending: string | null;
+  feedback: { taskId: string; reply: string } | null;
   onDraft: (value: string) => void;
   onSubmit: () => void;
   onApprove: () => void;
   onEdit: () => void;
   onReject: () => void;
   onStop: () => void;
+  onFeedback: (worked: boolean, comment: string) => Promise<void>;
 }) {
+  const [comment, setComment] = useState("");
   return (
     <>
       <div className="thread">
@@ -548,6 +585,25 @@ function Chat({
             <p>Неделя или месяц на 100%. Новые задачи остановлены до сброса.</p>
           </article>
         ) : null}
+        {feedback ? (
+          <article className="card">
+            <p className="muted">Как прошла задача?</p>
+            <textarea
+              aria-label="Комментарий"
+              placeholder="Комментарий (необязательно)"
+              value={comment}
+              onChange={(event) => setComment(event.target.value)}
+            />
+            <div className="row">
+              <button type="button" data-emphasis="primary" onClick={() => void onFeedback(true, comment)}>
+                Сработало
+              </button>
+              <button type="button" onClick={() => void onFeedback(false, comment)}>
+                Не сработало
+              </button>
+            </div>
+          </article>
+        ) : null}
         {error ? <p className="error">{error}</p> : null}
       </div>
       <form
@@ -570,7 +626,7 @@ function Chat({
           }}
         />
         {busy ? (
-          <button type="button" onClick={onStop}>Стоп</button>
+          <button type="button" onClick={onStop}>Стоп / пауза</button>
         ) : (
           <button type="submit" data-emphasis="primary" disabled={stopped || !draft.trim()}>
             Отправить
@@ -600,6 +656,11 @@ function Computer({ apiBase, token, state }: { apiBase: string; token: string; s
     try {
       if (browser.status === "running") {
         setBrowser(await stopBrowser(apiBase, token));
+        return;
+      }
+      const launch = await tryLaunchLocalBrowser();
+      if (launch) {
+        setBrowser(await attachLocalBrowser(apiBase, token, launch.browser, launch.port));
         return;
       }
       try {
@@ -813,6 +874,7 @@ function Settings({
   const [secret, setSecret] = useState("");
   const [links, setLinks] = useState<CredentialItem[]>([]);
   const [note, setNote] = useState("");
+  const [reportBusy, setReportBusy] = useState(false);
 
   useEffect(() => {
     void loadCredentials(apiBase, token).then(setLinks).catch(() => undefined);
@@ -914,6 +976,38 @@ function Settings({
             </li>
           ))}
         </ul>
+      </section>
+      <section className="card">
+        <h2>Сообщить об ошибке</h2>
+        <p className="muted">Отправим снимок экрана и журнал клиента. Пароли и ключи не включаются.</p>
+        <button
+          type="button"
+          data-emphasis="primary"
+          disabled={reportBusy}
+          onClick={() => {
+            setReportBusy(true);
+            setNote("");
+            void (async () => {
+              try {
+                const shot = await captureScreenshotBase64();
+                await submitIncidentReport(
+                  apiBase,
+                  token,
+                  "Сообщение из приложения Heli bot",
+                  readClientLog(),
+                  shot,
+                );
+                setNote("Отчёт отправлен. Спасибо!");
+              } catch (err) {
+                setNote(err instanceof ApiError ? err.message : "Не получилось отправить отчёт.");
+              } finally {
+                setReportBusy(false);
+              }
+            })();
+          }}
+        >
+          Отправить отчёт
+        </button>
       </section>
       <button type="button" onClick={onSignOut}>Выйти</button>
     </div>

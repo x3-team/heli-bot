@@ -1,4 +1,5 @@
 export { Shell } from "./app";
+export { checkForAppUpdates, handControlBack, readClientLog, resetAgentControl } from "./desktop";
 export { INTEGRATION_LOGOS } from "./integrations";
 export { Mascot, mascotLabel, type MascotState } from "./mascot";
 export { clampPercent, confirmationNeeded, limitTone } from "./behavior";

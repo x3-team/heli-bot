@@ -13,7 +13,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-local-agent = { path = "../../../crates/local-agent" }
+local-agent = { path = "../../../crates/local-agent", features = ["os"] }
+log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }
+tauri-plugin-updater = "2"
