@@ -6,20 +6,18 @@ on:
     paths:
       - "infra/deploy/**"
       - ".github/workflows/deploy-shared-server.yml"
-      - "server/Dockerfile"
-      - "server/docker-entrypoint.sh"
+      - "server/**"
 
 jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Validate production compose
-        env:
-          HELI_PROXY_NETWORK: ci-validate-placeholder
-          POSTGRES_PASSWORD: ci-validate-placeholder
-          JWT_SECRET: ci-validate-placeholder
-        run: docker compose -f infra/deploy/docker-compose.prod.yml config --quiet
+      - name: Validate deploy scripts and systemd units
+        run: |
+          bash -n infra/deploy/remote-install.sh
+          test -f infra/deploy/systemd-user/heli-bot-api.service
+          test -f infra/deploy/systemd-system/heli-bot-api.service
 
   server-tests:
     runs-on: ubuntu-latest
@@ -42,10 +40,12 @@ jobs:
     concurrency:
       group: heli-shared-server-deploy
       cancel-in-progress: false
+    env:
+      HELI_APP_DIR: /opt/heli-bot
     steps:
       - uses: actions/checkout@v4
 
-      - name: Prepare remote directory
+      - name: Prepare remote tree
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.HELI_DEPLOY_SSH_HOST }}
@@ -55,8 +55,9 @@ jobs:
           script_stop: true
           script: |
             set -eu
-            mkdir -p "${{ secrets.HELI_DEPLOY_APP_DIR }}/infra/deploy"
-            mkdir -p "${{ secrets.HELI_DEPLOY_APP_DIR }}/server"
+            APP_DIR="${{ secrets.HELI_DEPLOY_APP_DIR }}"
+            if [ -z "$APP_DIR" ]; then APP_DIR="/opt/heli-bot"; fi
+            mkdir -p "$APP_DIR/server" "$APP_DIR/infra/deploy" "$APP_DIR/var"
 
       - name: Sync server and deploy files
         uses: appleboy/scp-action@v0.1.7
@@ -66,11 +67,11 @@ jobs:
           key: ${{ secrets.HELI_DEPLOY_SSH_PRIVATE_KEY }}
           port: ${{ secrets.HELI_DEPLOY_SSH_PORT || 22 }}
           source: "server,infra/deploy"
-          target: ${{ secrets.HELI_DEPLOY_APP_DIR }}
+          target: /opt/heli-bot
           strip_components: 0
           overwrite: true
 
-      - name: Build and start containers
+      - name: Install venv, migrate, and restart user service
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.HELI_DEPLOY_SSH_HOST }}
@@ -80,11 +81,18 @@ jobs:
           script_stop: true
           script: |
             set -eu
-            cd "${{ secrets.HELI_DEPLOY_APP_DIR }}"
-            test -f "${{ secrets.HELI_DEPLOY_ENV_FILE }}"
-            docker compose -f infra/deploy/docker-compose.prod.yml \
-              --env-file "${{ secrets.HELI_DEPLOY_ENV_FILE }}" \
-              up -d --build --remove-orphans
-            docker compose -f infra/deploy/docker-compose.prod.yml \
-              --env-file "${{ secrets.HELI_DEPLOY_ENV_FILE }}" \
-              ps
+            APP_DIR="${{ secrets.HELI_DEPLOY_APP_DIR }}"
+            if [ -z "$APP_DIR" ]; then APP_DIR="/opt/heli-bot"; fi
+            ENV_FILE="${{ secrets.HELI_DEPLOY_ENV_FILE }}"
+            if [ -z "$ENV_FILE" ]; then ENV_FILE="$APP_DIR/.env"; fi
+            test -f "$ENV_FILE"
+            chmod +x "$APP_DIR/infra/deploy/remote-install.sh"
+            if ! "$APP_DIR/infra/deploy/remote-install.sh" "$APP_DIR" "$ENV_FILE"; then
+              status=$?
+              if [ "$status" -eq 2 ]; then
+                echo "--- Admin system unit (infra/deploy/systemd-system/) ---"
+                sed 's/^/# /' "$APP_DIR/infra/deploy/systemd-system/heli-bot-api.service"
+                sed 's/^/# /' "$APP_DIR/infra/deploy/systemd-system/helibot.slice"
+              fi
+              exit "$status"
+            fi
