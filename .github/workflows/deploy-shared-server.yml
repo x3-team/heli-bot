@@ -16,6 +16,7 @@ jobs:
       - name: Validate deploy scripts and systemd units
         run: |
           bash -n infra/deploy/remote-install.sh
+          bash -n infra/deploy/write-env-if-missing.sh
           test -f infra/deploy/systemd-user/heli-bot-api.service
           test -f infra/deploy/systemd-system/heli-bot-api.service
 
@@ -71,6 +72,10 @@ jobs:
 
       - name: Install venv, migrate, and restart user service
         uses: appleboy/ssh-action@v1.2.0
+        env:
+          HELI_DEPLOY_JWT_SECRET: ${{ secrets.HELI_DEPLOY_JWT_SECRET }}
+          HELI_DEPLOY_TRAJECTORY_HASH_PEPPER: ${{ secrets.HELI_DEPLOY_TRAJECTORY_HASH_PEPPER }}
+          HELI_API_KEY: ${{ secrets.HELI_API_KEY }}
         with:
           host: ${{ secrets.HELI_DEPLOY_SSH_HOST }}
           username: ${{ secrets.HELI_DEPLOY_SSH_USER }}
@@ -78,6 +83,7 @@ jobs:
           port: ${{ secrets.HELI_DEPLOY_SSH_PORT || 22 }}
           debug: true
           script_stop: true
+          envs: HELI_DEPLOY_JWT_SECRET,HELI_DEPLOY_TRAJECTORY_HASH_PEPPER,HELI_API_KEY
           script: |
             set -euxo pipefail
             exec 2>&1
@@ -86,8 +92,10 @@ jobs:
             ENV_FILE="${{ secrets.HELI_DEPLOY_ENV_FILE }}"
             if [ -z "$ENV_FILE" ]; then ENV_FILE="$APP_DIR/.env"; fi
             echo "[heli-deploy] APP_DIR=$APP_DIR ENV_FILE=$ENV_FILE"
+            chmod +x "$APP_DIR/infra/deploy/write-env-if-missing.sh" 2>/dev/null || true
+            "$APP_DIR/infra/deploy/write-env-if-missing.sh" "$ENV_FILE" "$APP_DIR"
             if [ ! -f "$ENV_FILE" ]; then
-              echo "[heli-deploy] missing env file: $ENV_FILE" >&2
+              echo "[heli-deploy] env file still missing after bootstrap" >&2
               exit 1
             fi
             if [ ! -x "$APP_DIR/infra/deploy/remote-install.sh" ] && [ -f "$APP_DIR/infra/deploy/remote-install.sh" ]; then
