@@ -8,6 +8,7 @@ on:
       - ".github/workflows/deploy-shared-server.yml"
       - "server/Dockerfile"
       - "server/docker-entrypoint.sh"
+      - "server/app/**"
 
 jobs:
   validate:

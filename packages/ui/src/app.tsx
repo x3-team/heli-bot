@@ -34,7 +34,9 @@ import {
   type ScheduleItem,
   type Usage,
 } from "./api";
+import { resolveApiBase } from "./apiBase";
 import { clampPercent, confirmationNeeded, limitTone } from "./behavior";
+import { networkErrorMessage } from "./errors";
 import {
   captureScreenshotBase64,
   handControlBack,
@@ -60,7 +62,8 @@ interface Thread {
   messages: Message[];
 }
 
-export function Shell({ apiBase = "" }: { apiBase?: string }) {
+export function Shell({ apiBase: apiBaseProp }: { apiBase?: string }) {
+  const apiBase = resolveApiBase(apiBaseProp);
   const [theme, setTheme] = useState<Theme>(() =>
     window.localStorage.getItem("heli-theme") === "dark" ? "dark" : "light",
   );
@@ -170,7 +173,9 @@ function SignIn({ apiBase, onToken }: { apiBase: string; onToken: (token: string
       }
       onToken(await loginPassword(apiBase, email, password));
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Не получилось.");
+      if (err instanceof ApiError) setError(err.message);
+      else if (err instanceof TypeError) setError(networkErrorMessage());
+      else setError("Не получилось.");
     } finally {
       setBusy(false);
     }
@@ -267,8 +272,14 @@ function SignIn({ apiBase, onToken }: { apiBase: string; onToken: (token: string
             </label>
           </>
         ) : null}
+        {!apiBase && !import.meta.env.DEV ? (
+          <p className="error">Адрес API не задан при сборке (VITE_HELI_API_BASE).</p>
+        ) : null}
         {error ? <p className="error">{error}</p> : null}
-        <button type="submit" data-emphasis="primary" disabled={busy}>
+        {error && apiBase && screen === "register" ? (
+          <p className="muted">POST {apiBase}/v1/auth/register</p>
+        ) : null}
+        <button type="submit" data-emphasis="primary" disabled={busy || (!apiBase && !import.meta.env.DEV)}>
           {action}
         </button>
         {screen === "signin" ? (
