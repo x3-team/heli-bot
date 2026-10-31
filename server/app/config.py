@@ -26,6 +26,8 @@ class Settings(BaseSettings):
         default=Decimal("1000"),
         validation_alias="DEFAULT_MONTHLY_LIMIT_RUB",
     )
+    browser_max: int = Field(default=8, validation_alias="BROWSER_MAX")
+    browser_image: str = Field(default="heli-browser:local", validation_alias="BROWSER_IMAGE")
 
     def __repr__(self) -> str:
         return f"Settings(app_env={self.app_env!r}, port={self.port})"

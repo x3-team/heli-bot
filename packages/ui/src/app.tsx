@@ -1,12 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   ApiError,
+  loadBrowser,
   loadMe,
   loadUsage,
   requestCode,
   runTask,
   saveConsents,
+  startBrowser,
+  stopBrowser,
   verifyCode,
+  type BrowserView,
   type Usage,
 } from "./api";
 import { clampPercent, confirmationNeeded, limitTone } from "./behavior";
@@ -345,7 +349,7 @@ function Workspace({
           />
         ) : null}
       </section>
-      <Computer state={stopped ? "waiting" : mascot} />
+      <Computer apiBase={apiBase} token={token} state={stopped ? "waiting" : mascot} />
     </div>
   );
 }
@@ -437,7 +441,26 @@ function Chat({
   );
 }
 
-function Computer({ state }: { state: MascotState }) {
+function Computer({ apiBase, token, state }: { apiBase: string; token: string; state: MascotState }) {
+  const [browser, setBrowser] = useState<BrowserView>({ status: "stopped", novncUrl: null });
+  const [note, setNote] = useState("");
+
+  useEffect(() => {
+    void loadBrowser(apiBase, token).then(setBrowser).catch(() => undefined);
+  }, [apiBase, token]);
+
+  async function toggle() {
+    setNote("");
+    try {
+      const next = browser.status === "running"
+        ? await stopBrowser(apiBase, token)
+        : await startBrowser(apiBase, token);
+      setBrowser(next);
+    } catch (err) {
+      setNote(err instanceof ApiError ? err.message : "Браузер на сервере сейчас недоступен.");
+    }
+  }
+
   return (
     <aside className="computer">
       <div className="status">
@@ -447,6 +470,15 @@ function Computer({ state }: { state: MascotState }) {
       <div className="screen">
         <Mascot state={state} />
       </div>
+      <div className="row">
+        <button type="button" onClick={() => void toggle()}>
+          {browser.status === "running" ? "Остановить браузер" : "Запустить браузер"}
+        </button>
+        {browser.novncUrl ? (
+          <a href={browser.novncUrl} target="_blank" rel="noreferrer">Смотреть</a>
+        ) : null}
+      </div>
+      {note ? <p className="error">{note}</p> : null}
     </aside>
   );
 }

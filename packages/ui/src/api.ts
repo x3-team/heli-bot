@@ -20,6 +20,8 @@ const ERRORS: Record<string, string> = {
   request_failed: "Модель не ответила. Попробуйте ещё раз.",
   unknown_alias: "Сервер не принял шаг.",
   limit_reached: "Лимит исчерпан",
+  browser_unavailable: "Браузер на сервере сейчас недоступен.",
+  browser_busy: "Свободных браузеров нет. Попробуйте позже.",
 };
 
 export class ApiError extends Error {
@@ -135,4 +137,43 @@ export async function runTask(
     signal,
   });
   return body.reply ?? "";
+}
+
+export interface BrowserView {
+  status: "running" | "stopped";
+  novncUrl: string | null;
+}
+
+export async function loadBrowser(base: string, token: string): Promise<BrowserView> {
+  const response = await send(base, "/v1/browser", {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+  return readBrowser(response);
+}
+
+export async function startBrowser(base: string, token: string): Promise<BrowserView> {
+  const response = await send(base, "/v1/browser/start", {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+  return readBrowser(response);
+}
+
+export async function stopBrowser(base: string, token: string): Promise<BrowserView> {
+  const response = await send(base, "/v1/browser/stop", {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+  return readBrowser(response);
+}
+
+async function readBrowser(response: Response): Promise<BrowserView> {
+  const body = (await response.json()) as { status?: string; novnc_url?: string | null };
+  return {
+    status: body.status === "running" ? "running" : "stopped",
+    novncUrl: body.novnc_url ?? null,
+  };
 }

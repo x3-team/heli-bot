@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.auth import AuthError, issue_login_code, issue_token, read_user_id, verify_login_code
+from app.browser import BrowserError, get_browser_driver, pool_start, pool_status, pool_stop
 from app.config import get_settings
 from app.db import get_db
 from app.models import TaskStep, User
@@ -253,6 +254,41 @@ def create_step(
 class LimitBody(BaseModel):
     monthly_limit_rub: Decimal = Field(gt=0, le=Decimal("1000000"))
     weekly_limit_rub: Decimal | None = Field(default=None, gt=0, le=Decimal("1000000"))
+
+
+@router.get("/browser")
+def browser_status(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+    driver=Depends(get_browser_driver),
+) -> dict:
+    return pool_status(session, user.id, driver)
+
+
+@router.post("/browser/start")
+def browser_start(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+    driver=Depends(get_browser_driver),
+) -> dict:
+    try:
+        return pool_start(session, user.id, driver)
+    except BrowserError as exc:
+        status = 503 if exc.code == "browser_unavailable" else 409
+        raise HTTPException(status_code=status, detail=exc.code) from None
+
+
+@router.post("/browser/stop")
+def browser_stop(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+    driver=Depends(get_browser_driver),
+) -> dict:
+    try:
+        return pool_stop(session, user.id, driver)
+    except BrowserError as exc:
+        status = 503 if exc.code == "browser_unavailable" else 409
+        raise HTTPException(status_code=status, detail=exc.code) from None
 
 
 @router.get("/usage")
