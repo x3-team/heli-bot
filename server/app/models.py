@@ -37,6 +37,8 @@ class User(Base):
         server_default="1000",
     )
     weekly_limit_rub: Mapped[Decimal | None] = mapped_column(Numeric(14, 6), nullable=True)
+    password_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    trial_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     tasks: Mapped[list["Task"]] = relationship(back_populates="user")
@@ -57,7 +59,8 @@ class LoginCode(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     email: Mapped[str] = mapped_column(String(320), nullable=False, index=True)
-    invite_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("invites.id"), nullable=False)
+    invite_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("invites.id"), nullable=True)
+    purpose: Mapped[str] = mapped_column(String(16), nullable=False, default="login")
     code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     used: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

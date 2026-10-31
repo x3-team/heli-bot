@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import {
   ApiError,
   deleteCredential,
@@ -9,6 +9,10 @@ import {
   loadMemory,
   loadSchedules,
   loadUsage,
+  loginPassword,
+  recoverRequest,
+  recoverReset,
+  registerAccount,
   requestCode,
   runTask,
   saveConsents,
@@ -80,8 +84,13 @@ export function Shell({ apiBase = "" }: { apiBase?: string }) {
   );
 }
 
+type AuthScreen = "register" | "signin" | "recover";
+
 function SignIn({ apiBase, onToken }: { apiBase: string; onToken: (token: string) => void }) {
+  const [screen, setScreen] = useState<AuthScreen>("signin");
+  const [useCode, setUseCode] = useState(false);
   const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [invite, setInvite] = useState("");
   const [code, setCode] = useState("");
   const [sent, setSent] = useState(false);
@@ -90,11 +99,20 @@ function SignIn({ apiBase, onToken }: { apiBase: string; onToken: (token: string
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
+  function resetFlow(next: AuthScreen) {
+    setScreen(next);
+    setUseCode(false);
+    setSent(false);
+    setCode("");
+    setPassword("");
+    setError("");
+  }
+
   async function askCode() {
     setBusy(true);
     setError("");
     try {
-      await requestCode(apiBase, email, invite);
+      await requestCode(apiBase, email, invite || undefined);
       setSent(true);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Не получилось отправить код.");
@@ -103,64 +121,158 @@ function SignIn({ apiBase, onToken }: { apiBase: string; onToken: (token: string
     }
   }
 
-  async function enter() {
-    if (!pdn) {
-      setError("Нужно согласие на обработку данных.");
-      return;
-    }
+  async function submit(event: FormEvent) {
+    event.preventDefault();
     setBusy(true);
     setError("");
     try {
-      const access = await verifyAndConsent(apiBase, email, code, pdn, training);
-      onToken(access);
+      if (screen === "register") {
+        if (!pdn) {
+          setError("Нужно согласие на обработку данных.");
+          return;
+        }
+        onToken(await registerAccount(apiBase, email, password, pdn, training));
+        return;
+      }
+      if (screen === "recover") {
+        if (!sent) {
+          await recoverRequest(apiBase, email);
+          setSent(true);
+          return;
+        }
+        onToken(await recoverReset(apiBase, email, code, password));
+        return;
+      }
+      if (useCode) {
+        if (!sent) {
+          await askCode();
+          return;
+        }
+        if (!pdn) {
+          setError("Нужно согласие на обработку данных.");
+          return;
+        }
+        onToken(await verifyAndConsent(apiBase, email, code, pdn, training));
+        return;
+      }
+      onToken(await loginPassword(apiBase, email, password));
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Не получилось войти.");
+      setError(err instanceof ApiError ? err.message : "Не получилось.");
     } finally {
       setBusy(false);
     }
   }
 
+  const title =
+    screen === "register" ? "Регистрация" : screen === "recover" ? "Восстановление пароля" : "Вход";
+  const subtitle =
+    screen === "register"
+      ? "7 дней пробного периода с лимитами по процентам"
+      : screen === "recover"
+        ? "Код придёт на почту (в тесте — оператор)"
+        : useCode
+          ? "Код на почту или по приглашению"
+          : "Почта и пароль";
+
+  let action = "Войти";
+  if (screen === "register") action = "Создать аккаунт";
+  else if (screen === "recover") action = sent ? "Сохранить пароль" : "Отправить код";
+  else if (useCode) action = sent ? "Войти" : "Получить код";
+
   return (
     <main className="signin">
-      <form
-        className="signin-card"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (sent) void enter();
-          else void askCode();
-        }}
-      >
+      <form className="signin-card" onSubmit={(event) => void submit(event)}>
         <Mascot state="waiting" size={120} />
         <div>
           <h1>Heli bot</h1>
-          <p className="muted">Вход по приглашению</p>
+          <p className="muted">{title} · {subtitle}</p>
+        </div>
+        <div className="row">
+          <button type="button" aria-pressed={screen === "signin"} onClick={() => resetFlow("signin")}>
+            Вход
+          </button>
+          <button type="button" aria-pressed={screen === "register"} onClick={() => resetFlow("register")}>
+            Регистрация
+          </button>
         </div>
         <label className="stack">
           Почта
-          <input value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" required />
+          <input
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            autoComplete="username"
+            type="email"
+            required
+          />
         </label>
-        <label className="stack">
-          Код приглашения
-          <input value={invite} onChange={(event) => setInvite(event.target.value)} required />
-        </label>
-        {sent ? (
+        {screen === "signin" && !useCode ? (
+          <label className="stack">
+            Пароль
+            <input
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              type="password"
+              autoComplete="current-password"
+              required
+            />
+          </label>
+        ) : null}
+        {screen === "register" || screen === "recover" ? (
+          <label className="stack">
+            {screen === "recover" && sent ? "Новый пароль" : "Пароль"}
+            <input
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              type="password"
+              autoComplete={screen === "recover" ? "new-password" : "new-password"}
+              minLength={8}
+              required={screen === "register" || (screen === "recover" && sent)}
+            />
+          </label>
+        ) : null}
+        {screen === "signin" && useCode ? (
+          <label className="stack">
+            Код приглашения (необязательно)
+            <input value={invite} onChange={(event) => setInvite(event.target.value)} />
+          </label>
+        ) : null}
+        {(screen === "signin" && useCode && sent) || (screen === "recover" && sent) ? (
           <label className="stack">
             Код из письма
             <input value={code} onChange={(event) => setCode(event.target.value)} inputMode="numeric" required />
           </label>
         ) : null}
-        <label className="check">
-          <input type="checkbox" checked={pdn} onChange={(event) => setPdn(event.target.checked)} />
-          <span>Согласие на обработку персональных данных</span>
-        </label>
-        <label className="check">
-          <input type="checkbox" checked={training} onChange={(event) => setTraining(event.target.checked)} />
-          <span>Использовать мои задачи для улучшения модели</span>
-        </label>
+        {screen === "register" || (screen === "signin" && useCode) ? (
+          <>
+            <label className="check">
+              <input type="checkbox" checked={pdn} onChange={(event) => setPdn(event.target.checked)} />
+              <span>Согласие на обработку персональных данных</span>
+            </label>
+            <label className="check">
+              <input type="checkbox" checked={training} onChange={(event) => setTraining(event.target.checked)} />
+              <span>Использовать мои задачи для улучшения модели</span>
+            </label>
+          </>
+        ) : null}
         {error ? <p className="error">{error}</p> : null}
         <button type="submit" data-emphasis="primary" disabled={busy}>
-          {sent ? "Войти" : "Получить код"}
+          {action}
         </button>
+        {screen === "signin" ? (
+          <div className="row">
+            <button type="button" onClick={() => { setUseCode(!useCode); setSent(false); setError(""); }}>
+              {useCode ? "Войти с паролем" : "Войти по коду"}
+            </button>
+            <button type="button" onClick={() => resetFlow("recover")}>
+              Забыли пароль?
+            </button>
+          </div>
+        ) : null}
+        {screen === "recover" ? (
+          <button type="button" onClick={() => resetFlow("signin")}>
+            Назад ко входу
+          </button>
+        ) : null}
       </form>
     </main>
   );
@@ -197,7 +309,13 @@ function Workspace({
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState<string | null>(null);
   const [mascot, setMascot] = useState<MascotState>("waiting");
-  const [usage, setUsage] = useState<Usage>({ weekPercent: 0, monthPercent: 0, blocked: false, warning: false });
+  const [usage, setUsage] = useState<Usage>({
+    weekPercent: 0,
+    monthPercent: 0,
+    blocked: false,
+    warning: false,
+    trialActive: false,
+  });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [abort, setAbort] = useState<AbortController | null>(null);
@@ -540,6 +658,9 @@ function Limits({ usage }: { usage: Usage }) {
         <h1>Лимиты</h1>
         <p className="muted">Использовано {week}% недели · {month}% месяца, сброс пн 00:00 МСК</p>
       </div>
+      {usage.trialActive ? (
+        <article className="card">Пробная неделя активна — лимиты показаны в процентах.</article>
+      ) : null}
       {warned ? <article className="card warn">Осталось меньше 20% лимита. Сложные шаги будут проще.</article> : null}
       {(weekTone === "stop" || monthTone === "stop") ? (
         <article className="card danger">
