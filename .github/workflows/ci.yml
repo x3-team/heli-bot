@@ -2,6 +2,7 @@ name: ci
 
 on:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   server:
@@ -48,21 +49,51 @@ jobs:
       - name: Test local agent
         run: cargo test --manifest-path crates/local-agent/Cargo.toml
 
-  desktop:
+  desktop-windows:
+    name: desktop (x86_64-pc-windows-msvc)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.90.0
+          targets: x86_64-pc-windows-msvc
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build installer
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
+        with:
+          projectPath: apps/desktop
+          tauriScript: pnpm tauri
+          args: --bundles nsis
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: heli-windows-x64
+          path: apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+
+  desktop-macos:
+    if: github.event_name == 'workflow_dispatch'
     name: desktop (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            args: --bundles nsis
-          - os: macos-latest
-            target: aarch64-apple-darwin
+          - target: aarch64-apple-darwin
             args: --target aarch64-apple-darwin --bundles app,dmg
-          - os: macos-latest
-            target: x86_64-apple-darwin
+          - target: x86_64-apple-darwin
             args: --target x86_64-apple-darwin --bundles app,dmg
     steps:
       - uses: actions/checkout@v4
@@ -88,15 +119,7 @@ jobs:
           projectPath: apps/desktop
           tauriScript: pnpm tauri
           args: ${{ matrix.args }}
-      - name: Upload Windows installer
-        if: matrix.os == 'windows-latest'
-        uses: actions/upload-artifact@v4
-        with:
-          name: heli-windows-x64
-          path: apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
-          if-no-files-found: error
       - name: Upload macOS installer
-        if: matrix.os == 'macos-latest'
         uses: actions/upload-artifact@v4
         with:
           name: heli-macos-${{ matrix.target }}
