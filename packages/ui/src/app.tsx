@@ -25,6 +25,7 @@ import {
   type Usage,
 } from "./api";
 import { clampPercent, confirmationNeeded, limitTone } from "./behavior";
+import { INTEGRATION_LOGOS } from "./integrations";
 import { Mascot, avatarFor, mascotLabel, type MascotState } from "./mascot";
 
 type View = "chat" | "limits" | "schedules" | "memory" | "settings";
@@ -709,6 +710,15 @@ function Settings({
       <section className="card">
         <h2>Подключения</h2>
         <p className="muted">Сайт и имя видны вам. Секрет шифруется и в ответы не попадает.</p>
+        <ul className="integration-logos" aria-label="Поддерживаемые сервисы">
+          {INTEGRATION_LOGOS.map((logo) => (
+            <li key={logo.id}>
+              <span className="integration-chip" title={logo.name}>
+                <img src={logo.src} alt="" />
+              </span>
+            </li>
+          ))}
+        </ul>
         <form
           className="stack"
           onSubmit={(event) => {
