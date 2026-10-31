@@ -110,7 +110,7 @@ def _run_one(session: Session, row: Schedule, client: HeliClient, driver, moment
     if user is None:
         return
     try:
-        pool_start(session, user.id, driver, moment)
+        pool_start(session, user.id, driver, prefer_local=False, now=moment)
     except BrowserError:
         log.info("schedule browser skipped")
     row.last_run = moment

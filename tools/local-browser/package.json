@@ -1,0 +1,9 @@
+{
+  "name": "@heli/local-browser",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "dependencies": {
+    "playwright-core": "^1.49.1"
+  }
+}

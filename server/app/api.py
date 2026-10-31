@@ -9,8 +9,28 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.auth import AuthError, issue_login_code, issue_token, read_user_id, verify_login_code
-from app.browser import BrowserError, get_browser_driver, pool_start, pool_status, pool_stop
+from app.auth import (
+    AuthError,
+    issue_login_code,
+    issue_login_code_for_user,
+    issue_recovery_code,
+    issue_token,
+    login_with_password,
+    read_user_id,
+    register_user,
+    reset_password,
+    trial_active,
+    verify_login_code,
+)
+from app.browser import (
+    BrowserError,
+    attach_local,
+    detach_local,
+    get_browser_driver,
+    pool_start,
+    pool_status,
+    pool_stop,
+)
 from app.vault import (
     VaultError,
     delete_credential,
@@ -27,6 +47,7 @@ from app.llm.run import run_turn
 from app.memory import MemoryError, delete_memory, list_memory, remember
 from app.quota import QuotaError, public_usage, snapshot
 from app.schedules import ScheduleError, create_schedule, delete_schedule, list_schedules, run_due
+from app.support import SupportError, create_incident
 from app.trajectories import (
     TrajectoryError,
     add_step,
@@ -60,6 +81,15 @@ _STATUS = {
     "bad_acceptance": 400,
     "bad_screenshot": 400,
     "limit_reached": 403,
+    "local_browser_required": 409,
+    "bad_browser": 400,
+    "bad_port": 400,
+    "cloud_running": 409,
+    "email_taken": 409,
+    "credentials_invalid": 401,
+    "password_weak": 400,
+    "user_not_found": 404,
+    "bad_message": 400,
 }
 
 
@@ -95,12 +125,34 @@ def get_current_user(
 
 class CodeRequest(BaseModel):
     email: str = Field(min_length=3, max_length=320)
-    invite_code: str = Field(min_length=4, max_length=128)
+    invite_code: str | None = Field(default=None, min_length=4, max_length=128)
 
 
 class CodeVerify(BaseModel):
     email: str = Field(min_length=3, max_length=320)
     code: str = Field(min_length=4, max_length=12)
+
+
+class RegisterBody(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=8, max_length=256)
+    consent_pdn: bool = False
+    consent_training: bool = False
+
+
+class PasswordLoginBody(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class RecoverRequestBody(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+
+
+class RecoverResetBody(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    code: str = Field(min_length=4, max_length=12)
+    password: str = Field(min_length=8, max_length=256)
 
 
 class ConsentBody(BaseModel):
@@ -147,6 +199,61 @@ class FeedbackBody(BaseModel):
     user_edit: str | None = None
 
 
+@router.post("/auth/register", status_code=201)
+def register(body: RegisterBody, session: Session = Depends(get_db)) -> dict:
+    try:
+        user = register_user(
+            session,
+            body.email,
+            body.password,
+            consent_pdn=body.consent_pdn,
+            consent_training=body.consent_training,
+        )
+        token = issue_token(user.id)
+    except AuthError as exc:
+        _fail(exc)
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "trial_active": trial_active(user),
+    }
+
+
+@router.post("/auth/login")
+def login_password(body: PasswordLoginBody, session: Session = Depends(get_db)) -> dict:
+    try:
+        user = login_with_password(session, body.email, body.password)
+        token = issue_token(user.id)
+    except AuthError as exc:
+        _fail(exc)
+    return {"access_token": token, "token_type": "bearer", "trial_active": trial_active(user)}
+
+
+@router.post("/auth/recover/request", status_code=202)
+def recover_request(body: RecoverRequestBody, request: Request, session: Session = Depends(get_db)) -> dict:
+    settings = get_settings()
+    if settings.app_env != "test":
+        raise HTTPException(status_code=501, detail="email_not_configured")
+    try:
+        code = issue_recovery_code(session, body.email)
+    except AuthError as exc:
+        _fail(exc)
+    if settings.app_env == "test":
+        request.app.state.mail_sink.append(code)
+    log.info("recovery code issued")
+    return {"status": "sent"}
+
+
+@router.post("/auth/recover/reset")
+def recover_reset(body: RecoverResetBody, session: Session = Depends(get_db)) -> dict:
+    try:
+        user = reset_password(session, body.email, body.code, body.password)
+        token = issue_token(user.id)
+    except AuthError as exc:
+        _fail(exc)
+    return {"access_token": token, "token_type": "bearer"}
+
+
 @router.post("/auth/request-code", status_code=202)
 def request_code(body: CodeRequest, request: Request, session: Session = Depends(get_db)) -> dict:
     settings = get_settings()
@@ -154,7 +261,10 @@ def request_code(body: CodeRequest, request: Request, session: Session = Depends
         # SMTP delivery is not wired. Operators issue a code with the CLI.
         raise HTTPException(status_code=501, detail="email_not_configured")
     try:
-        code = issue_login_code(session, body.email, body.invite_code)
+        if body.invite_code:
+            code = issue_login_code(session, body.email, body.invite_code)
+        else:
+            code = issue_login_code_for_user(session, body.email)
     except AuthError as exc:
         _fail(exc)
     if settings.app_env == "test":
@@ -170,7 +280,11 @@ def verify_code(body: CodeVerify, session: Session = Depends(get_db)) -> dict:
         token = issue_token(user.id)
     except AuthError as exc:
         _fail(exc)
-    return {"access_token": token, "token_type": "bearer"}
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "trial_active": trial_active(user),
+    }
 
 
 @router.get("/me")
@@ -275,16 +389,43 @@ def browser_status(
     return pool_status(session, user.id, driver)
 
 
+class LocalBrowserBody(BaseModel):
+    browser: str = Field(min_length=1, max_length=16)
+    port: int = Field(ge=1, le=65535)
+
+
+@router.post("/browser/local/attach")
+def browser_local_attach(
+    body: LocalBrowserBody,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    try:
+        return attach_local(session, user.id, body.browser.strip().lower(), body.port)
+    except BrowserError as exc:
+        status = _STATUS.get(exc.code, 409)
+        raise HTTPException(status_code=status, detail=exc.code) from None
+
+
+@router.post("/browser/local/detach")
+def browser_local_detach(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    return detach_local(session, user.id)
+
+
 @router.post("/browser/start")
 def browser_start(
+    prefer_local: bool = True,
     user: User = Depends(get_current_user),
     session: Session = Depends(get_db),
     driver=Depends(get_browser_driver),
 ) -> dict:
     try:
-        return pool_start(session, user.id, driver)
+        return pool_start(session, user.id, driver, prefer_local=prefer_local)
     except BrowserError as exc:
-        status = 503 if exc.code == "browser_unavailable" else 409
+        status = _STATUS.get(exc.code, 503 if exc.code == "browser_unavailable" else 409)
         raise HTTPException(status_code=status, detail=exc.code) from None
 
 
@@ -461,7 +602,7 @@ def usage(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_db),
 ) -> dict:
-    return public_usage(snapshot(session, user))
+    return public_usage(snapshot(session, user), trial_active=trial_active(user))
 
 
 @router.get("/admin/quotas")
@@ -475,7 +616,7 @@ def admin_quotas(
 
     people = []
     for person in session.scalars(select(User).order_by(User.created_at)):
-        view = public_usage(snapshot(session, person))
+        view = public_usage(snapshot(session, person), trial_active=trial_active(person))
         people.append({"id": str(person.id), "email": person.email, **view})
     totals = session.execute(
         select(TaskStep.task_id, func.sum(TaskStep.cost_rub))
@@ -505,7 +646,7 @@ def set_user_limit(
     if body.weekly_limit_rub is not None:
         target.weekly_limit_rub = body.weekly_limit_rub
     session.flush()
-    return public_usage(snapshot(session, target))
+    return public_usage(snapshot(session, target), trial_active=trial_active(target))
 
 
 @router.post("/tasks/{task_id}/run")
@@ -569,6 +710,32 @@ def feedback(
     except TrajectoryError as exc:
         _fail(exc)
     return {"rating": row.rating, "acceptance": row.acceptance}
+
+
+class IncidentBody(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    log_excerpt: str = Field(default="", max_length=32000)
+    screenshot_base64: str | None = None
+
+
+@router.post("/reports/incident", status_code=201)
+def report_incident(
+    body: IncidentBody,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    try:
+        row = create_incident(
+            session,
+            user,
+            message=body.message,
+            log_excerpt=body.log_excerpt,
+            screenshot_base64=body.screenshot_base64,
+        )
+    except SupportError as exc:
+        status = _STATUS.get(exc.code, 400)
+        raise HTTPException(status_code=status, detail=exc.code) from None
+    return {"id": str(row.id)}
 
 
 @router.get("/admin/trajectories.jsonl")

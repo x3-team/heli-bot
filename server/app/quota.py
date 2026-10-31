@@ -94,13 +94,14 @@ def snapshot(session: Session, user: User, now: datetime | None = None) -> Usage
     )
 
 
-def public_usage(snap: UsageSnapshot) -> dict:
+def public_usage(snap: UsageSnapshot, *, trial_active: bool = False) -> dict:
     return {
         "week_percent": _public_number(snap.week_percent),
         "month_percent": _public_number(snap.month_percent),
         "blocked": snap.blocked,
         "warning": snap.warning,
         "reset_label": RESET_LABEL,
+        "trial_active": trial_active,
     }
 
 

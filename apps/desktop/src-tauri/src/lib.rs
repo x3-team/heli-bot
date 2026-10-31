@@ -1,9 +1,35 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use serde::Serialize;
+
+static AGENT_STOPPED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Serialize)]
+struct BrowserLaunch {
+    browser: String,
+    port: u16,
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![agent_decide])
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .invoke_handler(tauri::generate_handler![
+            agent_decide,
+            agent_set_stopped,
+            computer_screenshot,
+            computer_click,
+            computer_type,
+            browser_launch,
+            log_agent_step,
+        ])
         .run(tauri::generate_context!())
         .expect("failed to start Heli bot");
+}
+
+#[tauri::command]
+fn agent_set_stopped(stopped: bool) {
+    AGENT_STOPPED.store(stopped, Ordering::SeqCst);
 }
 
 #[tauri::command]
@@ -17,12 +43,13 @@ fn agent_decide(
     allowed_apps: Vec<String>,
     stopped: bool,
 ) -> String {
+    let halted = stopped || AGENT_STOPPED.load(Ordering::SeqCst);
     let policy = local_agent::Policy {
         run_command,
         confirm_writes,
         allowed_paths,
         allowed_apps,
-        stopped,
+        stopped: halted,
     };
     let action = local_agent::Action::new(tool, path, app);
     match local_agent::decide(&policy, &action) {
@@ -31,4 +58,39 @@ fn agent_decide(
         local_agent::Decision::Deny => "deny",
     }
     .to_string()
+}
+
+#[tauri::command]
+fn computer_screenshot() -> Result<String, String> {
+    local_agent::computer::screenshot_png_base64()
+}
+
+#[tauri::command]
+fn computer_click(x: i32, y: i32) -> Result<(), String> {
+    local_agent::computer::pointer_click(x, y)
+}
+
+#[tauri::command]
+fn computer_type(text: String) -> Result<(), String> {
+    local_agent::computer::type_text(&text)
+}
+
+#[tauri::command]
+fn browser_launch() -> Result<BrowserLaunch, String> {
+    if let Ok(port) = std::env::var("HELI_LOCAL_BROWSER_PORT") {
+        let port: u16 = port.parse().map_err(|_| "bad_port".to_string())?;
+        let browser = std::env::var("HELI_LOCAL_BROWSER").unwrap_or_else(|_| "chrome".into());
+        return Ok(BrowserLaunch { browser, port });
+    }
+    Err("local_browser_launcher_not_configured".to_string())
+}
+
+#[tauri::command]
+fn log_agent_step(tool: String, screenshot_base64: Option<String>) -> Result<(), String> {
+    log::info!(
+        "agent step tool={} screenshot={}",
+        tool,
+        screenshot_base64.as_ref().map(|s| s.len()).unwrap_or(0)
+    );
+    Ok(())
 }

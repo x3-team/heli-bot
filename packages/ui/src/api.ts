@@ -3,6 +3,7 @@ export interface Usage {
   monthPercent: number;
   blocked: boolean;
   warning: boolean;
+  trialActive: boolean;
 }
 
 export interface SessionUser {
@@ -20,10 +21,17 @@ const ERRORS: Record<string, string> = {
   request_failed: "Модель не ответила. Попробуйте ещё раз.",
   unknown_alias: "Сервер не принял шаг.",
   limit_reached: "Лимит исчерпан",
+  email_taken: "Этот адрес уже зарегистрирован.",
+  credentials_invalid: "Почта или пароль не подошли.",
+  password_weak: "Пароль должен быть не короче 8 символов.",
+  user_not_found: "Пользователь не найден.",
   browser_unavailable: "Браузер на сервере сейчас недоступен.",
   browser_busy: "Свободных браузеров нет. Попробуйте позже.",
   vault_unavailable: "Хранилище доступов на сервере не настроено.",
   bad_schedule: "Нужна фраза «каждый понедельник в 9:00» или пять полей cron.",
+  local_browser_required: "Нужен локальный Chrome или Edge на этом компьютере.",
+  bad_browser: "Поддерживаются только Chrome и Edge.",
+  cloud_running: "Сначала остановите облачный браузер.",
 };
 
 export class ApiError extends Error {
@@ -46,13 +54,73 @@ async function send(base: string, path: string, init: RequestInit): Promise<Resp
   return fetch(`${base}${path}`, init);
 }
 
-export async function requestCode(base: string, email: string, inviteCode: string): Promise<void> {
+export async function requestCode(base: string, email: string, inviteCode?: string): Promise<void> {
+  const payload: { email: string; invite_code?: string } = { email };
+  if (inviteCode?.trim()) payload.invite_code = inviteCode.trim();
   const response = await send(base, "/v1/auth/request-code", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ email, invite_code: inviteCode }),
+    body: JSON.stringify(payload),
   });
   if (!response.ok) throw new ApiError(await readError(response));
+}
+
+export async function registerAccount(
+  base: string,
+  email: string,
+  password: string,
+  consentPdn: boolean,
+  consentTraining: boolean,
+): Promise<string> {
+  const response = await send(base, "/v1/auth/register", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email,
+      password,
+      consent_pdn: consentPdn,
+      consent_training: consentTraining,
+    }),
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+  const body = (await response.json()) as { access_token: string };
+  return body.access_token;
+}
+
+export async function loginPassword(base: string, email: string, password: string): Promise<string> {
+  const response = await send(base, "/v1/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+  const body = (await response.json()) as { access_token: string };
+  return body.access_token;
+}
+
+export async function recoverRequest(base: string, email: string): Promise<void> {
+  const response = await send(base, "/v1/auth/recover/request", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+}
+
+export async function recoverReset(
+  base: string,
+  email: string,
+  code: string,
+  password: string,
+): Promise<string> {
+  const response = await send(base, "/v1/auth/recover/reset", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email, code, password }),
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+  const body = (await response.json()) as { access_token: string };
+  return body.access_token;
 }
 
 export async function verifyCode(base: string, email: string, code: string): Promise<string> {
@@ -94,7 +162,7 @@ export async function loadUsage(base: string, token: string): Promise<Usage> {
     headers: { authorization: `Bearer ${token}` },
   });
   if (response.status === 404) {
-    return { weekPercent: 0, monthPercent: 0, blocked: false, warning: false };
+    return { weekPercent: 0, monthPercent: 0, blocked: false, warning: false, trialActive: false };
   }
   if (!response.ok) throw new ApiError(await readError(response));
   const body = (await response.json()) as {
@@ -102,13 +170,26 @@ export async function loadUsage(base: string, token: string): Promise<Usage> {
     month_percent?: number;
     blocked?: boolean;
     warning?: boolean;
+    trial_active?: boolean;
   };
   return {
     weekPercent: body.week_percent ?? 0,
     monthPercent: body.month_percent ?? 0,
     blocked: Boolean(body.blocked),
     warning: Boolean(body.warning),
+    trialActive: Boolean(body.trial_active),
   };
+}
+
+export class TaskAbortedError extends Error {
+  constructor() {
+    super("aborted");
+  }
+}
+
+export interface TaskRunResult {
+  taskId: string;
+  reply: string;
 }
 
 export async function runTask(
@@ -116,7 +197,7 @@ export async function runTask(
   token: string,
   text: string,
   signal: AbortSignal,
-): Promise<string> {
+): Promise<TaskRunResult> {
   const created = await send(base, "/v1/tasks", {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
@@ -130,20 +211,74 @@ export async function runTask(
     headers: { authorization: `Bearer ${token}` },
     signal,
   });
+  if (signal.aborted) {
+    await finishTask(base, token, task.id, "aborted", "");
+    throw new TaskAbortedError();
+  }
   if (!run.ok) throw new ApiError(await readError(run));
   const body = (await run.json()) as { reply?: string };
-  await send(base, `/v1/tasks/${task.id}/finish`, {
+  return { taskId: task.id, reply: body.reply ?? "" };
+}
+
+export async function finishTask(
+  base: string,
+  token: string,
+  taskId: string,
+  outcome: "success" | "fail" | "aborted",
+  finalAnswer: string,
+): Promise<void> {
+  const response = await send(base, `/v1/tasks/${taskId}/finish`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-    body: JSON.stringify({ outcome: "success", final_answer: body.reply ?? "" }),
-    signal,
+    body: JSON.stringify({ outcome, final_answer: finalAnswer }),
   });
-  return body.reply ?? "";
+  if (!response.ok) throw new ApiError(await readError(response));
+}
+
+export async function submitTaskFeedback(
+  base: string,
+  token: string,
+  taskId: string,
+  worked: boolean,
+  comment: string,
+): Promise<void> {
+  const response = await send(base, `/v1/tasks/${taskId}/feedback`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      rating: worked ? 1 : -1,
+      acceptance: worked ? "accepted" : "rejected",
+      comment: comment.trim() || undefined,
+    }),
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+}
+
+export async function submitIncidentReport(
+  base: string,
+  token: string,
+  message: string,
+  logExcerpt: string,
+  screenshotBase64?: string | null,
+): Promise<void> {
+  const response = await send(base, "/v1/reports/incident", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      message,
+      log_excerpt: logExcerpt,
+      screenshot_base64: screenshotBase64 ?? null,
+    }),
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
 }
 
 export interface BrowserView {
   status: "running" | "stopped";
+  mode: "local" | "cloud";
   novncUrl: string | null;
+  localBrowser: string | null;
+  localPort: number | null;
 }
 
 export async function loadBrowser(base: string, token: string): Promise<BrowserView> {
@@ -154,8 +289,27 @@ export async function loadBrowser(base: string, token: string): Promise<BrowserV
   return readBrowser(response);
 }
 
-export async function startBrowser(base: string, token: string): Promise<BrowserView> {
-  const response = await send(base, "/v1/browser/start", {
+export async function attachLocalBrowser(
+  base: string,
+  token: string,
+  browser: "chrome" | "edge",
+  port: number,
+): Promise<BrowserView> {
+  const response = await send(base, "/v1/browser/local/attach", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ browser, port }),
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+  return readBrowser(response);
+}
+
+export async function startBrowser(
+  base: string,
+  token: string,
+  preferLocal = true,
+): Promise<BrowserView> {
+  const response = await send(base, `/v1/browser/start?prefer_local=${preferLocal ? "true" : "false"}`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}` },
   });
@@ -291,9 +445,18 @@ export async function deleteCredential(base: string, token: string, id: string):
 }
 
 async function readBrowser(response: Response): Promise<BrowserView> {
-  const body = (await response.json()) as { status?: string; novnc_url?: string | null };
+  const body = (await response.json()) as {
+    status?: string;
+    mode?: string;
+    novnc_url?: string | null;
+    local_browser?: string | null;
+    local_port?: number | null;
+  };
   return {
     status: body.status === "running" ? "running" : "stopped",
+    mode: body.mode === "local" ? "local" : "cloud",
     novncUrl: body.novnc_url ?? null,
+    localBrowser: body.local_browser ?? null,
+    localPort: body.local_port ?? null,
   };
 }

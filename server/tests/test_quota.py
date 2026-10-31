@@ -73,7 +73,7 @@ def test_warns_at_80_and_stops_at_100(session) -> None:
     assert warned.warning is True
     assert warned.blocked is False
     view = public_usage(warned)
-    assert set(view) == {"week_percent", "month_percent", "blocked", "warning", "reset_label"}
+    assert set(view) == {"week_percent", "month_percent", "blocked", "warning", "reset_label", "trial_active"}
     assert "rub" not in json.dumps(view)
 
     record_charge(session, user, Decimal("62.5"))

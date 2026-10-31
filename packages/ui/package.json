@@ -12,13 +12,16 @@
     "test": "node --experimental-strip-types --test src/behavior.test.ts"
   },
   "dependencies": {
-    "@fontsource/onest": "^5.2.8"
+    "@fontsource/onest": "^5.2.8",
+    "lottie-web": "^5.12.2"
   },
   "peerDependencies": {
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@tauri-apps/api": "^2.2.0",
+    "@tauri-apps/plugin-updater": "^2.2.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "react": "^19.0.0",

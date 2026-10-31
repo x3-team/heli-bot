@@ -47,8 +47,8 @@ def test_one_browser_per_user_and_idle_stop_keeps_profile(session) -> None:
     user = _user(session)
     driver = MemoryDriver()
     started = datetime(2026, 10, 31, 9, 0, tzinfo=timezone.utc)
-    first = pool_start(session, user.id, driver, started)
-    second = pool_start(session, user.id, driver, started + timedelta(minutes=1))
+    first = pool_start(session, user.id, driver, prefer_local=False, now=started)
+    second = pool_start(session, user.id, driver, prefer_local=False, now=started + timedelta(minutes=1))
     assert first["status"] == "running"
     assert second["novnc_url"] == "http://127.0.0.1:6080/vnc.html"
     assert len(driver.specs) == 1
@@ -60,7 +60,7 @@ def test_one_browser_per_user_and_idle_stop_keeps_profile(session) -> None:
     assert driver.containers == {}
     assert f"heli-profile-{user.id}" in driver.volumes
 
-    again = pool_start(session, user.id, driver, started + timedelta(minutes=13))
+    again = pool_start(session, user.id, driver, prefer_local=False, now=started + timedelta(minutes=13))
     assert again["status"] == "running"
     assert f"heli-profile-{user.id}" in driver.volumes
 
@@ -70,14 +70,14 @@ def test_pool_stops_on_request_and_refuses_when_full(session, monkeypatch) -> No
     first = _user(session, "one@example.com")
     second = _user(session, "two@example.com")
     driver = MemoryDriver()
-    pool_start(session, first.id, driver)
+    pool_start(session, first.id, driver, prefer_local=False)
     with pytest.raises(BrowserError) as caught:
-        pool_start(session, second.id, driver)
+        pool_start(session, second.id, driver, prefer_local=False)
     assert caught.value.code == "browser_busy"
     stopped = pool_stop(session, first.id, driver)
     assert stopped["status"] == "stopped"
     assert f"heli-profile-{first.id}" in driver.volumes
-    opened = pool_start(session, second.id, driver)
+    opened = pool_start(session, second.id, driver, prefer_local=False)
     assert opened["status"] == "running"
 
 
@@ -157,7 +157,7 @@ def test_browser_routes(client, session) -> None:
     driver = MemoryDriver()
     client.app.dependency_overrides[get_browser_driver] = lambda: driver
     assert client.get("/v1/browser", headers=headers).json()["status"] == "stopped"
-    started = client.post("/v1/browser/start", headers=headers)
+    started = client.post("/v1/browser/start?prefer_local=false", headers=headers)
     assert started.status_code == 200
     assert started.json()["status"] == "running"
     assert started.json()["idle_minutes"] == 10
@@ -172,6 +172,6 @@ def test_browser_routes(client, session) -> None:
             raise BrowserError("browser_unavailable")
 
     client.app.dependency_overrides[get_browser_driver] = lambda: Down()
-    missing = client.post("/v1/browser/start", headers=headers)
+    missing = client.post("/v1/browser/start?prefer_local=false", headers=headers)
     assert missing.status_code == 503
     assert missing.json()["detail"] == "browser_unavailable"
