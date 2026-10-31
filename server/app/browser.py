@@ -1,4 +1,4 @@
-"""Per-user cloud browser. One container, a persistent profile, idle stop after 10 minutes."""
+"""Browser pool: local Chrome/Edge on the user's PC first, cloud Docker as fallback."""
 
 from __future__ import annotations
 
@@ -154,10 +154,75 @@ def pool_status(session: Session, user_id: uuid.UUID, driver, now: datetime | No
     return _public(slot)
 
 
-def pool_start(session: Session, user_id: uuid.UUID, driver, now: datetime | None = None) -> dict:
+def attach_local(
+    session: Session,
+    user_id: uuid.UUID,
+    browser: str,
+    port: int,
+    now: datetime | None = None,
+) -> dict:
+    if browser not in {"chrome", "edge"}:
+        raise BrowserError("bad_browser")
+    if port < 1 or port > 65535:
+        raise BrowserError("bad_port")
+    moment = _aware(now)
+    slot = session.get(BrowserSlot, user_id)
+    if slot is None:
+        slot = BrowserSlot(
+            user_id=user_id,
+            container_id=None,
+            novnc_url=None,
+            mode="local",
+            local_browser=browser,
+            local_port=port,
+            status="running",
+            last_activity=moment,
+            created_at=moment,
+        )
+        session.add(slot)
+    else:
+        if slot.status == "running" and slot.mode == "cloud" and slot.container_id:
+            raise BrowserError("cloud_running")
+        slot.mode = "local"
+        slot.local_browser = browser
+        slot.local_port = port
+        slot.status = "running"
+        slot.container_id = None
+        slot.novnc_url = None
+        slot.last_activity = moment
+    session.flush()
+    return _public(slot)
+
+
+def detach_local(session: Session, user_id: uuid.UUID) -> dict:
+    slot = session.get(BrowserSlot, user_id)
+    if slot is None or slot.mode != "local":
+        return _public(slot)
+    slot.status = "stopped"
+    slot.local_browser = None
+    slot.local_port = None
+    slot.mode = "cloud"
+    session.flush()
+    return _public(slot)
+
+
+def pool_start(
+    session: Session,
+    user_id: uuid.UUID,
+    driver,
+    *,
+    prefer_local: bool = True,
+    now: datetime | None = None,
+) -> dict:
     reap_idle(session, driver, now)
     slot = session.get(BrowserSlot, user_id)
-    if slot is not None and slot.status == "running":
+    if slot is not None and slot.status == "running" and slot.mode == "local":
+        slot.last_activity = _aware(now)
+        session.flush()
+        return _public(slot)
+    if prefer_local:
+        raise BrowserError("local_browser_required")
+    if slot is not None and slot.status == "running" and slot.mode == "cloud":
         slot.last_activity = _aware(now)
         session.flush()
         return _public(slot)
@@ -173,6 +238,9 @@ def pool_start(session: Session, user_id: uuid.UUID, driver, now: datetime | Non
             user_id=user_id,
             container_id=started.container_id,
             novnc_url=started.novnc_url,
+            mode="cloud",
+            local_browser=None,
+            local_port=None,
             status="running",
             last_activity=moment,
             created_at=moment,
@@ -181,6 +249,9 @@ def pool_start(session: Session, user_id: uuid.UUID, driver, now: datetime | Non
     else:
         slot.container_id = started.container_id
         slot.novnc_url = started.novnc_url
+        slot.mode = "cloud"
+        slot.local_browser = None
+        slot.local_port = None
         slot.status = "running"
         slot.last_activity = moment
     session.flush()
@@ -190,10 +261,14 @@ def pool_start(session: Session, user_id: uuid.UUID, driver, now: datetime | Non
 def pool_stop(session: Session, user_id: uuid.UUID, driver) -> dict:
     slot = session.get(BrowserSlot, user_id)
     if slot is not None and slot.status == "running":
-        driver.stop(user_id, slot.container_id)
+        if slot.mode == "cloud" and slot.container_id:
+            driver.stop(user_id, slot.container_id)
         slot.status = "stopped"
         slot.container_id = None
         slot.novnc_url = None
+        slot.local_browser = None
+        slot.local_port = None
+        slot.mode = "cloud"
         session.flush()
     return _public(slot)
 
@@ -209,6 +284,13 @@ def reap_idle(session: Session, driver, now: datetime | None = None) -> int:
             activity = activity.replace(tzinfo=timezone.utc)
         if activity >= cutoff:
             continue
+        if slot.mode == "local":
+            slot.status = "stopped"
+            slot.local_browser = None
+            slot.local_port = None
+            slot.mode = "cloud"
+            stopped += 1
+            continue
         try:
             driver.stop(slot.user_id, slot.container_id)
         except BrowserError:
@@ -223,10 +305,30 @@ def reap_idle(session: Session, driver, now: datetime | None = None) -> int:
     return stopped
 
 
+def local_cdp_url(slot: BrowserSlot) -> str | None:
+    if slot.mode != "local" or slot.local_port is None:
+        return None
+    return f"http://127.0.0.1:{slot.local_port}"
+
+
 def _public(slot: BrowserSlot | None) -> dict:
     if slot is None or slot.status != "running":
-        return {"status": "stopped", "novnc_url": None, "idle_minutes": 10}
-    return {"status": "running", "novnc_url": slot.novnc_url, "idle_minutes": 10}
+        return {
+            "status": "stopped",
+            "mode": "cloud",
+            "novnc_url": None,
+            "local_browser": None,
+            "local_port": None,
+            "idle_minutes": 10,
+        }
+    return {
+        "status": "running",
+        "mode": slot.mode,
+        "novnc_url": slot.novnc_url,
+        "local_browser": slot.local_browser,
+        "local_port": slot.local_port,
+        "idle_minutes": 10,
+    }
 
 
 def _ensure_network(client, name: str) -> None:
