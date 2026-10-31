@@ -1,16 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   ApiError,
+  deleteCredential,
   loadBrowser,
+  loadCredentials,
   loadMe,
   loadUsage,
   requestCode,
   runTask,
   saveConsents,
+  saveCredential,
   startBrowser,
   stopBrowser,
   verifyCode,
   type BrowserView,
+  type CredentialItem,
   type Usage,
 } from "./api";
 import { clampPercent, confirmationNeeded, limitTone } from "./behavior";
@@ -338,6 +342,8 @@ function Workspace({
         {view === "limits" ? <Limits usage={usage} /> : null}
         {view === "settings" ? (
           <Settings
+            apiBase={apiBase}
+            token={token}
             theme={theme}
             consents={consents}
             onTheme={onTheme}
@@ -546,12 +552,16 @@ function Meter({ label, percent, tone }: { label: string; percent: number; tone:
 }
 
 function Settings({
+  apiBase,
+  token,
   theme,
   consents,
   onTheme,
   onConsents,
   onSignOut,
 }: {
+  apiBase: string;
+  token: string;
   theme: Theme;
   consents: { pdn: boolean; training: boolean };
   onTheme: (theme: Theme) => void;
@@ -561,8 +571,12 @@ function Settings({
   const [site, setSite] = useState("");
   const [username, setUsername] = useState("");
   const [secret, setSecret] = useState("");
-  const [links, setLinks] = useState<{ site: string; username: string }[]>([]);
+  const [links, setLinks] = useState<CredentialItem[]>([]);
   const [note, setNote] = useState("");
+
+  useEffect(() => {
+    void loadCredentials(apiBase, token).then(setLinks).catch(() => undefined);
+  }, [apiBase, token]);
 
   return (
     <div className="page">
@@ -599,17 +613,26 @@ function Settings({
       </section>
       <section className="card">
         <h2>Подключения</h2>
-        <p className="muted">Сайт и имя видны вам. Секрет в этот экран не сохраняется и в ответы не попадает.</p>
+        <p className="muted">Сайт и имя видны вам. Секрет шифруется и в ответы не попадает.</p>
         <form
           className="stack"
           onSubmit={(event) => {
             event.preventDefault();
-            if (!site.trim() || !username.trim()) return;
-            setLinks((list) => [...list, { site: site.trim(), username: username.trim() }]);
+            const nextSite = site.trim();
+            const nextUsername = username.trim();
+            const nextSecret = secret;
+            if (!nextSite || !nextUsername || !nextSecret) return;
             setSite("");
             setUsername("");
             setSecret("");
-            setNote(secret ? "Секрет не сохранён на этом экране." : "");
+            void saveCredential(apiBase, token, nextSite, nextUsername, nextSecret)
+              .then((saved) => {
+                setLinks((list) => [...list, saved]);
+                setNote("Секрет зашифрован и в ответы не попадает.");
+              })
+              .catch((err: unknown) => {
+                setNote(err instanceof ApiError ? err.message : "Не получилось сохранить.");
+              });
           }}
         >
           <input aria-label="Сайт" placeholder="Сайт" value={site} onChange={(event) => setSite(event.target.value)} />
@@ -627,7 +650,19 @@ function Settings({
         {note ? <p className="muted">{note}</p> : null}
         <ul>
           {links.map((link) => (
-            <li key={`${link.site}-${link.username}`}>{link.site} · {link.username}</li>
+            <li key={link.id}>
+              {link.site} · {link.username}
+              <button
+                type="button"
+                onClick={() => {
+                  void deleteCredential(apiBase, token, link.id).then(() => {
+                    setLinks((list) => list.filter((item) => item.id !== link.id));
+                  }).catch(() => undefined);
+                }}
+              >
+                Удалить
+              </button>
+            </li>
           ))}
         </ul>
       </section>

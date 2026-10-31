@@ -19,6 +19,14 @@ from app.browser import (
     pool_status,
     pool_stop,
 )
+from app.vault import (
+    VaultError,
+    delete_credential,
+    fill_for_model,
+    list_credentials,
+    public_credential,
+    store_credential,
+)
 from app.config import get_settings
 from app.db import get_db
 from app.models import TaskStep, User
@@ -328,6 +336,64 @@ def browser_stop(
     except BrowserError as exc:
         status = 503 if exc.code == "browser_unavailable" else 409
         raise HTTPException(status_code=status, detail=exc.code) from None
+
+
+class CredentialBody(BaseModel):
+    site: str = Field(min_length=1, max_length=256)
+    username: str = Field(min_length=1, max_length=256)
+    secret: str = Field(min_length=1, max_length=4096)
+
+
+def _vault_fail(exc: VaultError) -> None:
+    status = 503 if exc.code == "vault_unavailable" else 404
+    raise HTTPException(status_code=status, detail=exc.code)
+
+
+@router.get("/credentials")
+def credentials_list(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    return {"credentials": list_credentials(session, user)}
+
+
+@router.post("/credentials", status_code=201)
+def credentials_create(
+    body: CredentialBody,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    try:
+        row = store_credential(session, user, body.site, body.username, body.secret)
+    except VaultError as exc:
+        _vault_fail(exc)
+    return public_credential(row)
+
+
+@router.delete("/credentials/{credential_id}")
+def credentials_delete(
+    credential_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    try:
+        delete_credential(session, user, credential_id)
+    except VaultError as exc:
+        _vault_fail(exc)
+    return {"deleted": True}
+
+
+@router.post("/credentials/{credential_id}/fill")
+def credentials_fill(
+    credential_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    try:
+        placeholder = fill_for_model(session, user, credential_id)
+    except VaultError as exc:
+        _vault_fail(exc)
+    return {"placeholder": placeholder}
 
 
 @router.get("/usage")
