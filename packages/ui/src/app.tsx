@@ -5,22 +5,25 @@ import {
   loadBrowser,
   loadCredentials,
   loadMe,
+  loadSchedules,
   loadUsage,
   requestCode,
   runTask,
   saveConsents,
   saveCredential,
+  saveSchedule,
   startBrowser,
   stopBrowser,
   verifyCode,
   type BrowserView,
   type CredentialItem,
+  type ScheduleItem,
   type Usage,
 } from "./api";
 import { clampPercent, confirmationNeeded, limitTone } from "./behavior";
 import { Mascot, avatarFor, mascotLabel, type MascotState } from "./mascot";
 
-type View = "chat" | "limits" | "settings";
+type View = "chat" | "limits" | "schedules" | "settings";
 type Theme = "light" | "dark";
 
 interface Message {
@@ -309,6 +312,9 @@ function Workspace({
           <button type="button" aria-current={view === "limits" ? "page" : undefined} onClick={() => setView("limits")}>
             Лимиты
           </button>
+          <button type="button" aria-current={view === "schedules" ? "page" : undefined} onClick={() => setView("schedules")}>
+            Расписания
+          </button>
           <button type="button" aria-current={view === "settings" ? "page" : undefined} onClick={() => setView("settings")}>
             Настройки
           </button>
@@ -340,6 +346,7 @@ function Workspace({
           />
         ) : null}
         {view === "limits" ? <Limits usage={usage} /> : null}
+        {view === "schedules" ? <Schedules apiBase={apiBase} token={token} /> : null}
         {view === "settings" ? (
           <Settings
             apiBase={apiBase}
@@ -524,6 +531,57 @@ function Meter({ label, percent, tone }: { label: string; percent: number; tone:
       <div className={`bar ${tone}`} aria-hidden="true">
         <span style={{ width: `${percent}%` }} />
       </div>
+    </div>
+  );
+}
+
+function Schedules({ apiBase, token }: { apiBase: string; token: string }) {
+  const [rows, setRows] = useState<ScheduleItem[]>([]);
+  const [label, setLabel] = useState("");
+  const [when, setWhen] = useState("каждый понедельник в 9:00");
+  const [request, setRequest] = useState("");
+  const [note, setNote] = useState("");
+
+  useEffect(() => {
+    void loadSchedules(apiBase, token).then(setRows).catch(() => undefined);
+  }, [apiBase, token]);
+
+  return (
+    <div className="page">
+      <h1>Расписания</h1>
+      <p className="muted">Запуск идёт в облаке и списывает лимит. Результат остаётся в задаче.</p>
+      <form
+        className="stack"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!label.trim() || !when.trim() || !request.trim()) return;
+          void saveSchedule(apiBase, token, label.trim(), when.trim(), request.trim())
+            .then((row) => {
+              setRows((list) => [...list, row]);
+              setLabel("");
+              setRequest("");
+              setNote("");
+            })
+            .catch((err: unknown) => {
+              setNote(err instanceof ApiError ? err.message : "Не получилось сохранить расписание.");
+            });
+        }}
+      >
+        <input aria-label="Название" placeholder="Название" value={label} onChange={(event) => setLabel(event.target.value)} />
+        <input aria-label="Когда" value={when} onChange={(event) => setWhen(event.target.value)} />
+        <textarea aria-label="Задача" placeholder="Что сделать" value={request} onChange={(event) => setRequest(event.target.value)} />
+        <button type="submit" data-emphasis="primary">Добавить</button>
+      </form>
+      {note ? <p className="error">{note}</p> : null}
+      <ul>
+        {rows.map((row) => (
+          <li key={row.id}>
+            <strong>{row.label}</strong> · {row.expression}
+            {row.lastResult ? <span> · {row.lastResult}</span> : null}
+            {row.lastError === "limit_reached" ? <span> · Лимит исчерпан</span> : null}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

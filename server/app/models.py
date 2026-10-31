@@ -199,6 +199,22 @@ class Credential(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class Schedule(Base):
+    __tablename__ = "schedules"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False, index=True)
+    label: Mapped[str] = mapped_column(String(200), nullable=False)
+    expression: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_text: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    next_run: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_run: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class CredentialAccess(Base):
     __tablename__ = "credential_access"
 

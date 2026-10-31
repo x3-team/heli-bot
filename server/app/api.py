@@ -25,6 +25,7 @@ from app.models import TaskStep, User
 from app.llm.client import HeliClient, HeliError
 from app.llm.run import run_turn
 from app.quota import QuotaError, public_usage, snapshot
+from app.schedules import ScheduleError, create_schedule, delete_schedule, list_schedules, run_due
 from app.trajectories import (
     TrajectoryError,
     add_step,
@@ -355,6 +356,65 @@ def credentials_fill(
     except VaultError as exc:
         _vault_fail(exc)
     return {"placeholder": placeholder}
+
+
+class ScheduleBody(BaseModel):
+    label: str = Field(min_length=1, max_length=200)
+    expression: str = Field(min_length=1, max_length=80)
+    request: str = Field(min_length=1, max_length=4000)
+
+
+@router.get("/schedules")
+def schedules_list(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    return {"schedules": list_schedules(session, user)}
+
+
+@router.post("/schedules", status_code=201)
+def schedules_create(
+    body: ScheduleBody,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    try:
+        row = create_schedule(session, user, body.label, body.expression, body.request)
+    except ScheduleError as exc:
+        raise HTTPException(status_code=400, detail=exc.code) from None
+    return {
+        "id": str(row.id),
+        "label": row.label,
+        "expression": row.expression,
+        "enabled": row.enabled,
+        "next_run": row.next_run.isoformat(),
+        "last_result": row.last_result,
+        "last_error": row.last_error,
+    }
+
+
+@router.delete("/schedules/{schedule_id}")
+def schedules_delete(
+    schedule_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    try:
+        delete_schedule(session, user, schedule_id)
+    except ScheduleError as exc:
+        raise HTTPException(status_code=404, detail=exc.code) from None
+    return {"deleted": True}
+
+
+@router.post("/schedules/run")
+def schedules_run(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+    client: HeliClient = Depends(get_heli_client),
+    driver=Depends(get_browser_driver),
+) -> dict:
+    ran = run_due(session, client, driver, user_id=user.id)
+    return {"ran": ran, "schedules": list_schedules(session, user)}
 
 
 @router.get("/usage")
