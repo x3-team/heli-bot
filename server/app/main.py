@@ -1,16 +1,23 @@
 import uvicorn
 from fastapi import FastAPI
 
+from app.api import router
+from app.browser import install_reaper
 from app.config import get_settings
+from app.masking import install_redact_filter
 
 
 def create_app() -> FastAPI:
+    install_redact_filter()
     app = FastAPI(title="Heli bot", version="0.1.0")
+    app.state.mail_sink = []
 
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    app.include_router(router)
+    install_reaper()
     return app
 
 

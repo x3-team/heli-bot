@@ -1,0 +1,18 @@
+[package]
+name = "local-agent"
+version = "0.1.0"
+edition = "2021"
+description = "Local computer actions with confirmation rules"
+publish = false
+
+[dependencies]
+base64 = { version = "0.22", optional = true }
+enigo = { version = "0.2", optional = true }
+png = { version = "0.17", optional = true }
+screenshots = { version = "0.8.10", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", optional = true }
+
+[features]
+default = []
+os = ["dep:enigo", "dep:base64", "dep:serde_json", "dep:png", "dep:screenshots"]

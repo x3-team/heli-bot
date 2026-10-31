@@ -1,7 +1,14 @@
-import { StrictMode } from "react";
+import { StrictMode, useEffect } from "react";
 import { createRoot } from "react-dom/client";
-import { Shell } from "@heli/ui";
+import { Shell, checkForAppUpdates } from "@heli/ui";
 import "@heli/ui/tokens.css";
+
+function Boot() {
+  useEffect(() => {
+    void checkForAppUpdates();
+  }, []);
+  return <Shell />;
+}
 
 const root = document.getElementById("root");
 if (!root) {
@@ -10,6 +17,6 @@ if (!root) {
 
 createRoot(root).render(
   <StrictMode>
-    <Shell />
+    <Boot />
   </StrictMode>,
 );
