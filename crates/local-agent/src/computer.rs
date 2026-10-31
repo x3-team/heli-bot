@@ -21,7 +21,7 @@ pub fn screenshot_png_base64() -> Result<String, String> {
         encoder.set_depth(BitDepth::Eight);
         let mut writer = encoder.write_header().map_err(|err| err.to_string())?;
         writer
-            .write_image_data(shot.rgba())
+            .write_image_data(shot.as_raw())
             .map_err(|err| err.to_string())?;
     }
     Ok(STANDARD.encode(buf))
