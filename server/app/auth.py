@@ -1,8 +1,8 @@
 import hashlib
+import hmac
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
-
 import jwt
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -12,6 +12,8 @@ from app.models import Invite, LoginCode, User
 
 CODE_TTL = timedelta(minutes=10)
 TOKEN_TTL = timedelta(days=14)
+TRIAL = timedelta(days=7)
+MIN_PASSWORD = 8
 
 
 class AuthError(Exception):
@@ -57,16 +59,79 @@ def _find_invite(session: Session, raw_code: str) -> Invite | None:
     return session.scalar(select(Invite).where(Invite.code_hash == code_hash))
 
 
-def issue_login_code(session: Session, email: str, invite_code: str) -> str:
-    invite = _find_invite(session, invite_code)
-    if invite is None or invite.uses >= invite.max_uses:
-        raise AuthError("invite_invalid")
-    normalized = email.strip().lower()
+def _normalize_email(email: str) -> str:
+    return email.strip().lower()
+
+
+def _check_password(password: str) -> None:
+    if len(password) < MIN_PASSWORD:
+        raise AuthError("password_weak")
+
+
+def _password_hash(password: str) -> str:
+    _check_password(password)
+    return hash_secret(password)
+
+
+def _password_ok(stored: str | None, password: str) -> bool:
+    if not stored:
+        return False
+    try:
+        candidate = hash_secret(password)
+    except AuthError:
+        return False
+    return hmac.compare_digest(stored, candidate)
+
+
+def register_user(
+    session: Session,
+    email: str,
+    password: str,
+    *,
+    consent_pdn: bool,
+    consent_training: bool,
+) -> User:
+    normalized = _normalize_email(email)
+    if session.scalar(select(User).where(User.email == normalized)):
+        raise AuthError("email_taken")
+    if not consent_pdn:
+        raise AuthError("pdn_consent_required")
+    now = datetime.now(timezone.utc)
+    settings = get_settings()
+    user = User(
+        email=normalized,
+        consent_pdn=True,
+        consent_training=consent_training,
+        is_admin=False,
+        monthly_limit_rub=settings.default_monthly_limit_rub,
+        password_hash=_password_hash(password),
+        trial_ends_at=now + TRIAL,
+        created_at=now,
+    )
+    session.add(user)
+    session.flush()
+    return user
+
+
+def login_with_password(session: Session, email: str, password: str) -> User:
+    normalized = _normalize_email(email)
+    user = session.scalar(select(User).where(User.email == normalized))
+    if user is None or not _password_ok(user.password_hash, password):
+        raise AuthError("credentials_invalid")
+    return user
+
+
+def issue_recovery_code(session: Session, email: str) -> str:
+    normalized = _normalize_email(email)
+    user = session.scalar(select(User).where(User.email == normalized))
+    if user is None or not user.password_hash:
+        raise AuthError("user_not_found")
     code = f"{secrets.randbelow(1_000_000):06d}"
     session.add(
         LoginCode(
             email=normalized,
-            invite_id=invite.id,
+            invite_id=None,
+            purpose="reset",
             code_hash=hash_secret(code),
             expires_at=datetime.now(timezone.utc) + CODE_TTL,
             used=False,
@@ -76,8 +141,52 @@ def issue_login_code(session: Session, email: str, invite_code: str) -> str:
     return code
 
 
-def verify_login_code(session: Session, email: str, code: str) -> User:
-    normalized = email.strip().lower()
+def reset_password(session: Session, email: str, code: str, password: str) -> User:
+    normalized = _normalize_email(email)
+    user = session.scalar(select(User).where(User.email == normalized))
+    if user is None:
+        raise AuthError("user_not_found")
+    row = _consume_code(session, normalized, code, "reset")
+    if row is None:
+        raise AuthError("code_invalid")
+    user.password_hash = _password_hash(password)
+    session.flush()
+    return user
+
+
+def issue_login_code(session: Session, email: str, invite_code: str) -> str:
+    invite = _find_invite(session, invite_code)
+    if invite is None or invite.uses >= invite.max_uses:
+        raise AuthError("invite_invalid")
+    normalized = _normalize_email(email)
+    return _store_code(session, normalized, invite.id, "login")
+
+
+def issue_login_code_for_user(session: Session, email: str) -> str:
+    normalized = _normalize_email(email)
+    user = session.scalar(select(User).where(User.email == normalized))
+    if user is None:
+        raise AuthError("user_not_found")
+    return _store_code(session, normalized, None, "login")
+
+
+def _store_code(session: Session, email: str, invite_id: uuid.UUID | None, purpose: str) -> str:
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    session.add(
+        LoginCode(
+            email=email,
+            invite_id=invite_id,
+            purpose=purpose,
+            code_hash=hash_secret(code),
+            expires_at=datetime.now(timezone.utc) + CODE_TTL,
+            used=False,
+        )
+    )
+    session.flush()
+    return code
+
+
+def _consume_code(session: Session, email: str, code: str, purpose: str) -> LoginCode | None:
     try:
         code_hash = hash_secret(code.strip())
     except AuthError:
@@ -86,36 +195,60 @@ def verify_login_code(session: Session, email: str, code: str) -> User:
     row = session.scalar(
         select(LoginCode)
         .where(
-            LoginCode.email == normalized,
+            LoginCode.email == email,
             LoginCode.code_hash == code_hash,
+            LoginCode.purpose == purpose,
             LoginCode.used.is_(False),
         )
         .order_by(LoginCode.expires_at.desc())
     )
     if row is None:
-        raise AuthError("code_invalid")
+        return None
     expires_at = row.expires_at
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     if expires_at < now:
-        raise AuthError("code_invalid")
+        return None
     row.used = True
+    return row
+
+
+def verify_login_code(session: Session, email: str, code: str) -> User:
+    normalized = _normalize_email(email)
+    now = datetime.now(timezone.utc)
+    row = _consume_code(session, normalized, code, "login")
+    if row is None:
+        raise AuthError("code_invalid")
     user = session.scalar(select(User).where(User.email == normalized))
     if user is None:
+        if row.invite_id is None:
+            raise AuthError("user_not_found")
         user = User(
             email=normalized,
             consent_pdn=False,
             consent_training=False,
             is_admin=False,
             monthly_limit_rub=get_settings().default_monthly_limit_rub,
+            trial_ends_at=now + TRIAL,
             created_at=now,
         )
         session.add(user)
-    invite = session.get(Invite, row.invite_id)
-    if invite is not None and invite.uses < invite.max_uses:
-        invite.uses += 1
+    if row.invite_id is not None:
+        invite = session.get(Invite, row.invite_id)
+        if invite is not None and invite.uses < invite.max_uses:
+            invite.uses += 1
     session.flush()
     return user
+
+
+def trial_active(user: User, now: datetime | None = None) -> bool:
+    if user.trial_ends_at is None:
+        return False
+    moment = now or datetime.now(timezone.utc)
+    ends = user.trial_ends_at
+    if ends.tzinfo is None:
+        ends = ends.replace(tzinfo=timezone.utc)
+    return moment < ends
 
 
 def issue_token(user_id: uuid.UUID) -> str:

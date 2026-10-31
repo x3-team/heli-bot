@@ -3,6 +3,7 @@ export interface Usage {
   monthPercent: number;
   blocked: boolean;
   warning: boolean;
+  trialActive: boolean;
 }
 
 export interface SessionUser {
@@ -20,6 +21,10 @@ const ERRORS: Record<string, string> = {
   request_failed: "Модель не ответила. Попробуйте ещё раз.",
   unknown_alias: "Сервер не принял шаг.",
   limit_reached: "Лимит исчерпан",
+  email_taken: "Этот адрес уже зарегистрирован.",
+  credentials_invalid: "Почта или пароль не подошли.",
+  password_weak: "Пароль должен быть не короче 8 символов.",
+  user_not_found: "Пользователь не найден.",
   browser_unavailable: "Браузер на сервере сейчас недоступен.",
   browser_busy: "Свободных браузеров нет. Попробуйте позже.",
   local_browser_required: "Нужен локальный Chrome или Edge на этом компьютере.",
@@ -47,13 +52,73 @@ async function send(base: string, path: string, init: RequestInit): Promise<Resp
   return fetch(`${base}${path}`, init);
 }
 
-export async function requestCode(base: string, email: string, inviteCode: string): Promise<void> {
+export async function requestCode(base: string, email: string, inviteCode?: string): Promise<void> {
+  const payload: { email: string; invite_code?: string } = { email };
+  if (inviteCode?.trim()) payload.invite_code = inviteCode.trim();
   const response = await send(base, "/v1/auth/request-code", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ email, invite_code: inviteCode }),
+    body: JSON.stringify(payload),
   });
   if (!response.ok) throw new ApiError(await readError(response));
+}
+
+export async function registerAccount(
+  base: string,
+  email: string,
+  password: string,
+  consentPdn: boolean,
+  consentTraining: boolean,
+): Promise<string> {
+  const response = await send(base, "/v1/auth/register", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email,
+      password,
+      consent_pdn: consentPdn,
+      consent_training: consentTraining,
+    }),
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+  const body = (await response.json()) as { access_token: string };
+  return body.access_token;
+}
+
+export async function loginPassword(base: string, email: string, password: string): Promise<string> {
+  const response = await send(base, "/v1/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+  const body = (await response.json()) as { access_token: string };
+  return body.access_token;
+}
+
+export async function recoverRequest(base: string, email: string): Promise<void> {
+  const response = await send(base, "/v1/auth/recover/request", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+}
+
+export async function recoverReset(
+  base: string,
+  email: string,
+  code: string,
+  password: string,
+): Promise<string> {
+  const response = await send(base, "/v1/auth/recover/reset", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email, code, password }),
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+  const body = (await response.json()) as { access_token: string };
+  return body.access_token;
 }
 
 export async function verifyCode(base: string, email: string, code: string): Promise<string> {
@@ -95,7 +160,7 @@ export async function loadUsage(base: string, token: string): Promise<Usage> {
     headers: { authorization: `Bearer ${token}` },
   });
   if (response.status === 404) {
-    return { weekPercent: 0, monthPercent: 0, blocked: false, warning: false };
+    return { weekPercent: 0, monthPercent: 0, blocked: false, warning: false, trialActive: false };
   }
   if (!response.ok) throw new ApiError(await readError(response));
   const body = (await response.json()) as {
@@ -103,12 +168,14 @@ export async function loadUsage(base: string, token: string): Promise<Usage> {
     month_percent?: number;
     blocked?: boolean;
     warning?: boolean;
+    trial_active?: boolean;
   };
   return {
     weekPercent: body.week_percent ?? 0,
     monthPercent: body.month_percent ?? 0,
     blocked: Boolean(body.blocked),
     warning: Boolean(body.warning),
+    trialActive: Boolean(body.trial_active),
   };
 }
 
