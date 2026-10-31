@@ -40,8 +40,6 @@ jobs:
     concurrency:
       group: heli-shared-server-deploy
       cancel-in-progress: false
-    env:
-      HELI_APP_DIR: /opt/heli-bot
     steps:
       - uses: actions/checkout@v4
 

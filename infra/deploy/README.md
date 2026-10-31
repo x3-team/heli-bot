@@ -1,6 +1,6 @@
 # Shared-server production deploy (venv + user systemd)
 
-Heli bot API for Vitalii's shared host: user **`helibot`**, home **`/opt/heli-bot`**, **no Docker**, **no root**. The API binds **`127.0.0.1`** only (reverse proxy on the host forwards a public HTTPS URL). Does **not** modify Fili or Heli (getheli) services.
+Heli bot API for user **`helibot`** at **`/opt/heli-bot`**: **no Docker**, **no root**. The API binds **`127.0.0.1`** only (reverse proxy forwards public HTTPS). Does **not** modify Fili or Heli (getheli).
 
 ## Layout on the host
 
@@ -10,15 +10,17 @@ Heli bot API for Vitalii's shared host: user **`helibot`**, home **`/opt/heli-bo
 | `/opt/heli-bot/venv` | Python 3.12 venv |
 | `/opt/heli-bot/var/heli.db` | Default SQLite database |
 | `/opt/heli-bot/.env` | Secrets (`env.venv.example`) |
-| `~/.config/systemd/user/heli-bot-api.service` | User unit (`systemctl --user`) |
+| `~/.config/systemd/user/heli-bot-api.service` | User unit |
 | `~/.config/systemd/user/helibot.slice` | **256 MB** memory cap |
+
+Legacy Docker Compose files remain for reference only; the GitHub deploy workflow uses **`remote-install.sh`**.
 
 ## GitHub Actions
 
 Workflow: `.github/workflows/deploy-shared-server.yml`
 
-- **Pull requests:** validate scripts + run server tests.
-- **Manual deploy:** `workflow_dispatch` → SSH sync + `infra/deploy/remote-install.sh`.
+- **Pull requests:** validate scripts + server tests.
+- **Manual deploy:** `workflow_dispatch` → SSH + venv + `alembic` + `systemctl --user`.
 
 ### Repository secrets
 
@@ -31,14 +33,12 @@ Workflow: `.github/workflows/deploy-shared-server.yml`
 | `HELI_DEPLOY_APP_DIR` | Optional; default `/opt/heli-bot` |
 | `HELI_DEPLOY_ENV_FILE` | Optional; default `/opt/heli-bot/.env` |
 
-Create `/opt/heli-bot/.env` from `env.venv.example` on the server before the first deploy.
+### Repository variables (desktop CI)
 
-### User systemd vs system unit
+| Variable | Purpose |
+|---|---|
+| `HELI_PUBLIC_API_BASE` | Public HTTPS API origin for `VITE_HELI_API_BASE` in installers |
 
-Deploy tries **`systemctl --user`** (requires **linger** for `helibot`: `loginctl enable-linger helibot` once by an admin).
+Create `/opt/heli-bot/.env` from `env.venv.example` before the first deploy.
 
-If user systemd is unavailable, the workflow fails with exit code **2** and prints commented templates from `systemd-system/` for an administrator to install under `/etc/systemd/system/`.
-
-## Desktop clients
-
-Set repository variable **`HELI_PUBLIC_API_BASE`** to the public HTTPS API origin (no trailing slash) so Windows/macOS builds call the same URL as the reverse proxy.
+If **`systemctl --user`** fails (no linger), the job exits **2** and logs **`systemd-system/`** templates for an admin.

@@ -11,28 +11,7 @@ export interface SessionUser {
   consentTraining: boolean;
 }
 
-const ERRORS: Record<string, string> = {
-  email_not_configured: "Почта для кода ещё не подключена. Код выдаёт оператор.",
-  invite_invalid: "Код приглашения не подошёл.",
-  code_invalid: "Код не подошёл.",
-  token_invalid: "Нужно войти снова.",
-  pdn_consent_required: "Нужно согласие на обработку данных.",
-  missing_api_key: "На сервере не задан ключ модели.",
-  request_failed: "Модель не ответила. Попробуйте ещё раз.",
-  unknown_alias: "Сервер не принял шаг.",
-  limit_reached: "Лимит исчерпан",
-  email_taken: "Этот адрес уже зарегистрирован.",
-  credentials_invalid: "Почта или пароль не подошли.",
-  password_weak: "Пароль должен быть не короче 8 символов.",
-  user_not_found: "Пользователь не найден.",
-  browser_unavailable: "Браузер на сервере сейчас недоступен.",
-  browser_busy: "Свободных браузеров нет. Попробуйте позже.",
-  vault_unavailable: "Хранилище доступов на сервере не настроено.",
-  bad_schedule: "Нужна фраза «каждый понедельник в 9:00» или пять полей cron.",
-  local_browser_required: "Нужен локальный Chrome или Edge на этом компьютере.",
-  bad_browser: "Поддерживаются только Chrome и Edge.",
-  cloud_running: "Сначала остановите облачный браузер.",
-};
+import { readApiError } from "./errors";
 
 export class ApiError extends Error {
   constructor(message: string) {
@@ -41,13 +20,7 @@ export class ApiError extends Error {
 }
 
 async function readError(response: Response): Promise<string> {
-  try {
-    const body = (await response.json()) as { detail?: string };
-    if (body.detail && ERRORS[body.detail]) return ERRORS[body.detail];
-  } catch {
-    // ignore a non-JSON body
-  }
-  return "Не получилось. Попробуйте ещё раз.";
+  return readApiError(response);
 }
 
 async function send(base: string, path: string, init: RequestInit): Promise<Response> {
