@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseAuthResponse } from "./api";
+import { parseAuthResponse } from "./authSession.ts";
 
 test("parseAuthResponse maps trial flag from register/login payload", () => {
   const trial = parseAuthResponse({ access_token: "tok", trial_active: true });

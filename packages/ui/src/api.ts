@@ -11,20 +11,10 @@ export interface SessionUser {
   consentTraining: boolean;
 }
 
-export interface AuthResult {
-  accessToken: string;
-  trialActive: boolean;
-}
+import { parseAuthResponse, type AuthResult } from "./authSession";
 
-export function parseAuthResponse(body: {
-  access_token: string;
-  trial_active?: boolean;
-}): AuthResult {
-  return {
-    accessToken: body.access_token,
-    trialActive: Boolean(body.trial_active),
-  };
-}
+export type { AuthResult } from "./authSession";
+export { parseAuthResponse } from "./authSession";
 
 import { readApiError } from "./errors";
 
