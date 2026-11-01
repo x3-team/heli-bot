@@ -9,6 +9,12 @@
 Playwright's sync API is bound to the thread that started it, so one worker thread owns the
 browser and every call is queued to it. Requests to private and loopback addresses are blocked,
 so a page cannot reach the API or other services on this host.
+
+The request guard is a Playwright route handler, and the sync API runs handlers only while some
+Playwright call is in progress. Between jobs the worker therefore keeps "pumping" (a short
+wait_for_timeout): otherwise every request a page makes on its own — a captcha image, a form the
+user submits on the live screen — would hang until the agent's next step, and the page would look
+frozen. While someone watches the panel, the worker also refreshes the frame about once a second.
 """
 
 from __future__ import annotations
@@ -39,7 +45,20 @@ log = logging.getLogger(__name__)
 
 IDLE_S = 10 * 60
 CALL_TIMEOUT_S = 60
-CAPTCHA_WAIT_S = 120
+# The agent waits this long for the user to pass a captcha on the live screen.
+CAPTCHA_WAIT_S = 10 * 60
+CAPTCHA_POLL_S = 2.0
+# Worker between jobs: let route handlers run, refresh the frame while the panel is watched.
+PUMP_S = 0.2
+LIVE_FRAME_S = 1.0
+WATCH_S = 12
+REAP_EVERY_S = 30
+# After ya.ru answers with a captcha, search through Mail.ru (Yandex results too) for a while.
+YA_CAPTCHA_SKIP_S = 30 * 60
+YA_SEARCH = "https://ya.ru/search/?text={q}&lr=213"
+MAIL_SEARCH = "https://go.mail.ru/search?q={q}"
+MAIL_WAIT_S = 12
+GUARD_CACHE_S = 60
 VIEWPORT = {"width": 1280, "height": 800}
 JPEG_QUALITY = 60
 
@@ -167,10 +186,38 @@ def format_snapshot(snap: dict) -> str:
     return "\n".join(lines)
 
 
+def _hits_or_empty(hits: list[dict] | None) -> str:
+    return format_hits(hits) if hits else ""
+
+
 def format_hits(hits: list[dict]) -> str:
     if not hits:
         return "Ничего не найдено."
     return "\n\n".join(f"{i}. {h['title']}\n{h['url']}\n{h.get('snippet', '')}" for i, h in enumerate(hits, 1))
+
+
+_guard_cache: dict[tuple, tuple[float, bool]] = {}
+
+
+def request_allowed_cached(url: str) -> bool:
+    """request_allowed, remembered per scheme+host+port for a minute: a page loads dozens of
+    resources from the same hosts, and each check is a DNS lookup on the browser's only thread."""
+    parts = urlsplit(url)
+    if parts.scheme.lower() in {"data", "blob", "about"}:
+        return True
+    try:
+        key = (parts.scheme.lower(), (parts.hostname or "").lower(), parts.port, bool(parts.username or parts.password))
+    except ValueError:
+        return False
+    now = time.monotonic()
+    hit = _guard_cache.get(key)
+    if hit and now - hit[0] < GUARD_CACHE_S:
+        return hit[1]
+    allowed = request_allowed(url)
+    if len(_guard_cache) > 2000:
+        _guard_cache.clear()
+    _guard_cache[key] = (now, allowed)
+    return allowed
 
 
 def request_allowed(url: str, resolver=None) -> bool:
@@ -379,6 +426,43 @@ class Page:
     def serp(self) -> list[dict]:
         return json.loads(self.page.evaluate(SERP))
 
+    def mail_search(self, query: str) -> list[dict] | None:
+        """Search on go.mail.ru. Its results are Yandex's, shown in a partner frame that does not ask
+        the server's address for a captcha the way ya.ru does. None: no results frame showed up."""
+        self.goto(MAIL_SEARCH.format(q=quote(query)))
+        deadline = time.monotonic() + MAIL_WAIT_S
+        consent = False
+        while time.monotonic() < deadline:
+            if not consent:
+                # Cookie banner on mail.ru: accept it once, the choice is kept with the sign-ins.
+                try:
+                    button = self.page.get_by_role("button", name="Принять")
+                    if button.count():
+                        button.first.click(timeout=3_000)
+                        consent = True
+                except Exception:  # noqa: BLE001
+                    pass
+            for frame in self.page.frames:
+                if "yandex.ru/search" not in frame.url:
+                    continue
+                try:
+                    if frame.evaluate(CAPTCHA):
+                        return None
+                    if frame.evaluate("() => document.querySelectorAll('li.serp-item, .serp-item').length"):
+                        self.page.wait_for_timeout(300)
+                        return json.loads(frame.evaluate(SERP))
+                except Exception:  # noqa: BLE001
+                    continue
+            self.page.wait_for_timeout(500)
+        return None
+
+    def pump(self) -> None:
+        """Give Playwright a moment to run route handlers and page events."""
+        try:
+            self.page.wait_for_timeout(20)
+        except Exception:  # noqa: BLE001
+            pass
+
     # The user's own hands in the panel.
     def user_input(self, action: dict) -> None:
         kind = action.get("kind")
@@ -487,7 +571,7 @@ def playwright_launcher():
         raise
 
     def guard(route) -> None:
-        if request_allowed(route.request.url):
+        if request_allowed_cached(route.request.url):
             route.continue_()
         else:
             route.abort("blockedbyclient")
@@ -521,6 +605,7 @@ class _Frame:
     version: int
     url: str = ""
     title: str = ""
+    taken: float = field(default_factory=time.monotonic)
 
 
 @dataclass
@@ -539,6 +624,9 @@ class CloudBrowser:
         self._lock = threading.Lock()
         self._new_page = None
         self._shutdown = None
+        self._watched: dict[uuid.UUID, float] = {}
+        self._ya_captcha: dict[uuid.UUID, float] = {}
+        self._last_reap = 0.0
         if self.store is None:
             self.store = ProfileStore()
 
@@ -552,34 +640,47 @@ class CloudBrowser:
         self,
         user_id: uuid.UUID,
         query: str,
-        on_captcha: Callable[[bool], None] | None = None,
-        halted: Callable[[], bool] | None = None,
-        wait_s: float = CAPTCHA_WAIT_S,
-        poll_s: float = 2.0,
+        ask_user: Callable[[], bool] | None = None,
     ) -> Result:
-        """Search ya.ru like a person. If Yandex asks for a captcha, the user passes it in the panel."""
-        url = f"https://ya.ru/search/?text={quote(query)}&lr=213"
-        first = self._run(user_id, lambda page: (page.goto(url), "captcha" if page.is_captcha() else "")[1])
-        if first.error:
-            return first
-        if first.text == "captcha":
-            if on_captcha:
-                on_captcha(True)
-            deadline = time.monotonic() + wait_s
-            solved = False
-            while time.monotonic() < deadline and not (halted and halted()):
-                time.sleep(poll_s)
-                check = self._run(user_id, lambda page: "captcha" if page.is_captcha() else "")
-                if check.error:
-                    break
-                if check.text != "captcha":
-                    solved = True
-                    break
-            if on_captcha:
-                on_captcha(False)
-            if not solved:
+        """Search like a person: ya.ru first. When Yandex asks this server for a captcha, search
+        through Mail.ru (the same Yandex results) and skip ya.ru for a while. Only if that fails
+        too, `ask_user` asks the user to pass the captcha on the live screen (True: passed)."""
+        ya_url = YA_SEARCH.format(q=quote(query))
+        recent = time.monotonic() - self._ya_captcha.get(user_id, -1e9) < YA_CAPTCHA_SKIP_S
+        if not recent:
+            first = self._run(user_id, lambda page: (page.goto(ya_url), "captcha" if page.is_captcha() else "")[1])
+            if first.error:
+                return first
+            if first.text != "captcha":
+                return self._run(user_id, lambda page: format_hits(page.serp()))
+            self._ya_captcha[user_id] = time.monotonic()
+        fallback = self._run(user_id, lambda page: _hits_or_empty(page.mail_search(query)))
+        if not fallback.error and fallback.text:
+            return fallback
+        # Mail.ru did not help: back to ya.ru, and the user passes its captcha.
+        again = self._run(user_id, lambda page: (page.goto(ya_url), "captcha" if page.is_captcha() else "")[1])
+        if again.error:
+            return again
+        if again.text == "captcha":
+            if not (ask_user and ask_user()):
                 return Result("Ошибка: captcha", "captcha", self.frame(user_id))
+            self._ya_captcha.pop(user_id, None)
         return self._run(user_id, lambda page: format_hits(page.serp()))
+
+    def captcha(self, user_id: uuid.UUID) -> bool:
+        """The current page asks to prove a human is there."""
+        def job() -> bool:
+            page = self.sessions.get(user_id)
+            return bool(page and page.is_captcha())
+
+        try:
+            return bool(self._submit(job).result(timeout=CALL_TIMEOUT_S))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def watch(self, user_id: uuid.UUID) -> None:
+        """The panel is open: keep its frame fresh for a few seconds."""
+        self._watched[user_id] = time.monotonic()
 
     def user_input(self, user_id: uuid.UUID, action: dict) -> Result:
         """A click or keystroke from the user in the panel."""
@@ -639,9 +740,9 @@ class CloudBrowser:
     def _work(self) -> None:
         while True:
             try:
-                job, future = self._jobs.get(timeout=30)
+                job, future = self._jobs.get(timeout=PUMP_S if self.sessions else REAP_EVERY_S)
             except queue.Empty:
-                self._reap()
+                self._idle()
                 continue
             if not future.set_running_or_notify_cancel():
                 continue
@@ -654,6 +755,29 @@ class CloudBrowser:
                 failed = CloudError("browser_failed")
                 failed.__cause__ = exc
                 future.set_exception(failed)
+            self._reap_now()
+
+    def _idle(self) -> None:
+        """No job: let pages load what they asked for, refresh watched screens, close idle ones."""
+        now = time.monotonic()
+        pumped = False
+        for user_id, page in list(self.sessions.items()):
+            watched = now - self._watched.get(user_id, -1e9) < WATCH_S
+            item = self.frames.get(user_id)
+            stale = item is None or now - item.taken > LIVE_FRAME_S
+            if watched and stale:
+                try:
+                    self._capture(user_id, page, only_changed=True)
+                except Exception:  # noqa: BLE001
+                    pass
+                pumped = True
+        if not pumped and self.sessions:
+            next(iter(self.sessions.values())).pump()
+        self._reap_now()
+
+    def _reap_now(self) -> None:
+        if time.monotonic() - self._last_reap >= REAP_EVERY_S:
+            self._last_reap = time.monotonic()
             self._reap()
 
     def _page(self, user_id: uuid.UUID) -> Page:
@@ -719,10 +843,14 @@ class CloudBrowser:
                     pass
         return out
 
-    def _capture(self, user_id: uuid.UUID, page: Page) -> bytes | None:
+    def _capture(self, user_id: uuid.UUID, page: Page, only_changed: bool = False) -> bytes | None:
         jpeg = page.frame()
         if jpeg:
+            old = self.frames.get(user_id)
             url, title = page.location()
+            if only_changed and old is not None and (old.jpeg, old.url, old.title) == (jpeg, url, title):
+                old.taken = time.monotonic()
+                return jpeg
             self.frames[user_id] = _Frame(jpeg, self.frame_version(user_id) + 1, url, title)
         return jpeg
 
@@ -735,6 +863,7 @@ class CloudBrowser:
                 log.info("cloud browser profile save failed")
 
     def _close(self, user_id: uuid.UUID) -> None:
+        self._watched.pop(user_id, None)
         page = self.sessions.pop(user_id, None)
         if page is not None:
             self._save(user_id, page)
@@ -804,8 +933,11 @@ def set_pool(value: CloudBrowser | None) -> None:
 
 SEARCH_TOOL = "browser_search"
 UPLOAD_TOOL = "browser_upload"
-CAPTCHA_NOTICE = "Яндекс просит пройти капчу. Пройдите её на экране «Компьютер агента», и я продолжу."
+CAPTCHA_TEXT = "Сайт просит пройти капчу. Пройдите её на экране «Компьютер агента», и я продолжу сам."
+SEARCH_CAPTCHA_TEXT = "Яндекс просит пройти капчу. Пройдите её на экране «Компьютер агента», и я продолжу сам."
 _SHOT_TOOLS = {"browser_screenshot"}
+# After these the page may have turned into a captcha.
+_CAPTCHA_TOOLS = {"browser_open", "browser_click", "browser_type", "browser_press"}
 
 
 def _run_for(task_id, user_id):
@@ -817,6 +949,45 @@ def _run_for(task_id, user_id):
         return None
 
 
+def ask_for_captcha(
+    browser: CloudBrowser,
+    user_id: uuid.UUID,
+    agent_run,
+    text: str = CAPTCHA_TEXT,
+    wait_s: float = CAPTCHA_WAIT_S,
+    poll_s: float = CAPTCHA_POLL_S,
+) -> bool:
+    """Pause the task and ask the user to pass the captcha on the live screen.
+
+    The task goes on by itself once the page is no longer a captcha; «Продолжить» goes on at once,
+    «Стоп» ends the task. True: the captcha is gone."""
+    control = getattr(agent_run, "control", None)
+    if agent_run is None or control is None or control.stopped:
+        return False
+    if hasattr(control, "pause"):
+        control.pause()
+    agent_run.publish({"type": "paused", "reason": "captcha", "text": text})
+    browser.watch(user_id)
+    deadline = time.monotonic() + wait_s
+    solved = False
+    try:
+        while time.monotonic() < deadline and not control.stopped:
+            if not getattr(control, "paused", True):
+                solved = not browser.captcha(user_id)
+                break
+            time.sleep(poll_s)
+            browser.watch(user_id)
+            if not browser.captcha(user_id):
+                solved = True
+                break
+    finally:
+        if not control.stopped:
+            if hasattr(control, "resume"):
+                control.resume()
+            agent_run.publish({"type": "resumed"})
+    return solved
+
+
 def execute(session, user, task_id, name: str, args: dict):
     """app.agent.executors contract: run(session, user, task_id, name, args) -> ClientResult."""
     from app.agent.control import ClientResult
@@ -824,13 +995,11 @@ def execute(session, user, task_id, name: str, args: dict):
     browser = pool()
     agent_run = _run_for(task_id, user.id)
     publish = agent_run.publish if agent_run else (lambda event: None)
-    halted = (lambda: agent_run.control.stopped) if agent_run else (lambda: False)
     if name == SEARCH_TOOL:
         result = browser.search(
             user.id,
             str(args.get("query") or ""),
-            on_captcha=lambda on: publish({"type": "notice", "text": CAPTCHA_NOTICE if on else ""}),
-            halted=halted,
+            ask_user=lambda: ask_for_captcha(browser, user.id, agent_run, SEARCH_CAPTCHA_TEXT),
         )
     elif name == UPLOAD_TOOL:
         try:
@@ -843,6 +1012,19 @@ def execute(session, user, task_id, name: str, args: dict):
         result = browser.call(user.id, name, {**args, "_payload": payload}, task_id=task_id)
     else:
         result = browser.call(user.id, name, args, task_id=task_id)
+        if name in _CAPTCHA_TOOLS and not result.error and browser.captcha(user.id):
+            publish({"type": "screen", "version": browser.frame_version(user.id)})
+            if ask_for_captcha(browser, user.id, agent_run):
+                after = browser.call(user.id, "browser_read", {}, task_id=task_id)
+                result = Result("Пользователь прошёл капчу.\n\n" + after.text, after.error, after.frame, result.files + after.files)
+            else:
+                result = Result(
+                    "Ошибка: сайт показал капчу, и её не прошли. Попробуй другой сайт или скажи пользователю, "
+                    "что нужно пройти капчу на экране «Компьютер агента».",
+                    "captcha",
+                    browser.frame(user.id),
+                    result.files,
+                )
     for info in result.files:
         publish(heli_files.published(info))
     publish({"type": "screen", "version": browser.frame_version(user.id)})

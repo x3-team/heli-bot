@@ -28,6 +28,9 @@ class FakePage(cb.Page):
         self.done: list = []
         self.captcha = False
         self.closed = False
+        self.mail_hits: list | None = None
+        self.mail_queries: list[str] = []
+        self.pumps = 0
 
     def frame(self):
         return b"\xff\xd8jpeg" + self.url.encode()
@@ -63,6 +66,14 @@ class FakePage(cb.Page):
 
     def serp(self):
         return [{"title": "amoCRM", "url": "https://www.amocrm.ru/", "snippet": "CRM"}]
+
+    def mail_search(self, query):
+        self.mail_queries.append(query)
+        self.url = "https://go.mail.ru/search?q=" + query
+        return self.mail_hits
+
+    def pump(self):
+        self.pumps += 1
 
     def user_input(self, action):
         self.done.append(("user", action))
@@ -169,39 +180,138 @@ def test_without_vault_key_nothing_is_kept(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_search_waits_for_the_user_to_pass_the_captcha(browser):
-    user = uuid.uuid4()
+def _captcha_page(browser, user):
     browser.call(user, "browser_read", {})
     page = browser.launcher_ref.pages[0]
     page.captcha = True
-    notices: list[bool] = []
+    return page
 
-    def on_captcha(on: bool) -> None:
-        notices.append(on)
-        if on:  # the user clicks «Я не робот» on the live screen
-            threading.Timer(0.05, lambda: browser.user_input(user, {"kind": "click", "x": 0.5, "y": 0.5})).start()
 
-    result = browser.search(user, "amoCRM цены", on_captcha=on_captcha, poll_s=0.02, wait_s=5)
-    assert result.error is None
-    assert "https://www.amocrm.ru/" in result.text
-    assert notices == [True, False]
+def test_search_uses_ya_ru_when_there_is_no_captcha(browser):
+    user = uuid.uuid4()
+    result = browser.search(user, "amoCRM цены")
+    page = browser.launcher_ref.pages[0]
+    assert result.error is None and "https://www.amocrm.ru/" in result.text
     assert page.url.startswith("https://ya.ru/search/?text=amoCRM%20")
+    assert page.mail_queries == []
+
+
+def test_search_goes_through_mail_ru_when_yandex_asks_for_a_captcha(browser):
+    user = uuid.uuid4()
+    page = _captcha_page(browser, user)
+    page.mail_hits = [{"title": "GPU по часам", "url": "https://gpuindex.ru/", "snippet": "от 9 ₽/час"}]
+    asked: list[bool] = []
+    result = browser.search(user, "аренда GPU", ask_user=lambda: asked.append(True) or True)
+    assert result.error is None and "https://gpuindex.ru/" in result.text
+    assert asked == []  # the user is not bothered while the fallback works
+    # The next search skips ya.ru: no captcha flash on the live screen.
+    page.captcha = False
+    page.url = "about:blank"
+    browser.search(user, "ещё запрос")
+    assert page.mail_queries == ["аренда GPU", "ещё запрос"]
+    assert page.url.startswith("https://go.mail.ru/")
+
+
+def test_search_asks_the_user_when_the_fallback_fails_too(browser):
+    user = uuid.uuid4()
+    page = _captcha_page(browser, user)
+
+    def user_passes() -> bool:
+        page.captcha = False
+        return True
+
+    result = browser.search(user, "amoCRM", ask_user=user_passes)
+    assert result.error is None and "https://www.amocrm.ru/" in result.text
+    assert page.url.startswith("https://ya.ru/search/")
 
 
 def test_search_gives_up_on_unsolved_captcha(browser):
     user = uuid.uuid4()
-    browser.call(user, "browser_read", {})
-    browser.launcher_ref.pages[0].captcha = True
-    result = browser.search(user, "q", poll_s=0.01, wait_s=0.05)
-    assert result.error == "captcha"
+    _captcha_page(browser, user)
+    assert browser.search(user, "q", ask_user=lambda: False).error == "captcha"
+    assert browser.search(user, "q").error == "captcha"
 
 
-def test_search_stops_when_the_user_presses_stop(browser):
+class _Run:
+    def __init__(self) -> None:
+        from app.agent.control import Control
+
+        self.control = Control()
+        self.events: list[dict] = []
+
+    def publish(self, event: dict) -> None:
+        self.events.append(event)
+
+
+def test_captcha_pauses_the_task_and_goes_on_when_the_user_passes_it(browser):
+    user = uuid.uuid4()
+    _captcha_page(browser, user)
+    run = _Run()
+    threading.Timer(0.05, lambda: browser.user_input(user, {"kind": "click", "x": 0.5, "y": 0.5})).start()
+    assert cb.ask_for_captcha(browser, user, run, poll_s=0.02, wait_s=5) is True
+    assert [e["type"] for e in run.events] == ["paused", "resumed"]
+    assert run.events[0]["reason"] == "captcha" and "капчу" in run.events[0]["text"]
+    assert run.control.paused is False
+
+
+def test_captcha_wait_ends_on_stop_or_continue(browser):
+    user = uuid.uuid4()
+    _captcha_page(browser, user)
+    run = _Run()
+    threading.Timer(0.05, run.control.stop).start()
+    assert cb.ask_for_captcha(browser, user, run, poll_s=0.02, wait_s=5) is False
+    # «Продолжить» while the captcha is still there: go on at once, the agent is told it failed.
+    run = _Run()
+    threading.Timer(0.05, run.control.resume).start()
+    assert cb.ask_for_captcha(browser, user, run, poll_s=0.02, wait_s=5) is False
+    assert run.events[-1] == {"type": "resumed"}
+    assert cb.ask_for_captcha(browser, user, None) is False
+
+
+def test_open_that_lands_on_a_captcha_waits_for_the_user(browser, monkeypatch):
+    cb.set_pool(browser)
+    try:
+        user = type("U", (), {"id": uuid.uuid4()})()
+        run = _Run()
+        monkeypatch.setattr(cb, "_run_for", lambda task_id, user_id: run)
+        monkeypatch.setattr(cb, "CAPTCHA_POLL_S", 0.02)
+        browser.call(user.id, "browser_read", {})
+        page = browser.launcher_ref.pages[0]
+        page.captcha = True
+        threading.Timer(0.1, lambda: browser.user_input(user.id, {"kind": "click", "x": 0.5, "y": 0.5})).start()
+        result = cb.execute(None, user, uuid.uuid4(), "browser_open", {"url": "https://avito.ru"})
+        assert result.error is None
+        assert result.content.startswith("Пользователь прошёл капчу.")
+        assert "paused" in [e["type"] for e in run.events]
+    finally:
+        cb.set_pool(None)
+
+
+def test_idle_worker_keeps_pages_alive_and_screens_fresh(browser, monkeypatch):
+    monkeypatch.setattr(cb, "LIVE_FRAME_S", 0.0)
     user = uuid.uuid4()
     browser.call(user, "browser_read", {})
-    browser.launcher_ref.pages[0].captcha = True
-    result = browser.search(user, "q", halted=lambda: True, poll_s=0.01, wait_s=5)
-    assert result.error == "captcha"
+    page = browser.launcher_ref.pages[0]
+    version = browser.frame_version(user)
+    import time as _time
+
+    _time.sleep(0.6)
+    assert page.pumps > 0  # route handlers get to run between the agent's steps
+    assert browser.frame_version(user) == version  # nobody watches, nothing new: no frames
+    browser.watch(user)
+    page.url = "https://ya.ru/showcaptcha"  # the page changed on its own (an image loaded)
+    _time.sleep(0.6)
+    assert browser.frame_version(user) == version + 1  # one new frame, not one per tick
+
+
+def test_request_guard_cache(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(cb, "_guard_cache", {})
+    monkeypatch.setattr(cb, "request_allowed", lambda url, resolver=None: calls.append(url) or True)
+    assert cb.request_allowed_cached("https://ya.ru/a.js")
+    assert cb.request_allowed_cached("https://ya.ru/b.png")
+    assert cb.request_allowed_cached("data:image/png;base64,AA")
+    assert calls == ["https://ya.ru/a.js"]
 
 
 def test_browser_that_cannot_start(tmp_path, monkeypatch):
@@ -274,6 +384,10 @@ PAGE = """<!doctype html><html><head><title>Тест</title></head><body>
 <h1>Вход</h1><input id="login" placeholder="Логин"><button onclick="document.title='Нажато:'+document.getElementById('login').value">Войти</button>
 <a href="/two">Дальше</a></body></html>"""
 
+LATE = """<!doctype html><html><head><title>Жду</title></head><body>
+<script>setTimeout(() => fetch("/data").then((r) => r.text()).then((t) => { document.title = t; }), 2000)</script>
+</body></html>"""
+
 
 def _chromium() -> str | None:
     try:
@@ -290,7 +404,12 @@ def _chromium() -> str | None:
 def test_real_chromium_round_trip(tmp_path, monkeypatch):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
-            body = PAGE.encode()
+            if self.path == "/late":
+                body = LATE.encode()
+            elif self.path == "/data":
+                body = "Загружено".encode()
+            else:
+                body = PAGE.encode()
             self.send_response(200)
             self.send_header("content-type", "text/html; charset=utf-8")
             self.send_header("set-cookie", "sid=42; Path=/; Max-Age=3600")
@@ -320,6 +439,16 @@ def test_real_chromium_round_trip(tmp_path, monkeypatch):
         clicked = pool.call(user, "browser_click", {"text": "Войти"})
         assert "Заголовок: Нажато:vitalii" in clicked.text
         assert pool.user_input(user, {"kind": "click", "x": 0.01, "y": 0.01}).error is None
+        # A request the page makes on its own between steps (a captcha image, a form the user
+        # submits) must not hang until the agent's next call; the watched screen follows it.
+        pool.call(user, "browser_open", {"url": url + "late"})
+        pool.watch(user)
+        import time as _time
+
+        deadline = _time.monotonic() + 6
+        while _time.monotonic() < deadline and pool.status(user)["title"] != "Загружено":
+            _time.sleep(0.1)
+        assert pool.status(user)["title"] == "Загружено"
         pool.stop(user)
         assert pool.store.load(user)["cookies"][0]["value"] == "42"
     finally:
