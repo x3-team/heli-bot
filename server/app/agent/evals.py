@@ -22,7 +22,9 @@ def run(
     client: HeliClient | None = None,
     alias: str = "heli-fast",
     estimate_rub: Decimal | None = None,
+    today: str | None = None,
 ) -> dict:
+    """`today` (ДД.ММ.ГГГГ or ISO) is the mock world's date; the prompt uses it instead of the real one."""
     budget = budget or {}
     client = client or HeliClient.from_env()
 
@@ -47,7 +49,7 @@ def run(
 
     max_rub = budget.get("max_rub")
     outcome = run_agent(
-        [{"role": "system", "content": system_prompt(tools)}, {"role": "user", "content": task}],
+        [{"role": "system", "content": system_prompt(tools, today=_ru_date(today))}, {"role": "user", "content": task}],
         tools=tools,
         call_tool=call,
         complete=complete,
@@ -71,3 +73,12 @@ def _json(value) -> str:
     import json
 
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _ru_date(value: str | None) -> str | None:
+    if not value:
+        return None
+    if len(value) == 10 and value[4] == "-":
+        year, month, day = value.split("-")
+        return f"{day}.{month}.{year}"
+    return value
