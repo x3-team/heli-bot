@@ -337,6 +337,7 @@ def test_real_chromium_download_and_upload(store, tmp_path, monkeypatch):
 
         direct = pool.call(user, "browser_open", {"url": url + "report.csv"})
         assert direct.error is None and "отправлен на компьютер" in direct.text, direct.text
+        assert "браузер его скачал" in direct.text and "Адрес:" not in direct.text
 
         payload = {"name": "реестр.txt", "mimeType": "text/plain", "buffer": "ок".encode()}
         uploaded = pool.call(user, "browser_upload", {"_payload": payload, "text": "Выбрать файл"})

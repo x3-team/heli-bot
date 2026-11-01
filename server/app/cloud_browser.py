@@ -294,10 +294,16 @@ class Page:
             self.page.wait_for_timeout(700)
             if not getattr(self, "downloads", None):
                 raise CloudError("navigation_failed") from exc
+            self.opened_file = True
+            return
         self.settle(1500)
 
     def open(self, url: str) -> str:
+        self.opened_file = False
         self.goto(url)
+        if self.opened_file:
+            # The tab still shows the previous page; reading it would make the model think the link failed.
+            return "По этому адресу файл, а не страница: браузер его скачал. Вкладка осталась на прежней странице."
         return self.read()
 
     def click(self, ref: int | None, text: str | None) -> str:
