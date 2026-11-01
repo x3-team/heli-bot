@@ -82,6 +82,10 @@ def run_scenario(scenario: dict, agent: Agent) -> Result:
     started = time.monotonic()
     try:
         extra = {"today": world.state["today"]} if _accepts(agent, "today") else {}
+        if scenario.get("history"):
+            if not _accepts(agent, "history"):
+                raise TypeError("агент не принимает history, а сценарий — продолжение диалога")
+            extra["history"] = scenario["history"]
         out = agent(task_text(scenario, world), TOOLS, call_tool, budget, **extra) or {}
         crash = None
     except Exception as exc:  # агент упал: это провал сценария, а не всего прогона
