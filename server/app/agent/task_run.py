@@ -34,7 +34,16 @@ except Exception:  # noqa: BLE001
     _skills = None
 
 SYSTEM = (
-    "Ты Heli, ассистент для рабочих задач. Отвечай по-русски и по делу. "
+    "Ты Heli, универсальный помощник: берёшься за любые задачи пользователя, рабочие и личные "
+    "(покупки, поездки, выбор техники и сервисов, учёба, быт). Отвечай по-русски и по делу. "
+    "Не отказывай со словами «это не моя работа» или «я только для рабочих задач»: если просят "
+    "посоветовать или выбрать, выбери один вариант и объясни почему (цена, условия, для каких задач), "
+    "а уточняй только то, без чего выбрать нельзя. "
+    "Это продолжение разговора: прошлые реплики переданы выше. Короткий вопрос вроде «какой рекомендуешь?», "
+    "«а подешевле?», «а она действует?» относится к предыдущему ответу — бери из него варианты и факты, "
+    "не переспрашивай, о чём речь. "
+    "Оформляй ответ в Markdown: ссылки пиши как [название](https://адрес), важное выделяй **жирным**, "
+    "перечни — списком. "
     "У тебя есть доступ в интернет: инструмент web_search ищет в сети, open_url открывает и читает страницу. "
     "Когда нужны свежие данные, ссылки, цены, контакты или проверка фактов, сначала найди и открой источник, "
     "потом отвечай. Давай прямые ссылки на сайты и указывай, откуда взял данные. "
@@ -80,6 +89,10 @@ CONFIRM_HINT = (
     "Без одобрения такое действие всё равно не выполнится. При отказе ничего не делай и сообщи об этом."
 )
 ANSWER_MAX_TOKENS = 1500
+# Earlier turns of the chat thread (task.context["history"]); the oldest are dropped first.
+HISTORY_TURNS = 12
+HISTORY_TURN_CHARS = 4000
+HISTORY_TOTAL_CHARS = 16000
 _MSK = ZoneInfo("Europe/Moscow")
 # Not offered to the model: the server routes web_search here when no search API key is set.
 BROWSER_SEARCH = "browser_search"
@@ -133,6 +146,40 @@ def system_prompt(tools: list[dict], guide: str | None = None, today: str | None
     if guide:
         text += "\n\n" + guide
     return text
+
+
+def history_messages(context: object) -> list[dict]:
+    """Prior chat turns from task.context["history"] ([{role, text}]) as model messages, trimmed from the old end."""
+    raw = context.get("history") if isinstance(context, dict) else None
+    if not isinstance(raw, list):
+        return []
+    turns: list[dict] = []
+    total = 0
+    for item in reversed(raw[-HISTORY_TURNS:]):
+        if not isinstance(item, dict) or item.get("role") not in ("user", "assistant"):
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        if len(text) > HISTORY_TURN_CHARS:
+            text = text[:HISTORY_TURN_CHARS] + "…"
+        if total + len(text) > HISTORY_TOTAL_CHARS:
+            break
+        total += len(text)
+        turns.append({"role": item["role"], "content": text})
+    turns.reverse()
+    # Chat APIs expect the dialogue to start with the user.
+    while turns and turns[0]["role"] != "user":
+        turns.pop(0)
+    return turns
+
+
+def classification_text(prompt: str, history: list[dict]) -> str:
+    """A follow-up like «какой рекомендуешь?» means nothing alone: give the classifier the last answer."""
+    last = next((m["content"] for m in reversed(history) if m["role"] == "assistant"), "")
+    if not last:
+        return prompt
+    return f"Предыдущий ответ (контекст):\n{last[:800]}\n\nНовое сообщение:\n{prompt}"
 
 
 def _guide(request: str, url: str | None) -> str | None:
@@ -190,8 +237,15 @@ def execute_task(
     attached = (task.context or {}).get("files") if isinstance(task.context, dict) else None
     request = task.request_text + attachments_note(user.id, attached if isinstance(attached, list) else [])
     prompt = with_memory(request, relevant(session, user, task.request_text))
+    history = history_messages(task.context)
     classified = metered_complete(
-        session, user, task.id, client, "heli-fast", classification_messages(prompt), max_tokens=80
+        session,
+        user,
+        task.id,
+        client,
+        "heli-fast",
+        classification_messages(classification_text(prompt, history)),
+        max_tokens=80,
     )
     task_type, complexity = parse_classification(classified.text)
     step = add_step(
@@ -214,6 +268,7 @@ def execute_task(
     state = {"url": None}
     messages: list[dict] = [
         {"role": "system", "content": system_prompt(tools, _guide(task.request_text, None))},
+        *history,
         {"role": "user", "content": prompt},
     ]
 

@@ -33,9 +33,45 @@ pub fn run() {
             files::file_save,
             files::file_open,
             files::file_reveal,
+            link_open,
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Heli bot");
+}
+
+/// Only plain web and mail links from chat replies; nothing that could start a program.
+fn safe_link(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    url.len() <= 4096
+        && (lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:"))
+        && !url.chars().any(|c| c.is_whitespace() || c.is_control() || c == '"')
+}
+
+/// Opens a link from a chat reply in the system browser.
+#[tauri::command]
+fn link_open(url: String) -> Result<(), String> {
+    if !safe_link(&url) {
+        return Err("bad_link".into());
+    }
+    #[cfg(windows)]
+    let mut command = {
+        let mut c = std::process::Command::new("rundll32.exe");
+        c.args(["url.dll,FileProtocolHandler", &url]);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut c = std::process::Command::new("open");
+        c.arg(&url);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(&url);
+        c
+    };
+    command.spawn().map(|_| ()).map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -180,4 +216,21 @@ fn log_agent_step(tool: String, screenshot_base64: Option<String>) -> Result<(),
         screenshot_base64.as_ref().map(|s| s.len()).unwrap_or(0)
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::safe_link;
+
+    #[test]
+    fn only_web_and_mail_links() {
+        assert!(safe_link("https://vychisli.example/gpu?a=1&b=2"));
+        assert!(safe_link("http://example.com"));
+        assert!(safe_link("mailto:hi@example.com"));
+        assert!(!safe_link("file:///C:/Windows/System32/calc.exe"));
+        assert!(!safe_link("javascript:alert(1)"));
+        assert!(!safe_link("https://a.example/ x"));
+        assert!(!safe_link("https://a.example/\"x"));
+        assert!(!safe_link("C:\\Windows\\calc.exe"));
+    }
 }

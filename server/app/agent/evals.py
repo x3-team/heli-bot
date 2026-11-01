@@ -9,7 +9,7 @@ from collections.abc import Callable
 from decimal import Decimal
 
 from app.agent.loop import Budget, ToolResult, run_agent
-from app.agent.task_run import ANSWER_MAX_TOKENS, system_prompt
+from app.agent.task_run import ANSWER_MAX_TOKENS, history_messages, system_prompt
 from app.llm.client import HeliClient
 
 
@@ -23,8 +23,12 @@ def run(
     alias: str = "heli-fast",
     estimate_rub: Decimal | None = None,
     today: str | None = None,
+    history: list[dict] | None = None,
 ) -> dict:
-    """`today` (ДД.ММ.ГГГГ or ISO) is the mock world's date; the prompt uses it instead of the real one."""
+    """`today` (ДД.ММ.ГГГГ or ISO) is the mock world's date; the prompt uses it instead of the real one.
+
+    `history` is the earlier chat ([{role, text}]), passed the same way the app sends it in task.context.
+    """
     budget = budget or {}
     client = client or HeliClient.from_env()
 
@@ -49,7 +53,11 @@ def run(
 
     max_rub = budget.get("max_rub")
     outcome = run_agent(
-        [{"role": "system", "content": system_prompt(tools, today=today)}, {"role": "user", "content": task}],
+        [
+            {"role": "system", "content": system_prompt(tools, today=today)},
+            *history_messages({"history": history or []}),
+            {"role": "user", "content": task},
+        ],
         tools=tools,
         call_tool=call,
         complete=complete,
