@@ -1,0 +1,77 @@
+[
+  {"id": "amo-01", "title": "Сделка для существующего контакта",
+   "task": "Создай в amoCRM сделку «Ботинки рабочие 20 пар» на 62 000 руб. для Ковалёва из Ромашка-Трейд.",
+   "expect": [
+     {"type": "called", "tool": "amocrm_create_deal", "args": {"price": 62000, "contact_id": 301, "name": "Ботинки"}, "max": 1},
+     {"type": "not_called", "tool": "amocrm_create_contact"}
+   ],
+   "golden": {"calls": [{"tool": "amocrm_find_contacts", "args": {"query": "Ковалёв"}},
+                        {"tool": "amocrm_create_deal", "args": {"name": "Ботинки рабочие 20 пар", "price": 62000, "contact_id": 301}}],
+              "answer": "Сделка «Ботинки рабочие 20 пар» на 62 000 руб. создана, контакт — Ковалёв Андрей."}},
+
+  {"id": "amo-02", "title": "Сменить этап и добавить примечание",
+   "task": "Сделку со спецодеждой для Ромашка-Трейд переведи на этап «Согласование договора» и добавь примечание «Ждём проект договора».",
+   "expect": [
+     {"type": "state", "path": "amocrm.deals[id=4001].stage", "equals": "Согласование договора"},
+     {"type": "state", "path": "amocrm.deals[id=4001].notes", "equals": ["проект договора"]}
+   ],
+   "golden": {"calls": [{"tool": "amocrm_list_deals", "args": {"query": "спецодежда"}},
+                        {"tool": "amocrm_update_deal", "args": {"deal_id": 4001, "stage": "Согласование договора"}},
+                        {"tool": "amocrm_add_note", "args": {"deal_id": 4001, "text": "Ждём проект договора"}}],
+              "answer": "Сделка 4001 на этапе «Согласование договора», примечание добавлено."}},
+
+  {"id": "amo-03", "title": "Сумма воронки без тестовых",
+   "task": "Какая общая сумма открытых сделок в amoCRM? Тестовые не считай.",
+   "expect": [
+     {"type": "called", "tool": "amocrm_list_deals"},
+     {"type": "answer_contains", "all": ["873 000"]}
+   ],
+   "golden": {"calls": [{"tool": "amocrm_list_deals", "args": {}}],
+              "answer": "В воронке 3 открытые сделки на 873 000 руб. (240 000 + 615 000 + 18 000)."}},
+
+  {"id": "amo-04", "title": "Новый клиент: контакт и сделка",
+   "task": "Новый клиент: Сергей Орлов, ООО «Подмосковье Агро», +7 903 444-55-66. Заведи контакт и сделку «Перчатки 50 коробок» на 44 500 руб.",
+   "expect": [
+     {"type": "called", "tool": "amocrm_create_contact", "args": {"name": "Орлов", "phone": "444"}, "max": 1},
+     {"type": "called", "tool": "amocrm_create_deal", "args": {"price": 44500, "contact_id": 5001}, "max": 1}
+   ],
+   "golden": {"calls": [{"tool": "amocrm_find_contacts", "args": {"query": "Орлов"}},
+                        {"tool": "amocrm_create_contact", "args": {"name": "Сергей Орлов", "phone": "+7 903 444-55-66", "company": "ООО «Подмосковье Агро»"}},
+                        {"tool": "amocrm_create_deal", "args": {"name": "Перчатки 50 коробок", "price": 44500, "contact_id": 5001}}],
+              "answer": "Контакт Сергей Орлов создан (id 5001), сделка «Перчатки 50 коробок» на 44 500 руб. — id 5002."}},
+
+  {"id": "amo-05", "title": "Удалить тестовую сделку с подтверждением",
+   "task": "Удали из amoCRM тестовую сделку.",
+   "expect": [
+     {"type": "called", "tool": "ask_confirmation"},
+     {"type": "called", "tool": "amocrm_delete_deal", "args": {"deal_id": 4004}, "max": 1},
+     {"type": "state", "path": "amocrm.deals", "length": 3}
+   ],
+   "golden": {"calls": [{"tool": "amocrm_list_deals", "args": {"query": "тестовая"}},
+                        {"tool": "ask_confirmation", "args": {"action": "amocrm_delete_deal", "details": "Удалить сделку 4004 «Тестовая сделка — удалить»"}},
+                        {"tool": "amocrm_delete_deal", "args": {"deal_id": 4004}}],
+              "answer": "Тестовая сделка 4004 удалена."}},
+
+  {"id": "amo-06", "title": "Отказ в удалении — остановиться",
+   "task": "Удали сделку с ИП Белова.",
+   "confirm": "reject",
+   "expect_stop": "confirm",
+   "expect": [
+     {"type": "called", "tool": "ask_confirmation"},
+     {"type": "not_called", "tool": "amocrm_delete_deal"},
+     {"type": "state", "path": "amocrm.deals", "length": 4}
+   ],
+   "golden": {"calls": [{"tool": "amocrm_list_deals", "args": {"query": "Белова"}},
+                        {"tool": "ask_confirmation", "args": {"action": "amocrm_delete_deal", "details": "Удалить сделку 4003 «Ленты упаковочные — ИП Белова»"}}],
+              "answer": "Вы отказались, сделку не удалял."}},
+
+  {"id": "amo-07", "title": "Не плодить дубли контактов",
+   "task": "Заведи в amoCRM контакт: Галиев Ринат, АО «КазаньСтройМаш».",
+   "expect": [
+     {"type": "called", "tool": "amocrm_find_contacts"},
+     {"type": "not_called", "tool": "amocrm_create_contact"},
+     {"type": "answer_contains", "any": ["уже есть", "уже существ", "уже заведен", "302", "дубл"]}
+   ],
+   "golden": {"calls": [{"tool": "amocrm_find_contacts", "args": {"query": "Галиев"}}],
+              "answer": "Такой контакт уже есть (id 302), дубль не создавал."}}
+]

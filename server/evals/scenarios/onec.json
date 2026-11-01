@@ -1,0 +1,58 @@
+[
+  {"id": "c1-01", "title": "Остатки по всем складам",
+   "task": "Сколько нитриловых перчаток размера M осталось в 1С на всех складах?",
+   "expect": [
+     {"type": "called", "tool": "onec_stock"},
+     {"type": "answer_contains", "all": ["460"]}
+   ],
+   "golden": {"calls": [{"tool": "onec_stock", "args": {"query": "перчатки нитриловые M"}}],
+              "answer": "Всего 460 коробок: 320 на Основном и 140 на Складе №2."}},
+
+  {"id": "c1-02", "title": "Нулевой остаток",
+   "task": "Есть ли в наличии нитриловые перчатки L?",
+   "expect": [
+     {"type": "called", "tool": "onec_stock"},
+     {"type": "answer_contains", "any": ["нет", "0", "закончил"]}
+   ],
+   "golden": {"calls": [{"tool": "onec_stock", "args": {"query": "GL-NIT-L"}}],
+              "answer": "Нет, перчаток L на складе 0."}},
+
+  {"id": "c1-03", "title": "Хватит ли на заказ",
+   "task": "Клиент хочет 20 пар рабочих ботинок 42 размера. Хватит?",
+   "expect": [
+     {"type": "called", "tool": "onec_stock"},
+     {"type": "answer_contains", "all": ["12", "8"]}
+   ],
+   "golden": {"calls": [{"tool": "onec_stock", "args": {"query": "ботинки 42"}}],
+              "answer": "Не хватит: в наличии 12 пар на Складе №2, не хватает 8."}},
+
+  {"id": "c1-04", "title": "Долг контрагента",
+   "task": "Какой долг у КазаньСтройМаш по 1С?",
+   "expect": [
+     {"type": "called", "tool": "onec_find_counterparty"},
+     {"type": "answer_contains", "all": ["128 400"]}
+   ],
+   "golden": {"calls": [{"tool": "onec_find_counterparty", "args": {"query": "КазаньСтройМаш"}}],
+              "answer": "Долг АО «КазаньСтройМаш» — 128 400 руб."}},
+
+  {"id": "c1-05", "title": "Выставить счёт с подтверждением",
+   "task": "Выставь в 1С счёт Ромашка-Трейд на 10 летних рабочих костюмов.",
+   "expect": [
+     {"type": "called", "tool": "onec_create_invoice", "args": {"inn": "7712345671", "items": [{"sku": "SUIT-01", "qty": 10}]}, "max": 1},
+     {"type": "answer_contains", "all": ["1201", "23 500"]}
+   ],
+   "golden": {"calls": [{"tool": "onec_find_counterparty", "args": {"query": "Ромашка-Трейд"}},
+                        {"tool": "onec_stock", "args": {"query": "костюм рабочий летний"}},
+                        {"tool": "ask_confirmation", "args": {"action": "onec_create_invoice", "details": "Счёт ООО «Ромашка-Трейд» на 10 × SUIT-01 по 2 350 руб."}},
+                        {"tool": "onec_create_invoice", "args": {"inn": "7712345671", "items": [{"sku": "SUIT-01", "qty": 10}]}}],
+              "answer": "Счёт СЧ-1201 на 23 500 руб. выставлен ООО «Ромашка-Трейд»."}},
+
+  {"id": "c1-06", "title": "Стоимость остатков",
+   "task": "На какую сумму у нас лежит упаковочной ленты 48 мм?",
+   "expect": [
+     {"type": "called", "tool": "onec_stock"},
+     {"type": "answer_contains", "all": ["114 000"]}
+   ],
+   "golden": {"calls": [{"tool": "onec_stock", "args": {"query": "лента упаковочная"}}],
+              "answer": "1 200 шт. по 95 руб. — на 114 000 руб."}}
+]
