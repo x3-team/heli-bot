@@ -114,7 +114,9 @@ def remaining_ratio(snap: UsageSnapshot) -> Decimal:
 def estimate_input_tokens(messages: list[dict]) -> int:
     chars = 0
     for message in messages:
-        chars += len(str(message.get("content", "")))
+        chars += len(str(message.get("content") or ""))
+        for call in message.get("tool_calls") or []:
+            chars += len(str(call.get("function", {}).get("arguments", "")))
     return max(1, chars // 4)
 
 
@@ -127,11 +129,13 @@ def estimate_turn_reserve(request: str) -> Decimal:
         estimate_input_tokens(classification_messages(request)),
         80,
     )
+    # A typical turn with internet access: a few tool rounds that re-send the
+    # growing context, then the answer.
     answer = cost_rub(
         "heli-fast",
-        estimate_input_tokens([{"role": "user", "content": request}]),
-        256,
-    )
+        estimate_input_tokens([{"role": "user", "content": request}]) + 8000,
+        1500,
+    ) * 3
     return classify + answer
 
 
@@ -143,6 +147,7 @@ def metered_complete(
     alias: str,
     messages: list[dict],
     max_tokens: int,
+    tools: list[dict] | None = None,
 ) -> Completion:
     """Reserve the worst-case cost, then replace it with the real charge."""
     input_estimate = estimate_input_tokens(messages)
@@ -161,7 +166,10 @@ def metered_complete(
     session.add(hold)
     session.flush()
     try:
-        completion = client.complete(alias, messages, max_tokens=max_tokens)
+        if tools:
+            completion = client.complete(alias, messages, max_tokens=max_tokens, tools=tools)
+        else:
+            completion = client.complete(alias, messages, max_tokens=max_tokens)
     except Exception:
         session.delete(hold)
         session.flush()
