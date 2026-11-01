@@ -156,10 +156,40 @@ def finish_task(
         raise TrajectoryError("bad_outcome")
     task = _own_task(session, user, task_id)
     task.outcome = outcome
-    task.final_answer = final_answer
+    if final_answer:
+        # A rating after a stopped or failed run sends no answer: keep the one the run left.
+        task.final_answer = final_answer
     session.flush()
     refresh_document(session, task)
     log.info("task finished id=%s outcome=%s", task.id, outcome)
+    return task
+
+
+def auto_finish(
+    session: Session,
+    task_id: uuid.UUID,
+    outcome: str,
+    final_answer: str | None,
+) -> Task | None:
+    """Close a run the user has not rated yet, so every task reaches the training set.
+
+    A later rating from the user (finish_task) overrides this outcome.
+    """
+    if outcome not in OUTCOMES:
+        raise TrajectoryError("bad_outcome")
+    task = session.get(Task, task_id)
+    if task is None or task.outcome is not None:
+        return task
+    task.outcome = outcome
+    if final_answer:
+        task.final_answer = redact_secrets_text(final_answer)
+    session.flush()
+    try:
+        refresh_document(session, task)
+    except TrajectoryError as exc:
+        # A missing hash pepper must not break the run; the outcome is still kept.
+        log.warning("trajectory not written task=%s code=%s", task.id, exc.code)
+    log.info("task auto-finished id=%s outcome=%s", task.id, outcome)
     return task
 
 

@@ -20,7 +20,7 @@ from app.agent.task_run import execute_task
 from app.llm.client import HeliClient, HeliError
 from app.models import Task, User
 from app.quota import QuotaError
-from app.trajectories import TrajectoryError
+from app.trajectories import TrajectoryError, auto_finish
 
 log = logging.getLogger(__name__)
 
@@ -141,6 +141,7 @@ class RunRegistry:
                     autopause=autopause,
                 )
                 session.commit()
+                _close_task(session, task_id, "aborted" if turn.stopped else "success", turn.text)
                 run.publish(
                     {
                         "type": "done",
@@ -155,10 +156,12 @@ class RunRegistry:
                 )
             except (QuotaError, TrajectoryError, HeliError) as exc:
                 session.rollback()
+                _close_task(session, task_id, "fail", None)
                 run.publish({"type": "error", "code": exc.code})
             except Exception:  # noqa: BLE001
                 log.exception("agent run failed task=%s", task_id)
                 session.rollback()
+                _close_task(session, task_id, "fail", None)
                 run.publish({"type": "error", "code": "run_failed"})
             finally:
                 session.close()
@@ -175,3 +178,13 @@ class RunRegistry:
 
 
 registry = RunRegistry()
+
+
+def _close_task(session: Session, task_id: uuid.UUID, outcome: str, final_answer: str | None) -> None:
+    """Give the task an outcome right after the run, so unrated tasks also become trajectories."""
+    try:
+        auto_finish(session, task_id, outcome, final_answer)
+        session.commit()
+    except Exception:  # noqa: BLE001
+        log.exception("could not close task=%s", task_id)
+        session.rollback()

@@ -132,3 +132,43 @@ def test_open_access_reuses_one_account(client, monkeypatch) -> None:
     me2 = client.get("/v1/me", headers={"Authorization": f"Bearer {second.json()['access_token']}"}).json()
     assert me1["id"] == me2["id"]
     assert me1["consent_pdn"] is True
+
+
+def test_open_access_account_reads_feedback_and_reports(client, monkeypatch) -> None:
+    monkeypatch.setenv("HELI_OPEN_ACCESS", "1")
+    token = client.post("/v1/auth/open").json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    task = client.post("/v1/tasks", json={"request": "Найди аренду видеокарты", "context": {}}, headers=headers)
+    assert task.status_code in (200, 201), task.text
+    task_id = task.json()["id"]
+    rated = client.post(
+        f"/v1/tasks/{task_id}/feedback",
+        json={"rating": 1, "acceptance": "accepted", "comment": "ссылки не кликабельны"},
+        headers=headers,
+    )
+    assert rated.status_code == 200, rated.text
+    report = client.post("/v1/reports/incident", json={"message": "Завис", "log_excerpt": "x"}, headers=headers)
+    assert report.status_code == 201
+
+    feedback = client.get("/v1/admin/feedback?rated_only=true", headers=headers)
+    assert feedback.status_code == 200, feedback.text
+    body = feedback.json()
+    assert body["totals"]["rated"] == 1 and body["totals"]["thumbs_up"] == 1
+    assert body["tasks"][0]["feedback"]["comment"] == "ссылки не кликабельны"
+    incidents = client.get("/v1/admin/incidents", headers=headers).json()
+    assert incidents["reports"][0]["message"] == "Завис"
+
+
+def test_admin_feedback_needs_admin(client, session) -> None:
+    from datetime import datetime, timezone
+
+    from app.auth import issue_token
+    from app.models import User
+
+    user = User(email="plain@example.com", consent_pdn=True, consent_training=False, is_admin=False,
+                created_at=datetime.now(timezone.utc))
+    session.add(user)
+    session.commit()
+    headers = {"Authorization": f"Bearer {issue_token(user.id)}"}
+    assert client.get("/v1/admin/feedback", headers=headers).status_code == 403
+    assert client.get("/v1/admin/incidents", headers=headers).status_code == 403
