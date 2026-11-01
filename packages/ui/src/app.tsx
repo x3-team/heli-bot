@@ -7,6 +7,7 @@ import {
   loadBrowser,
   loadCredentials,
   loadMe,
+  openAccess,
   loadMemory,
   loadSchedules,
   loadUsage,
@@ -36,6 +37,7 @@ import {
   type Usage,
 } from "./api";
 import { resolveApiBase } from "./apiBase";
+import { trialLabel } from "./authSession";
 import { clampPercent, confirmationNeeded, limitTone } from "./behavior";
 import { networkErrorMessage } from "./errors";
 import {
@@ -70,6 +72,21 @@ export function Shell({ apiBase: apiBaseProp }: { apiBase?: string }) {
   );
   const [token, setToken] = useState<string | null>(() => window.sessionStorage.getItem("heli-token"));
   const [authTrialActive, setAuthTrialActive] = useState(false);
+  // While the server runs without sign-up, skip the sign-in screen entirely.
+  const [probingOpen, setProbingOpen] = useState(() => !window.sessionStorage.getItem("heli-token"));
+
+  useEffect(() => {
+    if (token || !probingOpen) return;
+    let cancelled = false;
+    void openAccess(apiBase).then((auth) => {
+      if (cancelled) return;
+      if (auth) completeAuth(auth);
+      setProbingOpen(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [apiBase, token, probingOpen]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -80,6 +97,10 @@ export function Shell({ apiBase: apiBaseProp }: { apiBase?: string }) {
     window.sessionStorage.setItem("heli-token", auth.accessToken);
     setAuthTrialActive(auth.trialActive);
     setToken(auth.accessToken);
+  }
+
+  if (!token && probingOpen) {
+    return <main className="signin" />;
   }
 
   if (!token) {
@@ -102,12 +123,15 @@ export function Shell({ apiBase: apiBaseProp }: { apiBase?: string }) {
         window.sessionStorage.removeItem("heli-token");
         setAuthTrialActive(false);
         setToken(null);
+        setProbingOpen(true);
       }}
     />
   );
 }
 
 type AuthScreen = "register" | "signin" | "recover";
+
+const OPERATOR_CODE_NOTICE = "Почта ещё не подключена. Введите код, который выдал оператор.";
 
 function SignIn({ apiBase, onAuth }: { apiBase: string; onAuth: (auth: AuthResult) => void }) {
   const [screen, setScreen] = useState<AuthScreen>("signin");
@@ -120,6 +144,7 @@ function SignIn({ apiBase, onAuth }: { apiBase: string; onAuth: (auth: AuthResul
   const [pdn, setPdn] = useState(false);
   const [training, setTraining] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
 
   function resetFlow(next: AuthScreen) {
@@ -129,15 +154,28 @@ function SignIn({ apiBase, onAuth }: { apiBase: string; onAuth: (auth: AuthResul
     setCode("");
     setPassword("");
     setError("");
+    setNotice("");
+  }
+
+  /** Without mail delivery the operator hands out the code, so open the code field anyway. */
+  function acceptOperatorCode(err: unknown): boolean {
+    if (err instanceof ApiError && err.mailNotConfigured) {
+      setSent(true);
+      setNotice(OPERATOR_CODE_NOTICE);
+      return true;
+    }
+    return false;
   }
 
   async function askCode() {
     setBusy(true);
     setError("");
+    setNotice("");
     try {
-      await requestCode(apiBase, email, invite || undefined);
+      await requestCode(apiBase, email.trim(), invite || undefined);
       setSent(true);
     } catch (err) {
+      if (acceptOperatorCode(err)) return;
       setError(err instanceof ApiError ? err.message : "Не получилось отправить код.");
     } finally {
       setBusy(false);
@@ -163,8 +201,12 @@ function SignIn({ apiBase, onAuth }: { apiBase: string; onAuth: (auth: AuthResul
       }
       if (screen === "recover") {
         if (!sent) {
-          await recoverRequest(apiBase, email.trim());
-          setSent(true);
+          try {
+            await recoverRequest(apiBase, email.trim());
+            setSent(true);
+          } catch (err) {
+            if (!acceptOperatorCode(err)) throw err;
+          }
           return;
         }
         onAuth(await recoverReset(apiBase, email.trim(), code, password));
@@ -282,6 +324,7 @@ function SignIn({ apiBase, onAuth }: { apiBase: string; onAuth: (auth: AuthResul
         {!apiBase && !import.meta.env.DEV ? (
           <p className="error">Адрес API не задан при сборке (VITE_HELI_API_BASE).</p>
         ) : null}
+        {notice && !error ? <p className="muted">{notice}</p> : null}
         {error ? <p className="error">{error}</p> : null}
         {error && apiBase && screen === "register" ? (
           <p className="muted">POST {apiBase}/v1/auth/register</p>
@@ -291,7 +334,7 @@ function SignIn({ apiBase, onAuth }: { apiBase: string; onAuth: (auth: AuthResul
         </button>
         {screen === "signin" ? (
           <div className="row">
-            <button type="button" onClick={() => { setUseCode(!useCode); setSent(false); setError(""); }}>
+            <button type="button" onClick={() => { setUseCode(!useCode); setSent(false); setError(""); setNotice(""); }}>
               {useCode ? "Войти с паролем" : "Войти по коду"}
             </button>
             <button type="button" onClick={() => resetFlow("recover")}>
@@ -317,7 +360,12 @@ async function verifyAndConsent(
   training: boolean,
 ): Promise<AuthResult> {
   const access = await verifyCode(apiBase, email, code);
-  await saveConsents(apiBase, access.accessToken, pdn, training);
+  // Code sign-in for an existing account must not switch off consents given earlier.
+  const me = await loadMe(apiBase, access.accessToken);
+  const nextTraining = me.consentTraining || training;
+  if (!me.consentPdn || nextTraining !== me.consentTraining) {
+    await saveConsents(apiBase, access.accessToken, me.consentPdn || pdn, nextTraining);
+  }
   return access;
 }
 
@@ -482,7 +530,7 @@ function Workspace({
           Heli bot
         </div>
         {usage.trialActive ? (
-          <p className="muted trial-badge">Пробная неделя</p>
+          <p className="muted trial-badge">{trialLabel(usage.trialEndsAt)}</p>
         ) : null}
         <button type="button" data-emphasis="primary" onClick={newThread}>
           Новая задача
@@ -788,7 +836,7 @@ function Limits({ usage }: { usage: Usage }) {
         <p className="muted">Использовано {week}% недели · {month}% месяца, сброс пн 00:00 МСК</p>
       </div>
       {usage.trialActive ? (
-        <article className="card">Пробная неделя активна — лимиты показаны в процентах.</article>
+        <article className="card">{trialLabel(usage.trialEndsAt)}. Лимиты показаны в процентах.</article>
       ) : null}
       {warned ? <article className="card warn">Осталось меньше 20% лимита. Сложные шаги будут проще.</article> : null}
       {(weekTone === "stop" || monthTone === "stop") ? (

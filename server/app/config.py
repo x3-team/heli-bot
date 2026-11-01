@@ -21,6 +21,9 @@ class Settings(BaseSettings):
         default="",
         validation_alias="TRAJECTORY_HASH_PEPPER",
     )
+    # Testing without sign-up: POST /v1/auth/open hands out a token for one shared account.
+    open_access: bool = Field(default=False, validation_alias="HELI_OPEN_ACCESS")
+    open_access_email: str = Field(default="owner@heli.local", validation_alias="HELI_OPEN_ACCESS_EMAIL")
     smtp_host: str = Field(default="", validation_alias="SMTP_HOST")
     daily_limit_rub: Decimal = Field(default=Decimal("1000"), validation_alias="DAILY_LIMIT_RUB")
     default_monthly_limit_rub: Decimal = Field(

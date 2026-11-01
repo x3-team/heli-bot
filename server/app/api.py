@@ -2,6 +2,7 @@ import base64
 import binascii
 import logging
 import uuid
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -16,6 +17,7 @@ from app.auth import (
     issue_recovery_code,
     issue_token,
     login_with_password,
+    open_access_user,
     read_user_id,
     register_user,
     reset_password,
@@ -229,6 +231,19 @@ def login_password(body: PasswordLoginBody, session: Session = Depends(get_db)) 
     return {"access_token": token, "token_type": "bearer", "trial_active": trial_active(user)}
 
 
+@router.post("/auth/open")
+def open_access(session: Session = Depends(get_db)) -> dict:
+    settings = get_settings()
+    if not settings.open_access:
+        raise HTTPException(status_code=404, detail="open_access_disabled")
+    try:
+        user = open_access_user(session, settings.open_access_email)
+        token = issue_token(user.id)
+    except AuthError as exc:
+        _fail(exc)
+    return {"access_token": token, "token_type": "bearer", "trial_active": trial_active(user)}
+
+
 @router.post("/auth/recover/request", status_code=202)
 def recover_request(body: RecoverRequestBody, request: Request, session: Session = Depends(get_db)) -> dict:
     settings = get_settings()
@@ -251,7 +266,7 @@ def recover_reset(body: RecoverResetBody, session: Session = Depends(get_db)) ->
         token = issue_token(user.id)
     except AuthError as exc:
         _fail(exc)
-    return {"access_token": token, "token_type": "bearer"}
+    return {"access_token": token, "token_type": "bearer", "trial_active": trial_active(user)}
 
 
 @router.post("/auth/request-code", status_code=202)
@@ -611,7 +626,17 @@ def usage(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_db),
 ) -> dict:
-    return public_usage(snapshot(session, user), trial_active=trial_active(user))
+    view = public_usage(snapshot(session, user), trial_active=trial_active(user))
+    view["trial_ends_at"] = _iso_utc(user.trial_ends_at)
+    return view
+
+
+def _iso_utc(moment: datetime | None) -> str | None:
+    if moment is None:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).isoformat()
 
 
 @router.get("/admin/quotas")
