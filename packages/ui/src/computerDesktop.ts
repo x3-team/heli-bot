@@ -148,7 +148,13 @@ export function desktopComputerPorts(options: DesktopComputerOptions): ComputerP
   };
 }
 
-/** Entry point for the client-action dispatcher: runs one use_computer call. */
+/**
+ * Entry point for the client-action dispatcher: runs one use_computer call.
+ * Not registered in v0.1 (the agent works in the cloud computer). To turn PC hands
+ * on, set HELI_PC_HANDS=true on the server and register it in clientActions:
+ * registerClientTool("use_computer", (args, info, isStopped) =>
+ *   runUseComputerOnDesktop(String(args.goal ?? ""), { ...info, isStopped }))
+ */
 export async function runUseComputerOnDesktop(goal: string, options: DesktopComputerOptions): Promise<ComputerOutcome> {
   if (!isDesktop()) {
     return { content: "Управление компьютером доступно только в приложении Heli для Windows.", error: "failed", steps: 0 };

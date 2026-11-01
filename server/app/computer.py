@@ -21,6 +21,7 @@ from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.llm.client import HeliClient
 from app.llm.router import choose_alias
 from app.models import User
@@ -124,6 +125,11 @@ class Step:
     cost_rub: Decimal = Decimal("0")
     finished: bool = False
     error: str | None = None
+
+
+def pc_hands_enabled() -> bool:
+    """Feature flag HELI_PC_HANDS. Off by default: v0.1 works in the cloud computer only."""
+    return get_settings().pc_hands
 
 
 def decode_screenshot(raw: str) -> tuple[bytes, str]:
@@ -264,6 +270,8 @@ def next_step(
     history: list[HistoryItem],
     step: int,
 ) -> Step:
+    if not pc_hands_enabled():
+        raise ComputerError("pc_hands_disabled")
     goal = goal.strip()
     if not goal:
         raise ComputerError("bad_goal")

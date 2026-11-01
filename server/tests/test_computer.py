@@ -58,6 +58,11 @@ def _client(script: _Vision) -> HeliClient:
     return HeliClient(sdk)
 
 
+@pytest.fixture(autouse=True)
+def _pc_hands_on(monkeypatch):
+    monkeypatch.setenv("HELI_PC_HANDS", "true")
+
+
 def _user(session) -> User:
     user = User(
         email="hands@example.com",
@@ -234,3 +239,14 @@ def test_endpoint_returns_action(client, session) -> None:
         json={"goal": "Открыть 1С", "screenshot_base64": SHOT, "step": 31},
     )
     assert too_far.status_code == 409
+
+
+def test_pc_hands_are_off_by_default(session, monkeypatch) -> None:
+    monkeypatch.delenv("HELI_PC_HANDS")
+    user = _user(session)
+    task = start_task(session, user, "задача", {})
+    script = _Vision([_reply(action="done")])
+    with pytest.raises(ComputerError) as exc:
+        next_step(session, user, task.id, _client(script), goal="цель", screenshot_base64=SHOT, history=[], step=1)
+    assert exc.value.code == "pc_hands_disabled"
+    assert script.calls == []

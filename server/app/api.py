@@ -95,6 +95,7 @@ _STATUS = {
     "bad_message": 400,
     "bad_goal": 400,
     "too_many_steps": 409,
+    "pc_hands_disabled": 404,
 }
 
 
