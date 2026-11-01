@@ -503,3 +503,27 @@ h1, h2 { text-wrap: balance; }
   .computer { grid-column: 1 / -1; padding: 0 12px 12px; }
   .rail { grid-row: 1 / span 3; }
 }
+
+/* PC hands: confirmation card with the screen and a marker on the target. */
+.computer-shot {
+  position: relative;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: var(--screen);
+}
+
+.computer-shot img { display: block; width: 100%; height: auto; }
+
+.computer-marker {
+  position: absolute;
+  width: 28px;
+  height: 28px;
+  margin: -14px 0 0 -14px;
+  border-radius: 50%;
+  border: 3px solid var(--signal);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--signal) 35%, transparent);
+  pointer-events: none;
+}
+
+.computer-confirm.danger .computer-marker { border-color: var(--danger); }

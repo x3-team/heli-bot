@@ -41,6 +41,7 @@ from app.vault import (
     public_credential,
     store_credential,
 )
+from app.computer import MAX_STEPS, ComputerError, HistoryItem, next_step
 from app.config import get_settings
 from app.db import get_db
 from app.models import TaskStep, User
@@ -92,6 +93,9 @@ _STATUS = {
     "password_weak": 400,
     "user_not_found": 404,
     "bad_message": 400,
+    "bad_goal": 400,
+    "too_many_steps": 409,
+    "pc_hands_disabled": 404,
 }
 
 
@@ -707,6 +711,57 @@ def run(
         "reply": turn.text,
         "task_type": turn.task_type,
         "complexity": turn.complexity,
+    }
+
+
+class ComputerHistoryBody(BaseModel):
+    action: str = Field(min_length=1, max_length=32)
+    target: str | None = Field(default=None, max_length=300)
+    ok: bool = True
+    note: str | None = Field(default=None, max_length=500)
+
+
+class ComputerStepBody(BaseModel):
+    goal: str = Field(min_length=1, max_length=2000)
+    screenshot_base64: str = Field(min_length=1, max_length=3_000_000)
+    history: list[ComputerHistoryBody] = Field(default_factory=list, max_length=MAX_STEPS)
+    step: int = Field(default=1, ge=1, le=MAX_STEPS + 1)
+
+
+@router.post("/tasks/{task_id}/computer/step")
+def computer_step(
+    task_id: uuid.UUID,
+    body: ComputerStepBody,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+    client: HeliClient = Depends(get_heli_client),
+) -> dict:
+    """One look at the user's screen: returns the next pointer/keyboard action."""
+    try:
+        step = next_step(
+            session,
+            user,
+            task_id,
+            client,
+            goal=body.goal,
+            screenshot_base64=body.screenshot_base64,
+            history=[HistoryItem(**item.model_dump()) for item in body.history],
+            step=body.step,
+        )
+    except ComputerError as exc:
+        _fail(exc)
+    except (TrajectoryError, QuotaError) as exc:
+        _fail(exc)
+    except HeliError as exc:
+        status = 503 if exc.code == "missing_api_key" else 502
+        raise HTTPException(status_code=status, detail=exc.code) from None
+    return {
+        "step_id": step.step_id,
+        "action": step.action,
+        "thought": step.thought,
+        "risk": step.risk,
+        "finished": step.finished,
+        "error": step.error,
     }
 
 
