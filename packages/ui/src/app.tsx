@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
+import { AppVersionCard } from "./updateNotice";
 import {
   ApiError,
   type AuthResult,
@@ -1679,6 +1680,7 @@ function Settings({
           ))}
         </ul>
       </section>
+      <AppVersionCard />
       <section className="card">
         <h2>Сообщить об ошибке</h2>
         <p className="muted">Отправим снимок экрана и журнал клиента. Пароли и ключи не включаются.</p>
