@@ -513,12 +513,13 @@ function Workspace({
             setNotice("");
           }
         },
-        onClientAction: (tool, args) =>
+        onClientAction: (tool, args, callId, taskId) =>
           runClientAction(tool, args, {
             confirm: (action, details) =>
               new Promise<boolean>((resolve) => setAsk({ action, details, resolve })),
             notice: setNotice,
             halted: () => haltedRef.current,
+            run: { base: apiBase, token, taskId, callId },
           }),
       });
       const note = stoppedNote(result.stopped);

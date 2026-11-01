@@ -17,7 +17,7 @@ export interface AgentRunOptions {
   autopause: boolean;
   estimateRub?: string | null;
   onEvent: (event: AgentEvent) => void;
-  onClientAction: (tool: string, args: Record<string, unknown>, callId: string) => Promise<ClientActionResult>;
+  onClientAction: (tool: string, args: Record<string, unknown>, callId: string, taskId: string) => Promise<ClientActionResult>;
   onTask?: (taskId: string) => void;
   signal: AbortSignal;
 }
@@ -105,7 +105,7 @@ export async function runAgentTask(
       if (handled.has(callId)) return;
       handled.add(callId);
       void options
-        .onClientAction(String(event.tool), (event.args as Record<string, unknown>) ?? {}, callId)
+        .onClientAction(String(event.tool), (event.args as Record<string, unknown>) ?? {}, callId, taskId)
         .catch((err: unknown) => ({ content: "", error: err instanceof Error ? err.message : "client_failed" }))
         .then((res) => postToolResult(base, token, taskId, callId, res))
         .catch(() => undefined);

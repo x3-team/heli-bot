@@ -12,7 +12,18 @@ export const BROWSER_TOOLS = [
   "browser_screenshot",
 ];
 
-export type ExtraHandler = (args: Record<string, unknown>) => Promise<ClientActionResult>;
+export interface ClientRunInfo {
+  base: string;
+  token: string;
+  taskId: string;
+  callId: string;
+}
+
+export type ExtraHandler = (
+  args: Record<string, unknown>,
+  info: ClientRunInfo,
+  isStopped: () => boolean,
+) => Promise<ClientActionResult>;
 
 /** Other modules (PC actions) register their client tools here. */
 const extraHandlers = new Map<string, ExtraHandler>();
@@ -51,6 +62,7 @@ export interface ClientActionContext {
   notice: (text: string) => void;
   /** True while the user pressed Stop or took control back. */
   halted: () => boolean;
+  run: ClientRunInfo;
 }
 
 export async function runClientAction(
@@ -64,7 +76,7 @@ export async function runClientAction(
     return { content: ok ? "approved" : "rejected" };
   }
   const extra = extraHandlers.get(tool);
-  if (extra) return extra(args);
+  if (extra) return extra(args, ctx.run, ctx.halted);
   if (!BROWSER_TOOLS.includes(tool) && tool !== "browser_search") return { content: "", error: "unknown_tool" };
   try {
     const page = await browserTab();
