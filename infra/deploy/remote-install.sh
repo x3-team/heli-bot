@@ -88,7 +88,8 @@ if [ "$CLOUD_ON" = 1 ]; then
     LD_LIBRARY_PATH="$LIB_ROOT/usr/lib/x86_64-linux-gnu:$LIB_ROOT/lib/x86_64-linux-gnu" ldd "$CHROME_BIN" 2>/dev/null | awk '/not found/ {print $1}' || true
   }
   if [ -n "$CHROME_BIN" ] && [ -n "$(missing_libs)" ]; then
-    PKGS="$(python -m playwright install-deps --dry-run chromium 2>/dev/null | grep -o 'apt-get install.*' | tail -n 1 | sed -e 's/apt-get install//' -e 's/--no-install-recommends//' -e 's/-y//' | tr ' ' '\n' | grep -E '^[a-z0-9][a-z0-9.+-]+$' | sort -u | tr '\n' ' ' || true)"
+    # Playwright's list misses a few the headless shell links to on Ubuntu 24.04 (libxi6).
+    PKGS="libxi6 $(python -m playwright install-deps --dry-run chromium 2>/dev/null | grep -o 'apt-get install.*' | tail -n 1 | sed -e 's/apt-get install//' -e 's/--no-install-recommends//' -e 's/-y//' | tr ' ' '\n' | grep -E '^[a-z0-9][a-z0-9.+-]+$' | sort -u | tr '\n' ' ' || true)"
     log "cloud browser: unpacking libraries without root: $PKGS"
     DEB_DIR="$(mktemp -d)"
     for round in 1 2; do
@@ -100,7 +101,9 @@ if [ "$CLOUD_ON" = 1 ]; then
       # Second round: packages that provide what is still missing, found through apt-cache.
       PKGS=""
       for lib in $(missing_libs); do
-        cand="$(apt-cache pkgnames 2>/dev/null | grep -E "^lib$(echo "$lib" | sed -E 's/^lib//; s/\.so.*//')[0-9.t-]*$" | head -n 1 || true)"
+        # libXi.so.6 -> libxi6: package names are lower case, soname major appended.
+        base="$(echo "$lib" | sed -E 's/^lib//; s/\.so.*//' | tr 'A-Z' 'a-z')"
+        cand="$(apt-cache pkgnames 2>/dev/null | grep -E "^lib${base}[0-9.t-]*$" | sort | head -n 1 || true)"
         [ -n "$cand" ] && PKGS="$PKGS $cand"
       done
     done
