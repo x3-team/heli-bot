@@ -1,0 +1,82 @@
+[
+  {"id": "x-01", "title": "Письмо → остатки → счёт → ответ",
+   "task": "Обработай письмо Галиева про счёт: проверь остатки, выставь счёт в 1С и ответь ему на почту с номером счёта.",
+   "budget": {"max_steps": 14},
+   "expect": [
+     {"type": "called", "tool": "onec_stock"},
+     {"type": "called", "tool": "onec_create_invoice", "args": {"inn": "1655004329", "items": [{"sku": "GL-NIT-M", "qty": 200}]}, "max": 1},
+     {"type": "called", "tool": "mail_send", "args": {"to": "galiev@ksm.example", "body": "1201"}, "max": 1}
+   ],
+   "golden": {"calls": [{"tool": "mail_search", "args": {"query": "Галиев счёт"}},
+                        {"tool": "mail_read", "args": {"message_id": "m1"}},
+                        {"tool": "onec_stock", "args": {"query": "GL-NIT-M"}},
+                        {"tool": "ask_confirmation", "args": {"action": "onec_create_invoice", "details": "Счёт АО «КазаньСтройМаш» на 200 × GL-NIT-M"}},
+                        {"tool": "onec_create_invoice", "args": {"inn": "1655004329", "items": [{"sku": "GL-NIT-M", "qty": 200}]}},
+                        {"tool": "ask_confirmation", "args": {"action": "mail_send", "details": "Письмо Галиеву со счётом СЧ-1201"}},
+                        {"tool": "mail_send", "args": {"to": "galiev@ksm.example", "subject": "Re: Счёт на перчатки", "body": "Ринат, добрый день! Выставили счёт СЧ-1201 на 178 000 руб., товар в наличии."}}],
+              "answer": "Остатков хватает (460 коробок). Счёт СЧ-1201 на 178 000 руб. выставлен, Галиеву отправлено письмо."}},
+
+  {"id": "x-02", "title": "Проверка по ИНН → контакт → сделка",
+   "task": "Новый клиент, ИНН 5033011222. Если компания действующая, заведи в amoCRM контакт с директором и сделку «Спецодежда» на 120 000 руб.",
+   "expect": [
+     {"type": "called", "tool": ["company_by_inn", "web_search"]},
+     {"type": "called", "tool": "amocrm_create_contact", "args": {"name": "Лебедев"}, "max": 1},
+     {"type": "called", "tool": "amocrm_create_deal", "args": {"price": 120000, "contact_id": 5001}, "max": 1}
+   ],
+   "golden": {"calls": [{"tool": "company_by_inn", "args": {"inn": "5033011222"}},
+                        {"tool": "amocrm_find_contacts", "args": {"query": "Лебедев"}},
+                        {"tool": "amocrm_create_contact", "args": {"name": "Лебедев Олег Викторович", "company": "ООО «Подмосковье Агро»"}},
+                        {"tool": "amocrm_create_deal", "args": {"name": "Спецодежда", "price": 120000, "contact_id": 5001}}],
+              "answer": "ООО «Подмосковье Агро» действующее. Контакт Лебедев О. В. и сделка «Спецодежда» на 120 000 руб. созданы."}},
+
+  {"id": "x-03", "title": "Риск по должнику → задача бухгалтеру",
+   "task": "Невский Логистик просит отгрузку в долг. Проверь их статус и долг в 1С и поставь задачу главбуху разобраться.",
+   "expect": [
+     {"type": "called", "tool": "onec_find_counterparty"},
+     {"type": "called", "tool": ["company_by_inn", "web_search"]},
+     {"type": "called", "tool": "bitrix24_create_task", "args": {"responsible": "Смирнова"}, "max": 1},
+     {"type": "answer_contains", "all": ["54 000"], "any": ["ликвидац"]}
+   ],
+   "golden": {"calls": [{"tool": "onec_find_counterparty", "args": {"query": "Невский Логистик"}},
+                        {"tool": "company_by_inn", "args": {"inn": "7805123456"}},
+                        {"tool": "bitrix24_create_task", "args": {"title": "Невский Логистик: отгрузка в долг", "responsible": "Смирнова Анна", "description": "Компания в ликвидации, долг 54 000 руб. Решить по отгрузке."}}],
+              "answer": "ООО «Невский Логистик» в процессе ликвидации, долг 54 000 руб. Поставил задачу Смирновой А. В."}},
+
+  {"id": "x-04", "title": "Чат → задача складу → примечание в сделке",
+   "task": "В чате продаж КазаньСтройМаш просит перенести отгрузку. Поставь задачу складу и добавь примечание в их сделку.",
+   "expect": [
+     {"type": "called", "tool": "telegram_read"},
+     {"type": "called", "tool": "bitrix24_create_task", "args": {"responsible": "Кузнецов"}, "max": 1},
+     {"type": "state", "path": "amocrm.deals[id=4002].notes", "equals": ["6 ноября"]}
+   ],
+   "golden": {"calls": [{"tool": "telegram_read", "args": {"chat": "Отдел продаж"}},
+                        {"tool": "bitrix24_create_task", "args": {"title": "Перенести отгрузку КазаньСтройМаш на 6 ноября", "responsible": "Кузнецов", "deadline": "2026-11-06"}},
+                        {"tool": "amocrm_list_deals", "args": {"query": "КазаньСтройМаш"}},
+                        {"tool": "amocrm_add_note", "args": {"deal_id": 4002, "text": "Клиент попросил перенести отгрузку на 6 ноября"}}],
+              "answer": "Задача складу поставлена, в сделку 4002 добавлено примечание о переносе на 6 ноября."}},
+
+  {"id": "x-05", "title": "Утренняя сводка из трёх систем",
+   "task": "Сделай утреннюю сводку: просроченные задачи в Битрикс24, кто нам должен по 1С и сделки на этапе «Принимают решение».",
+   "budget": {"max_steps": 10},
+   "expect": [
+     {"type": "called", "tool": "bitrix24_list_tasks"},
+     {"type": "called", "tool": "onec_find_counterparty"},
+     {"type": "called", "tool": "amocrm_list_deals"},
+     {"type": "answer_contains", "all": ["Инвентаризац", "128 400", "54 000", "615 000"]}
+   ],
+   "golden": {"calls": [{"tool": "bitrix24_list_tasks", "args": {"status": "open"}},
+                        {"tool": "onec_find_counterparty", "args": {"query": ""}},
+                        {"tool": "amocrm_list_deals", "args": {"query": "Принимают решение"}}],
+              "answer": "Просрочено: «Инвентаризация склада №2». Должны: КазаньСтройМаш 128 400 руб., Невский Логистик 54 000 руб. На этапе «Принимают решение»: «Перчатки 500 коробок — КазаньСтройМаш», 615 000 руб."}},
+
+  {"id": "x-06", "title": "Погода → письмо клиенту",
+   "task": "Посмотри погоду в Казани на 5 ноября. Если будет снег, напиши Галиеву, что отгрузка может задержаться.",
+   "expect": [
+     {"type": "called", "tool": ["web_search", "open_url"]},
+     {"type": "called", "tool": "mail_send", "args": {"to": "galiev@ksm.example"}, "max": 1}
+   ],
+   "golden": {"calls": [{"tool": "web_search", "args": {"query": "погода Казань"}},
+                        {"tool": "ask_confirmation", "args": {"action": "mail_send", "details": "Письмо Галиеву о возможной задержке из-за снега"}},
+                        {"tool": "mail_send", "args": {"to": "galiev@ksm.example", "subject": "Отгрузка 5 ноября", "body": "Ринат, добрый день! 5 ноября в Казани обещают снег, отгрузка может задержаться."}}],
+              "answer": "5 ноября в Казани −1 и снег, написал Галиеву о возможной задержке."}}
+]
