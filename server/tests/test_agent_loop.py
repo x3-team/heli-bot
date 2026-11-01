@@ -515,3 +515,54 @@ def test_eval_adapter_reads_mock_approvals() -> None:
     evals.run("Напиши клиенту", GATED_TOOLS, world.call, {"max_steps": 12}, client=HeliClient(sdk))
     assert [c.tool for c in world.calls][:2] == ["ask_confirmation", "telegram_send"]
     assert world.violations == []
+
+
+def test_eval_adapter_passes_whole_mock_result() -> None:
+    from app.agent import evals
+
+    seen = {}
+
+    class Script:
+        def __init__(self):
+            self.n = 0
+
+        def create(self, **kwargs):
+            self.n += 1
+            n = self.n
+            if n == 2:
+                seen["tool_msg"] = kwargs["messages"][-1]["content"]
+
+            class Usage:
+                prompt_tokens = 1
+                completion_tokens = 1
+
+            class Function:
+                name = "company_by_inn"
+                arguments = '{"inn": "7712345671"}'
+
+            class Call:
+                id = "c1"
+                function = Function()
+
+            class Message:
+                content = "" if n == 1 else "ООО Ромашка"
+                tool_calls = [Call()] if n == 1 else None
+
+            class Choice:
+                message = Message()
+
+            class Response:
+                choices = [Choice()]
+                usage = Usage()
+
+            return Response()
+
+    sdk = type("SDK", (), {})()
+    sdk.chat = type("Chat", (), {"completions": Script()})()
+    tools = [{"type": "function", "function": {"name": "company_by_inn", "parameters": {}}}]
+    evals.run(
+        "Кто это?", tools,
+        lambda name, args: {"inn": "7712345671", "name": "ООО «Ромашка»", "director": "Ковалёв", "status": "действующая"},
+        {"max_steps": 5}, client=HeliClient(sdk),
+    )
+    assert "Ромашка" in seen["tool_msg"] and "Ковалёв" in seen["tool_msg"]

@@ -38,11 +38,10 @@ def run(
                 return ToolResult("approved")
             return ToolResult(f"rejected: {raw.get('comment') or 'пользователь отказал'}")
         if isinstance(raw, dict):
-            content = raw.get("content")
-            if content is None:
-                content = raw.get("result", raw.get("status", raw))
+            # Pass the whole result to the model: dropping fields (status-only, etc.) hid the data.
             error = raw.get("error")
-            text = content if isinstance(content, str) else _json(content)
+            content = raw.get("content")
+            text = content if isinstance(content, str) and len(raw) <= 2 else _json(raw)
             return ToolResult(text, str(error) if error else None)
         return ToolResult(_json(raw))
 
