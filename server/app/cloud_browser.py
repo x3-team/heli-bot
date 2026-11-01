@@ -808,6 +808,7 @@ class CloudBrowser:
                 log.info("cloud browser failed to start: %s", type(exc).__name__)
                 raise CloudError("browser_unavailable") from None
         page = self._new_page(self.store.load(user_id))
+        page.last_used = time.monotonic()
         self.sessions[user_id] = page
         return page
 
