@@ -30,6 +30,9 @@ class Settings(BaseSettings):
         default=Decimal("1000"),
         validation_alias="DEFAULT_MONTHLY_LIMIT_RUB",
     )
+    # PC hands (use_computer on the user's own Windows). Off in v0.1: the agent works
+    # in the cloud computer. Turn on when desktop 1С needs it.
+    pc_hands: bool = Field(default=False, validation_alias="HELI_PC_HANDS")
     browser_max: int = Field(default=8, validation_alias="BROWSER_MAX")
     browser_image: str = Field(default="heli-browser:local", validation_alias="BROWSER_IMAGE")
     # Heli's own browser on this server (app/cloud_browser.py). Needs `pip install -e .[cloud]`.

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   ApiError,
   type AuthResult,
@@ -37,6 +37,7 @@ import {
 import { resolveApiBase } from "./apiBase";
 import { trialLabel } from "./authSession";
 import { clampPercent, confirmationNeeded, limitTone } from "./behavior";
+import { ComputerConfirmCard } from "./computerCard";
 import { networkErrorMessage } from "./errors";
 import {
   captureScreenshotBase64,
@@ -50,7 +51,7 @@ import { controlRun, runAgentTask, stoppedNote, type AgentEvent } from "./agentR
 import { StepFeed, feedItem, type FeedItem } from "./agentFeed";
 import { CloudScreen, type CloudStatus } from "./cloudScreen";
 import { availableClientTools, localBrowserEnabled, runClientAction } from "./clientActions";
-import { Mascot, avatarFor, mascotLabel, type MascotState } from "./mascot";
+import { Mascot, mascotLabel, type MascotState } from "./mascot";
 
 type View = "chat" | "limits" | "schedules" | "memory" | "settings";
 type Theme = "light" | "dark";
@@ -405,6 +406,8 @@ function Workspace({
   const [costHint, setCostHint] = useState<string | null>(null);
   const [feedbackTask, setFeedbackTask] = useState<{ taskId: string; reply: string } | null>(null);
   const [consents, setConsents] = useState({ pdn: true, training: false });
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [computerOpen, setComputerOpen] = useState(false);
   const [runTaskId, setRunTaskId] = useState<string | null>(null);
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [screenTick, setScreenTick] = useState(0);
@@ -474,6 +477,7 @@ function Workspace({
     setBusy(true);
     setError("");
     setMascot("thinking");
+    setComputerOpen(true);
     const userMessage: Message = { id: crypto.randomUUID(), role: "user", text };
     setThreads((list) =>
       list.map((thread) =>
@@ -565,7 +569,10 @@ function Workspace({
   }
 
   async function togglePause() {
-    if (!runTaskId) return;
+    if (!runTaskId) {
+      void handControlBack();
+      return;
+    }
     if (paused) {
       void resetAgentControl();
       haltedRef.current = false;
@@ -606,27 +613,60 @@ function Workspace({
     void send(text, threadId);
   }
 
-  const avatar = useMemo(() => avatarFor(theme), [theme]);
+  const week = clampPercent(usage.weekPercent);
+  const weekTone = limitTone(week);
+  const showComputer = computerOpen && view === "chat";
 
   return (
-    <div className="workspace" data-view={view}>
-      <aside className="sidebar">
-        <div className="brand">
-          <img src={avatar} alt="" />
-          Heli bot
-        </div>
-        {usage.trialActive ? (
-          <p className="muted trial-badge">{trialLabel(usage.trialEndsAt)}</p>
-        ) : null}
-        <button type="button" data-emphasis="primary" onClick={newThread}>
-          Новая задача
+    <div className="workspace" data-view={view} data-history={historyOpen ? "open" : "closed"} data-computer={showComputer ? "open" : "closed"}>
+      <nav className="rail" aria-label="Разделы">
+        <RailButton label="Новая задача" onClick={newThread} icon={ICONS.plus} />
+        <RailButton
+          label="Задачи"
+          current={historyOpen}
+          onClick={() => {
+            setHistoryOpen((open) => !open);
+            setView("chat");
+          }}
+          icon={ICONS.list}
+        />
+        <RailButton label="Расписания" current={view === "schedules"} onClick={() => setView("schedules")} icon={ICONS.clock} />
+        <RailButton label="Память" current={view === "memory"} onClick={() => setView("memory")} icon={ICONS.memory} />
+        <RailButton
+          label="Компьютер агента"
+          current={showComputer}
+          onClick={() => {
+            setComputerOpen((open) => !open);
+            setView("chat");
+          }}
+          icon={ICONS.screen}
+        />
+        <span className="rail-gap" />
+        <button
+          type="button"
+          className={`limit-ring ${weekTone}`}
+          title={`Лимит недели: ${week}%${usage.trialActive ? ` · ${trialLabel(usage.trialEndsAt)}` : ""}`}
+          aria-label={`Лимиты, неделя ${week}%`}
+          aria-current={view === "limits" ? "page" : undefined}
+          onClick={() => setView("limits")}
+        >
+          <svg viewBox="0 0 36 36" aria-hidden="true">
+            <circle cx="18" cy="18" r="15" className="track" />
+            <circle cx="18" cy="18" r="15" className="fill" strokeDasharray={`${(week / 100) * 94.2} 94.2`} />
+          </svg>
+          <span>{week}</span>
         </button>
-        <div className="chat-list">
+        <RailButton label="Настройки" current={view === "settings"} onClick={() => setView("settings")} icon={ICONS.gear} />
+      </nav>
+      {historyOpen ? (
+        <aside className="history" aria-label="Задачи">
+          <p className="history-title">Задачи</p>
+          {threads.length === 0 ? <p className="muted">Здесь появятся ваши задачи.</p> : null}
           {threads.map((thread) => (
             <button
               key={thread.id}
               type="button"
-              aria-current={thread.id === activeId ? "page" : undefined}
+              aria-current={thread.id === activeId && view === "chat" ? "page" : undefined}
               onClick={() => {
                 setActiveId(thread.id);
                 setView("chat");
@@ -635,34 +675,20 @@ function Workspace({
               {thread.title}
             </button>
           ))}
-        </div>
-        <nav className="nav grow">
-          <button type="button" aria-current={view === "chat" ? "page" : undefined} onClick={() => setView("chat")}>
-            Чат
-          </button>
-          <button type="button" aria-current={view === "limits" ? "page" : undefined} onClick={() => setView("limits")}>
-            Лимиты
-          </button>
-          <button type="button" aria-current={view === "schedules" ? "page" : undefined} onClick={() => setView("schedules")}>
-            Расписания
-          </button>
-          <button type="button" aria-current={view === "memory" ? "page" : undefined} onClick={() => setView("memory")}>
-            Память
-          </button>
-          <button type="button" aria-current={view === "settings" ? "page" : undefined} onClick={() => setView("settings")}>
-            Настройки
-          </button>
-        </nav>
-      </aside>
+        </aside>
+      ) : null}
       <section className="main">
         {view === "chat" ? (
           <Chat
+            title={active?.title ?? ""}
+            mascot={stopped ? "waiting" : mascot}
             messages={active?.messages ?? []}
             draft={draft}
             busy={busy}
             stopped={stopped}
             error={error}
             pending={pending}
+            trial={usage.trialActive ? trialLabel(usage.trialEndsAt) : null}
             onDraft={setDraft}
             onSubmit={submitDraft}
             onApprove={() => {
@@ -726,28 +752,68 @@ function Workspace({
         apiBase={apiBase}
         token={token}
         state={stopped ? "waiting" : mascot}
+        hidden={!showComputer}
+        onPause={() => void togglePause()}
+        paused={paused !== null}
         feed={feed}
-        screenTick={screenTick}
         busy={busy}
+        screenTick={screenTick}
+        onClose={() => setComputerOpen(false)}
       />
     </div>
   );
 }
 
+const ICONS = {
+  plus: "M12 5v14M5 12h14",
+  list: "M4 6h16M4 12h16M4 18h10",
+  clock: "M12 4a8 8 0 1 0 0 16a8 8 0 1 0 0-16M12 8v4l3 2",
+  memory: "M6 4h12v16l-6-4-6 4z",
+  screen: "M4 5h16v11H4zM9 20h6M12 16v4",
+  gear: "M12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1",
+  send: "M12 19V5M6 11l6-6 6 6",
+  close: "M6 6l12 12M18 6L6 18",
+};
+
+function Icon({ d }: { d: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d={d} />
+    </svg>
+  );
+}
+
+function RailButton({ label, icon, current, onClick }: { label: string; icon: string; current?: boolean; onClick: () => void }) {
+  return (
+    <button type="button" className="rail-button" title={label} aria-label={label} aria-current={current ? "page" : undefined} onClick={onClick}>
+      <Icon d={icon} />
+    </button>
+  );
+}
+
+const IDEAS = [
+  "Сверь счета за октябрь в 1С с банковской выпиской",
+  "Перенеси новых лидов из Битрикс24 в таблицу",
+  "Разбери входящие письма в Яндекс 360 и ответь по шаблону",
+];
+
 function Chat({
+  title,
+  mascot,
   messages,
   draft,
   busy,
   stopped,
   error,
   pending,
+  trial,
   onDraft,
   onSubmit,
   onApprove,
   onEdit,
   onReject,
-  onPause,
   onStop,
+  onPause,
   paused,
   notice,
   ask,
@@ -756,12 +822,15 @@ function Chat({
   feedback,
   onFeedback,
 }: {
+  title: string;
+  mascot: MascotState;
   messages: Message[];
   draft: string;
   busy: boolean;
   stopped: boolean;
   error: string;
   pending: string | null;
+  trial: string | null;
   costHint: string | null;
   feedback: { taskId: string; reply: string } | null;
   onDraft: (value: string) => void;
@@ -769,8 +838,8 @@ function Chat({
   onApprove: () => void;
   onEdit: () => void;
   onReject: () => void;
-  onPause: () => void;
   onStop: () => void;
+  onPause: () => void;
   paused: { reason: string; spent?: string; estimate?: string } | null;
   notice: string;
   ask: { action: string; details: string } | null;
@@ -778,18 +847,108 @@ function Chat({
   onFeedback: (worked: boolean, comment: string) => Promise<void>;
 }) {
   const [comment, setComment] = useState("");
+  const threadEnd = useRef<HTMLDivElement>(null);
+  const empty = messages.length === 0 && !pending && !stopped;
+
+  useEffect(() => {
+    threadEnd.current?.scrollIntoView({ block: "end" });
+  }, [messages.length, pending, feedback, busy, ask, paused, notice]);
+
+  const composer = (
+    <form
+      className="composer"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit();
+      }}
+    >
+      <div className="composer-box">
+        <textarea
+          aria-label="Текст задачи"
+          placeholder={stopped ? "Лимит исчерпан до сброса" : "Опишите задачу"}
+          rows={1}
+          value={draft}
+          disabled={stopped}
+          onChange={(event) => onDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              onSubmit();
+            }
+          }}
+        />
+        {busy ? (
+          <button type="button" className="round-button" title="Стоп" aria-label="Стоп" onClick={onStop}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" />
+            </svg>
+          </button>
+        ) : (
+          <button type="submit" className="round-button" title="Отправить" aria-label="Отправить" disabled={stopped || !draft.trim()}>
+            <Icon d={ICONS.send} />
+          </button>
+        )}
+      </div>
+      {costHint && !busy ? <p className="composer-hint">{costHint}</p> : null}
+    </form>
+  );
+
+  if (empty) {
+    return (
+      <div className="chat-empty">
+        <div className="hero-mascot">
+          <Mascot state="waiting" size={72} />
+        </div>
+        <h1>Привет! Чем займёмся?</h1>
+        {composer}
+        <div className="ideas">
+          {IDEAS.map((idea) => (
+            <button key={idea} type="button" onClick={() => onDraft(idea)}>
+              {idea}
+            </button>
+          ))}
+        </div>
+        <p className="composer-hint">
+          Опасные действия Heli спросит заранее · Ctrl+Alt+Пробел ставит на паузу
+          {trial ? ` · ${trial}` : ""}
+        </p>
+        {error ? <p className="error">{error}</p> : null}
+      </div>
+    );
+  }
+
   return (
     <>
+      <header className="chat-head">
+        <span className="chat-title">{title}</span>
+        <span className={`live ${mascot}`}>{mascotLabel(mascot)}</span>
+      </header>
       <div className="thread">
-        {messages.length === 0 ? <p className="muted">Опишите задачу. Опасные действия спросят подтверждение.</p> : null}
-        {messages.map((message) => (
-          <div key={message.id} className={`bubble ${message.role}`}>
-            {message.text}
+        {messages.map((message) =>
+          message.role === "assistant" ? (
+            <div key={message.id} className="bubble assistant">
+              <span className="bubble-avatar" aria-hidden="true">
+                <Mascot state="waiting" size={28} />
+              </span>
+              <div>{message.text}</div>
+            </div>
+          ) : (
+            <div key={message.id} className="bubble user">
+              {message.text}
+            </div>
+          ),
+        )}
+        {busy ? (
+          <div className="bubble assistant typing">
+            <span className="bubble-avatar" aria-hidden="true">
+              <Mascot state="thinking" size={28} />
+            </span>
+            <div className="muted">{mascot === "working" ? "Лечу по задаче на компьютере агента…" : "Прогреваю винт…"}</div>
           </div>
-        ))}
+        ) : null}
         {pending ? (
           <article className="card danger">
-            <p className="muted">Подтверждение</p>
+            <p className="muted">Нужно ваше разрешение</p>
             <h2>Выполнить это действие?</h2>
             <p>{pending}</p>
             <div className="row">
@@ -824,6 +983,7 @@ function Chat({
           </article>
         ) : null}
         {notice ? <p className="muted">{notice}</p> : null}
+        <ComputerConfirmCard />
         {stopped ? (
           <article className="card danger">
             <h2>Лимит исчерпан</h2>
@@ -850,38 +1010,9 @@ function Chat({
           </article>
         ) : null}
         {error ? <p className="error">{error}</p> : null}
-        {costHint && !busy ? <p className="muted">{costHint}</p> : null}
+        <div ref={threadEnd} />
       </div>
-      <form
-        className="composer"
-        onSubmit={(event) => {
-          event.preventDefault();
-          onSubmit();
-        }}
-      >
-        <textarea
-          aria-label="Текст задачи"
-          value={draft}
-          disabled={stopped}
-          onChange={(event) => onDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
-              event.preventDefault();
-              onSubmit();
-            }
-          }}
-        />
-        {busy ? (
-          <div className="row">
-            <button type="button" onClick={onPause}>{paused ? "Продолжить" : "Пауза"}</button>
-            <button type="button" data-emphasis="danger" onClick={onStop}>Стоп</button>
-          </div>
-        ) : (
-          <button type="submit" data-emphasis="primary" disabled={stopped || !draft.trim()}>
-            Отправить
-          </button>
-        )}
-      </form>
+      {composer}
     </>
   );
 }
@@ -890,16 +1021,24 @@ function Computer({
   apiBase,
   token,
   state,
+  hidden,
+  busy,
+  paused,
   feed,
   screenTick,
-  busy,
+  onPause,
+  onClose,
 }: {
   apiBase: string;
   token: string;
   state: MascotState;
+  hidden: boolean;
+  busy: boolean;
+  paused: boolean;
   feed: FeedItem[];
   screenTick: number;
-  busy: boolean;
+  onPause: () => void;
+  onClose: () => void;
 }) {
   const [cloud, setCloud] = useState<CloudStatus | null>(null);
   const [browser, setBrowser] = useState<BrowserView>({
@@ -943,45 +1082,55 @@ function Computer({
   }
 
   return (
-    <aside className="computer">
-      <div className="status">
-        <h2>Компьютер агента</h2>
-        <span>{mascotLabel(state)}</span>
-      </div>
-      <CloudScreen
-        apiBase={apiBase}
-        token={token}
-        tick={screenTick}
-        busy={busy}
-        onStatus={setCloud}
-        placeholder={<Mascot state={state} />}
-      />
-      {cloud?.enabled ? null : (
-        <div className="screen">
-          <Mascot state={state} />
+    <aside className="computer" aria-label="Компьютер агента" hidden={hidden}>
+      <div className="computer-in">
+        <div className="computer-top">
+          <b>Компьютер агента</b>
+          <span className={`live ${state}`}>{mascotLabel(state)}</span>
+          <span className="computer-actions">
+            {busy ? (
+              <button type="button" className="pill" onClick={onPause}>{paused ? "Продолжить" : "Пауза"}</button>
+            ) : null}
+            <button type="button" className="pill icon" title="Скрыть" aria-label="Скрыть" onClick={onClose}>
+              <Icon d={ICONS.close} />
+            </button>
+          </span>
         </div>
-      )}
-      <StepFeed items={feed} />
-      {cloud?.enabled && !localBrowserEnabled() ? null : (
-        <>
-      {browser.status === "running" ? (
-        <p className="muted">
-          {browser.mode === "local"
-            ? `Локальный ${browser.localBrowser ?? "браузер"} · порт ${browser.localPort ?? "—"}`
-            : "Облачный браузер"}
-        </p>
-      ) : null}
-      <div className="row">
-        <button type="button" onClick={() => void toggle()}>
-          {browser.status === "running" ? "Остановить браузер" : "Запустить браузер"}
-        </button>
-        {browser.novncUrl ? (
-          <a href={browser.novncUrl} target="_blank" rel="noreferrer">Смотреть</a>
-        ) : null}
+        <CloudScreen
+          apiBase={apiBase}
+          token={token}
+          tick={screenTick}
+          busy={busy}
+          onStatus={setCloud}
+          placeholder={<Mascot state={state} />}
+        />
+        {cloud?.enabled ? null : (
+          <div className="screen">
+            <Mascot state={state} />
+          </div>
+        )}
+        <StepFeed items={feed} />
+        {cloud?.enabled && !localBrowserEnabled() ? null : (
+        <div className="computer-foot">
+          <span className="muted">
+            {browser.status === "running"
+              ? browser.mode === "local"
+                ? `Локальный ${browser.localBrowser ?? "браузер"} · порт ${browser.localPort ?? "—"}`
+                : "Облачный браузер"
+              : "Браузер выключен"}
+          </span>
+          <span className="computer-actions">
+            {browser.novncUrl ? (
+              <a className="pill" href={browser.novncUrl} target="_blank" rel="noreferrer">Смотреть</a>
+            ) : null}
+            <button type="button" className="pill" onClick={() => void toggle()}>
+              {browser.status === "running" ? "Остановить браузер" : "Запустить браузер"}
+            </button>
+          </span>
+        </div>
+        )}
+        {note ? <p className="error">{note}</p> : null}
       </div>
-        </>
-      )}
-      {note ? <p className="error">{note}</p> : null}
     </aside>
   );
 }

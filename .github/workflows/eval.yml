@@ -1,0 +1,62 @@
+name: eval
+
+# Эталонные задачи на живой модели. Стоит денег, поэтому не на каждый PR:
+# вручную и раз в сутки. Проверка самих сценариев (golden) идёт в ci.yml.
+on:
+  workflow_dispatch:
+    inputs:
+      agent:
+        description: "auto | baseline | module:func"
+        default: auto
+      alias:
+        description: "Модель для baseline: heli-fast, heli-smart, ..."
+        default: heli-fast
+      only:
+        description: "id сценариев или категории через запятую (пусто = все)"
+        default: ""
+      gate:
+        description: "Минимальная доля успеха, иначе job красный"
+        default: "0.7"
+  schedule:
+    - cron: "0 0 * * *" # 03:00 МСК
+
+concurrency:
+  group: eval
+  cancel-in-progress: false
+
+jobs:
+  eval:
+    runs-on: [self-hosted, beget-light]
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install server
+        run: python -m pip install -e "./server[dev]"
+      - name: Run eval
+        working-directory: server
+        env:
+          HELI_API_KEY: ${{ secrets.HELI_API_KEY }}
+          HELI_EVAL_ALIAS: ${{ inputs.alias || 'heli-fast' }}
+          # Ночью только отчёт: красный job без изменений в коде никому не нужен.
+          GATE: ${{ github.event_name == 'schedule' && '0' || inputs.gate }}
+        run: |
+          if [ -z "$HELI_API_KEY" ]; then
+            echo "HELI_API_KEY не задан, живой прогон пропущен" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          set +e
+          python -m evals --agent "${{ inputs.agent || 'auto' }}" --only "${{ inputs.only }}" \
+            --gate "$GATE" --out ../eval-report
+          code=$?
+          cat ../eval-report/report.md >> "$GITHUB_STEP_SUMMARY"
+          exit $code
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report-${{ github.run_number }}
+          path: eval-report/
+          if-no-files-found: ignore

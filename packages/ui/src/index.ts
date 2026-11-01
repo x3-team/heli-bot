@@ -17,3 +17,6 @@ export type {
   StepView,
   UsageView,
 } from "./types";
+export { runUseComputer, describe as describeComputerAction, type ComputerOutcome, type ComputerPorts } from "./computer";
+export { computerConfirm, runUseComputerOnDesktop, type DesktopComputerOptions } from "./computerDesktop";
+export { ComputerConfirmCard } from "./computerCard";
