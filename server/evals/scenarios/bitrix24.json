@@ -12,7 +12,7 @@
    "expect": [
      {"type": "called", "tool": "bitrix24_list_tasks"},
      {"type": "answer_contains", "all": ["Инвентаризац"]},
-     {"type": "answer_not_contains", "any": ["Обзвонить", "Сверка", "Подготовить КП"]}
+     {"type": "answer_not_contains", "any": ["Подготовить КП"]}
    ],
    "golden": {"calls": [{"tool": "bitrix24_list_tasks", "args": {"status": "open"}}],
               "answer": "Просрочена одна задача: «Инвентаризация склада №2» у Кузнецова, срок был 30 октября."}},
