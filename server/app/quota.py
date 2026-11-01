@@ -111,11 +111,24 @@ def remaining_ratio(snap: UsageSnapshot) -> Decimal:
     return min(week_left, month_left)
 
 
+# A downscaled screenshot costs about this many input tokens on vision models.
+IMAGE_TOKENS = 1600
+
+
 def estimate_input_tokens(messages: list[dict]) -> int:
     chars = 0
+    images = 0
     for message in messages:
-        chars += len(str(message.get("content", "")))
-    return max(1, chars // 4)
+        content = message.get("content", "")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    images += 1
+                elif isinstance(part, dict):
+                    chars += len(str(part.get("text", "")))
+        else:
+            chars += len(str(content))
+    return max(1, chars // 4 + images * IMAGE_TOKENS)
 
 
 def estimate_turn_reserve(request: str) -> Decimal:

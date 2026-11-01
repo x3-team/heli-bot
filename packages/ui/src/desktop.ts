@@ -1,3 +1,5 @@
+import { computerConfirm } from "./computerDesktop";
+
 const LOG_LIMIT = 200;
 const logLines: string[] = [];
 
@@ -15,6 +17,7 @@ function tauri(): boolean {
 }
 
 export async function handControlBack(): Promise<void> {
+  computerConfirm.cancel();
   if (!tauri()) return;
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("agent_set_stopped", { stopped: true });

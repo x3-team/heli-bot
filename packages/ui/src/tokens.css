@@ -269,3 +269,27 @@ input, textarea {
   .sidebar { border-right: 0; border-bottom: 1px solid var(--line); }
   .computer { border-left: 0; border-top: 1px solid var(--line); }
 }
+
+/* PC hands: confirmation card with the screen and a marker on the target. */
+.computer-shot {
+  position: relative;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: var(--screen);
+}
+
+.computer-shot img { display: block; width: 100%; height: auto; }
+
+.computer-marker {
+  position: absolute;
+  width: 28px;
+  height: 28px;
+  margin: -14px 0 0 -14px;
+  border-radius: 50%;
+  border: 3px solid var(--signal);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--signal) 35%, transparent);
+  pointer-events: none;
+}
+
+.computer-confirm.danger .computer-marker { border-color: var(--danger); }
