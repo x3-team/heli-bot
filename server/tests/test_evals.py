@@ -204,3 +204,13 @@ def test_unknown_chat_error_lists_real_chats() -> None:
     result = world.call("telegram_read", {"chat": "КазаньСтройМаш"})
     assert "Отдел продаж" in result["error"] and "@heli_sales_team" in result["error"]
     assert world.call("telegram_list_chats", {})["chats"][0]["username"] == "@heli_sales_team"
+
+
+def test_state_any_of_accepts_numeric_date() -> None:
+    scenario = next(s for s in SCENARIOS if s["id"] == "x-04")
+    for text, ok in [("перенос на 06.11.2026", True), ("перенос на 6 ноября", True), ("перенос на 7 ноября", False)]:
+        variant = copy.deepcopy(scenario)
+        for call in variant["golden"]["calls"]:
+            if call["tool"] == "amocrm_add_note":
+                call["args"]["text"] = text
+        assert run_scenario(variant, golden_agent(variant)).success is ok, text
