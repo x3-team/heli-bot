@@ -44,7 +44,13 @@ pnpm --filter @heli/web dev
 
 Документ лежит в Postgres. Выгрузка для администратора: `GET /v1/admin/trajectories.jsonl?kind=raw|sft|dpo`. SFT по умолчанию берёт только успешные задачи, `success_only=true` оставляет их и в сыром журнале. Пароли и персональные данные маскируются. `HELI_API_KEY` в журнал и в логи не попадает.
 
-Почта для кода входа ещё не отправляется. Пока SMTP не подключён, оператор выдаёт код так: `python -m app.cli create-invite` и `python -m app.cli issue-code --email ... --invite ...`. Нужны `JWT_SECRET` и `TRAJECTORY_HASH_PEPPER` в окружении.
+Почта для кода входа ещё не отправляется. Пока SMTP не подключён, оператор выдаёт код из каталога `server`, а клиент после «Получить код» или «Отправить код» сразу показывает поле для него:
+
+- новый пользователь по приглашению: `python -m app.cli create-invite`, затем `python -m app.cli issue-code --email ... --invite ...`;
+- вход по коду для существующего аккаунта: `python -m app.cli issue-code --email ...`;
+- сброс пароля: `python -m app.cli issue-reset-code --email ...`.
+
+Код живёт 10 минут. Нужны `JWT_SECRET` и `TRAJECTORY_HASH_PEPPER` в окружении.
 
 ## После v0.1
 

@@ -2,7 +2,13 @@
 
 import argparse
 
-from app.auth import AuthError, create_invite, issue_login_code
+from app.auth import (
+    AuthError,
+    create_invite,
+    issue_login_code,
+    issue_login_code_for_user,
+    issue_recovery_code,
+)
 from app.db import get_session_factory
 from app.models import Base
 from app.db import get_engine
@@ -17,7 +23,10 @@ def main() -> None:
 
     code = sub.add_parser("issue-code")
     code.add_argument("--email", required=True)
-    code.add_argument("--invite", required=True)
+    code.add_argument("--invite", help="для нового пользователя; для существующего не нужен")
+
+    reset = sub.add_parser("issue-reset-code")
+    reset.add_argument("--email", required=True)
 
     args = parser.parse_args()
     engine = get_engine()
@@ -27,7 +36,12 @@ def main() -> None:
         if args.command == "create-invite":
             print(create_invite(session, max_uses=args.max_uses))
         elif args.command == "issue-code":
-            print(issue_login_code(session, args.email, args.invite))
+            if args.invite:
+                print(issue_login_code(session, args.email, args.invite))
+            else:
+                print(issue_login_code_for_user(session, args.email))
+        elif args.command == "issue-reset-code":
+            print(issue_recovery_code(session, args.email))
         session.commit()
     except AuthError as exc:
         session.rollback()

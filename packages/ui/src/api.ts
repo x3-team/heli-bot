@@ -4,6 +4,8 @@ export interface Usage {
   blocked: boolean;
   warning: boolean;
   trialActive: boolean;
+  /** ISO date-time when the trial week ends, if the account has one. */
+  trialEndsAt?: string | null;
 }
 
 export interface SessionUser {
@@ -19,8 +21,16 @@ export { parseAuthResponse } from "./authSession";
 import { readApiError } from "./errors";
 
 export class ApiError extends Error {
-  constructor(message: string) {
+  readonly status: number | undefined;
+
+  constructor(message: string, status?: number) {
     super(message);
+    this.status = status;
+  }
+
+  /** Server has no mail delivery yet: the code comes from the operator. */
+  get mailNotConfigured(): boolean {
+    return this.status === 501;
   }
 }
 
@@ -40,7 +50,7 @@ export async function requestCode(base: string, email: string, inviteCode?: stri
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload),
   });
-  if (!response.ok) throw new ApiError(await readError(response));
+  if (!response.ok) throw new ApiError(await readError(response), response.status);
 }
 
 export async function registerAccount(
@@ -80,7 +90,7 @@ export async function recoverRequest(base: string, email: string): Promise<void>
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ email }),
   });
-  if (!response.ok) throw new ApiError(await readError(response));
+  if (!response.ok) throw new ApiError(await readError(response), response.status);
 }
 
 export async function recoverReset(
@@ -145,6 +155,7 @@ export async function loadUsage(base: string, token: string): Promise<Usage> {
     blocked?: boolean;
     warning?: boolean;
     trial_active?: boolean;
+    trial_ends_at?: string | null;
   };
   return {
     weekPercent: body.week_percent ?? 0,
@@ -152,6 +163,7 @@ export async function loadUsage(base: string, token: string): Promise<Usage> {
     blocked: Boolean(body.blocked),
     warning: Boolean(body.warning),
     trialActive: Boolean(body.trial_active),
+    trialEndsAt: body.trial_ends_at ?? null,
   };
 }
 

@@ -23,6 +23,27 @@ def test_register_login_and_trial_usage(client, session) -> None:
     view = usage.json()
     assert "week_percent" in view
     assert view.get("trial_active") is True
+    assert view.get("trial_ends_at")
+
+
+def test_expired_trial_is_reported(client, session) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import select
+
+    from app.models import User
+
+    reg = client.post(
+        "/v1/auth/register",
+        json={"email": "old@example.com", "password": "long-enough-secret", "consent_pdn": True},
+    )
+    user = session.scalar(select(User).where(User.email == "old@example.com"))
+    user.trial_ends_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    session.flush()
+    headers = {"Authorization": f"Bearer {reg.json()['access_token']}"}
+    assert client.get("/v1/usage", headers=headers).json()["trial_active"] is False
+    login = client.post("/v1/auth/login", json={"email": "old@example.com", "password": "long-enough-secret"})
+    assert login.json()["trial_active"] is False
 
 
 def test_login_password_and_recovery(client) -> None:
@@ -54,6 +75,7 @@ def test_login_password_and_recovery(client) -> None:
         json={"email": "recover@example.com", "code": code, "password": "second-password2"},
     )
     assert reset.status_code == 200
+    assert reset.json()["trial_active"] is True
     login = client.post(
         "/v1/auth/login",
         json={"email": "recover@example.com", "password": "second-password2"},
