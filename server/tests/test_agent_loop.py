@@ -503,6 +503,25 @@ def test_tool_call_budget_forces_an_answer() -> None:
     assert out.final_answer == "Итог: 3 сделки"
 
 
+def test_repeated_failed_call_is_not_run_again() -> None:
+    complete = _scripted(
+        _completion(calls=[("amocrm_list_deals", {"query": "Казань", "limit": 5})]),
+        _completion(calls=[("amocrm_list_deals", {"query": " казань "})]),
+        _completion(calls=[("amocrm_list_deals", {"query": "КазаньСтройМаш"})]),
+        _completion("Нашёл"),
+    )
+    called = []
+
+    def call_tool(call_id, name, args):
+        called.append(args["query"])
+        return ToolResult("Ошибка", "not_found") if len(called) == 1 else ToolResult("[]")
+
+    out = run_agent([], tools=GATED_TOOLS, call_tool=call_tool, complete=complete, budget=Budget(max_steps=10))
+    assert called == ["Казань", "КазаньСтройМаш"]
+    assert "уже вернул ошибку (not_found)" in complete.seen[2][0][-1]["content"]
+    assert out.final_answer == "Нашёл"
+
+
 def test_eval_adapter_reads_mock_approvals() -> None:
     from evals.world import World
     from app.agent import evals
