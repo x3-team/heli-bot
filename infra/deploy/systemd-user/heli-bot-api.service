@@ -9,6 +9,7 @@ WorkingDirectory=%h/server
 EnvironmentFile=-%h/.env
 Environment=PLAYWRIGHT_BROWSERS_PATH=%h/var/ms-playwright
 Environment=CLOUD_BROWSER_PROFILES=%h/var/browser-profiles
+Environment=CLOUD_BROWSER_LIBS=%h/var/chromium-libs
 ExecStart=%h/venv/bin/python -m app.main
 Restart=on-failure
 RestartSec=5

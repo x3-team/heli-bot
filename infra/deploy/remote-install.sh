@@ -80,13 +80,42 @@ if [ "$CLOUD_ON" = 1 ]; then
   python -m pip install -e "$APP_DIR/server[cloud]"
   export PLAYWRIGHT_BROWSERS_PATH="$APP_DIR/var/ms-playwright"
   python -m playwright install chromium-headless-shell || python -m playwright install chromium
-  CHROME_BIN="$(find "$PLAYWRIGHT_BROWSERS_PATH" -type f \( -name chrome-headless-shell -o -name chrome \) | head -n 1 || true)"
+  # No root on this host: fetch the system libraries Chromium lacks as .deb files and unpack them
+  # into var/chromium-libs. The app passes that folder to Chromium as LD_LIBRARY_PATH.
+  LIB_ROOT="$APP_DIR/var/chromium-libs"
+  CHROME_BIN="$(find "$PLAYWRIGHT_BROWSERS_PATH" -type f \( -name headless_shell -o -name chrome-headless-shell -o -name chrome \) | head -n 1 || true)"
+  missing_libs() {
+    LD_LIBRARY_PATH="$LIB_ROOT/usr/lib/x86_64-linux-gnu:$LIB_ROOT/lib/x86_64-linux-gnu" ldd "$CHROME_BIN" 2>/dev/null | awk '/not found/ {print $1}' || true
+  }
+  if [ -n "$CHROME_BIN" ] && [ -n "$(missing_libs)" ]; then
+    PKGS="$(python -m playwright install-deps --dry-run chromium 2>/dev/null | grep -o 'apt-get install.*' | tail -n 1 | sed -e 's/apt-get install//' -e 's/--no-install-recommends//' -e 's/-y//' | tr ' ' '\n' | grep -E '^[a-z0-9][a-z0-9.+-]+$' | sort -u | tr '\n' ' ' || true)"
+    log "cloud browser: unpacking libraries without root: $PKGS"
+    DEB_DIR="$(mktemp -d)"
+    for round in 1 2; do
+      if [ -z "$(missing_libs)" ]; then break; fi
+      (cd "$DEB_DIR" && for pkg in $PKGS; do apt-get download "$pkg" >/dev/null 2>&1 || log "apt-get download $pkg failed"; done)
+      for deb in "$DEB_DIR"/*.deb; do
+        [ -f "$deb" ] && dpkg-deb -x "$deb" "$LIB_ROOT"
+      done
+      # Second round: packages that provide what is still missing, found through apt-cache.
+      PKGS=""
+      for lib in $(missing_libs); do
+        cand="$(apt-cache pkgnames 2>/dev/null | grep -E "^lib$(echo "$lib" | sed -E 's/^lib//; s/\.so.*//')[0-9.t-]*$" | head -n 1 || true)"
+        [ -n "$cand" ] && PKGS="$PKGS $cand"
+      done
+    done
+    rm -rf "$DEB_DIR"
+  fi
   if [ -n "$CHROME_BIN" ]; then
-    MISSING="$(ldd "$CHROME_BIN" 2>/dev/null | grep 'not found' || true)"
-    if [ -n "$MISSING" ]; then
-      log "cloud browser: Chromium is missing system libraries (ask the host admin to run 'playwright install-deps chromium'):"
-      echo "$MISSING"
+    STILL="$(missing_libs)"
+    if [ -n "$STILL" ]; then
+      log "CLOUD_BROWSER_LIBS_MISSING (ask the host admin: sudo $APP_DIR/venv/bin/python -m playwright install-deps chromium):"
+      echo "$STILL"
+    else
+      log "cloud browser: Chromium has every library it needs"
     fi
+  else
+    log "cloud browser: Chromium binary not found under $PLAYWRIGHT_BROWSERS_PATH"
   fi
 else
   python -m pip install -e "$APP_DIR/server"

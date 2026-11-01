@@ -392,6 +392,17 @@ def run_tool(page: Page, tool: str, args: dict) -> str:
     raise CloudError("unknown_tool")
 
 
+def chromium_env(lib_root: str) -> dict:
+    """Environment for Chromium: add the libraries unpacked without root, if there are any."""
+    env = dict(os.environ)
+    if lib_root:
+        dirs = [str(Path(lib_root) / sub) for sub in ("usr/lib/x86_64-linux-gnu", "lib/x86_64-linux-gnu", "usr/lib")]
+        dirs = [d for d in dirs if Path(d).is_dir()]
+        if dirs:
+            env["LD_LIBRARY_PATH"] = ":".join(dirs + [env.get("LD_LIBRARY_PATH", "")]).rstrip(":")
+    return env
+
+
 def playwright_launcher():
     """Start Playwright and Chromium. Returns (new_page(storage_state) -> Page, shutdown())."""
     from playwright.sync_api import sync_playwright
@@ -404,6 +415,7 @@ def playwright_launcher():
     }
     if settings.cloud_browser_executable:
         options["executable_path"] = settings.cloud_browser_executable
+    options["env"] = chromium_env(settings.cloud_browser_libs)
     try:
         browser = pw.chromium.launch(**options)
     except Exception:
@@ -647,6 +659,11 @@ class CloudBrowser:
             self._shutdown = None
 
 
+def ready() -> bool:
+    """On, installed, and Chromium started at least once on this host."""
+    return _ready and available()
+
+
 def available() -> bool:
     if not get_settings().cloud_browser_enabled:
         return False
@@ -658,6 +675,7 @@ def available() -> bool:
 
 
 _pool: CloudBrowser | None = None
+_ready = False
 _pool_lock = threading.Lock()
 
 
@@ -725,7 +743,7 @@ def probe(browser: CloudBrowser) -> bool:
     try:
         return bool(browser._submit(job).result(timeout=CALL_TIMEOUT_S))
     except Exception as exc:  # noqa: BLE001
-        log.warning("cloud browser off: Chromium did not start (%s)", type(exc).__name__)
+        log.warning("cloud browser off: Chromium did not start (%s: %s)", type(exc).__name__, str(exc)[:500])
         return False
 
 
@@ -737,9 +755,11 @@ def register(background: bool = False) -> bool:
     from app.agent.executors import register_executor
 
     def go() -> bool:
+        global _ready
         if not probe(pool()):
             return False
         register_executor((*TOOL_NAMES, SEARCH_TOOL), execute)
+        _ready = True
         log.info("cloud browser on: max %s sessions", pool().max_sessions)
         return True
 

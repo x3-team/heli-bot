@@ -928,13 +928,13 @@ _CLOUD_STATUS = {"browser_busy": 429, "browser_unavailable": 503, "bad_input": 4
 
 
 def _cloud_on() -> None:
-    if not cloud_browser.available():
+    if not cloud_browser.ready():
         raise HTTPException(status_code=503, detail="cloud_browser_off")
 
 
 @router.get("/cloud-browser")
 def cloud_browser_status(user: User = Depends(get_current_user)) -> dict:
-    if not cloud_browser.available():
+    if not cloud_browser.ready():
         return {"enabled": False, "running": False, "version": 0, "url": "", "title": "", "saved_logins": False}
     return {"enabled": True, **cloud_browser.pool().status(user.id)}
 

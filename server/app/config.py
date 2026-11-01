@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     cloud_browser_enabled: bool = Field(default=False, validation_alias="CLOUD_BROWSER_ENABLED")
     cloud_browser_max: int = Field(default=2, validation_alias="CLOUD_BROWSER_MAX")
     cloud_browser_executable: str = Field(default="", validation_alias="CLOUD_BROWSER_EXECUTABLE")
+    # Libraries unpacked without root by remote-install.sh, handed to Chromium as LD_LIBRARY_PATH.
+    cloud_browser_libs: str = Field(default="", validation_alias="CLOUD_BROWSER_LIBS")
     cloud_browser_profiles: str = Field(default="var/browser-profiles", validation_alias="CLOUD_BROWSER_PROFILES")
 
     def __repr__(self) -> str:

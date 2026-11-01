@@ -214,6 +214,13 @@ def test_browser_that_cannot_start(tmp_path, monkeypatch):
     assert cb.probe(cb.CloudBrowser(launcher=FakeLauncher(), store=cb.ProfileStore(tmp_path))) is True
 
 
+def test_chromium_env_adds_unpacked_libraries(tmp_path):
+    assert "LD_LIBRARY_PATH" not in cb.chromium_env("") or cb.chromium_env("") == dict(os.environ)
+    (tmp_path / "usr/lib/x86_64-linux-gnu").mkdir(parents=True)
+    env = cb.chromium_env(str(tmp_path))
+    assert env["LD_LIBRARY_PATH"].startswith(str(tmp_path / "usr/lib/x86_64-linux-gnu"))
+
+
 def test_request_guard():
     def resolver(host, port):
         table = {"example.com": "93.184.216.34", "evil.test": "127.0.0.1"}
@@ -258,6 +265,7 @@ def test_register_only_when_enabled(monkeypatch):
         assert executors.executor_for("browser_search") is cb.execute
     finally:
         executors.unregister_executor((*cb.TOOL_NAMES, cb.SEARCH_TOOL))
+        cb._ready = False
 
 
 # --- real Chromium, when it is installed ---------------------------------------------
@@ -326,11 +334,11 @@ def _token(client, monkeypatch) -> str:
 
 def test_api_live_screen_and_user_input(client, browser, monkeypatch):
     headers = {"authorization": f"Bearer {_token(client, monkeypatch)}"}
-    monkeypatch.setattr(cb, "available", lambda: False)
+    monkeypatch.setattr(cb, "ready", lambda: False)
     assert client.get("/v1/cloud-browser", headers=headers).json()["enabled"] is False
     assert client.post("/v1/cloud-browser/input", json={"kind": "refresh"}, headers=headers).status_code == 503
 
-    monkeypatch.setattr(cb, "available", lambda: True)
+    monkeypatch.setattr(cb, "ready", lambda: True)
     cb.set_pool(browser)
     try:
         assert client.get("/v1/cloud-browser/screen", headers=headers).status_code == 404
