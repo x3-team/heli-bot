@@ -9,7 +9,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test src/behavior.test.ts src/errors.test.ts src/auth.test.ts src/sse.test.ts src/computer.test.ts"
+    "test": "node --experimental-strip-types --test src/behavior.test.ts src/errors.test.ts src/auth.test.ts src/sse.test.ts src/computer.test.ts src/markdown.test.ts"
   },
   "dependencies": {
     "@fontsource/onest": "^5.2.8"

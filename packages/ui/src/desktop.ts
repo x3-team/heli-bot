@@ -89,3 +89,13 @@ export async function prepareAppUpdate(): Promise<UpdateCheck> {
     return { kind: "error", message };
   }
 }
+
+/** Opens a link from a reply in the system browser (desktop) or a new tab (web). */
+export async function openLink(href: string): Promise<void> {
+  if (!tauri()) {
+    window.open(href, "_blank", "noopener,noreferrer");
+    return;
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("link_open", { url: href });
+}

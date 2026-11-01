@@ -53,6 +53,7 @@ import { StepFeed, feedItem, type FeedItem } from "./agentFeed";
 import { CloudScreen, type CloudStatus } from "./cloudScreen";
 import { availableClientTools, localBrowserEnabled, runClientAction } from "./clientActions";
 import { Mascot, mascotLabel, type MascotState } from "./mascot";
+import { Markdown } from "./markdownView";
 import {
   MAX_FILE_BYTES,
   canOpenFiles,
@@ -76,6 +77,14 @@ interface Message {
   attachments?: string[];
   /** Assistant: a file Heli put on this computer. */
   file?: SavedFile;
+}
+
+/** The last turns of a chat thread as the server expects them in task.context.history. */
+function chatHistory(messages: Message[], limit = 12): { role: "user" | "assistant"; text: string }[] {
+  return messages
+    .filter((message) => !message.file && message.text.trim())
+    .slice(-limit)
+    .map((message) => ({ role: message.role, text: message.text }));
 }
 
 interface Thread {
@@ -552,6 +561,8 @@ function Workspace({
     setMascot("thinking");
     setComputerOpen(true);
     const files = attachments;
+    // Earlier turns go with the task, so «какой рекомендуешь?» knows what it is about.
+    const history = chatHistory(threads.find((thread) => thread.id === threadId)?.messages ?? []);
     const userMessage: Message = {
       id: crypto.randomUUID(),
       role: "user",
@@ -586,7 +597,10 @@ function Workspace({
       }
       setMascot("working");
       const result = await runAgentTask(apiBase, token, text, {
-        context: fileIds.length ? { files: fileIds } : undefined,
+        context: {
+          ...(fileIds.length ? { files: fileIds } : {}),
+          ...(history.length ? { history } : {}),
+        },
         clientTools: availableClientTools(),
         autopause,
         signal: controller.signal,
@@ -1115,7 +1129,7 @@ function Chat({
               <span className="bubble-avatar" aria-hidden="true">
                 <Mascot state="waiting" size={28} />
               </span>
-              <div>{message.text}</div>
+              <Markdown text={message.text} />
             </div>
           ) : (
             <div key={message.id} className="bubble user">
