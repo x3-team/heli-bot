@@ -672,6 +672,133 @@ def admin_quotas(
     }
 
 
+def _require_admin(user: User) -> None:
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="admin_required")
+
+
+@router.get("/admin/feedback")
+def admin_feedback(
+    limit: int = 50,
+    rated_only: bool = False,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    """Recent tasks with their outcome and the user's rating, newest first."""
+    _require_admin(user)
+    from sqlalchemy import func, select
+
+    from app.models import Task, TaskFeedback, Trajectory
+
+    query = (
+        select(Task, TaskFeedback, User.email)
+        .join(User, User.id == Task.user_id)
+        .outerjoin(TaskFeedback, TaskFeedback.task_id == Task.id)
+        .order_by(Task.created_at.desc())
+        .limit(max(1, min(limit, 500)))
+    )
+    if rated_only:
+        query = query.where(TaskFeedback.id.is_not(None))
+    rows = session.execute(query).all()
+    ids = [task.id for task, _, _ in rows]
+    costs = dict(
+        session.execute(
+            select(TaskStep.task_id, func.sum(TaskStep.cost_rub)).where(TaskStep.task_id.in_(ids)).group_by(TaskStep.task_id)
+        ).all()
+    ) if ids else {}
+    steps = dict(
+        session.execute(
+            select(TaskStep.task_id, func.count()).where(TaskStep.task_id.in_(ids)).group_by(TaskStep.task_id)
+        ).all()
+    ) if ids else {}
+    stored = set(session.scalars(select(Trajectory.task_id).where(Trajectory.task_id.in_(ids)))) if ids else set()
+    tasks = []
+    for task, fb, email in rows:
+        tasks.append(
+            {
+                "id": str(task.id),
+                "created_at": _iso_utc(task.created_at),
+                "user": email,
+                "request": task.request_text,
+                "final_answer": task.final_answer,
+                "outcome": task.outcome,
+                "steps": int(steps.get(task.id, 0)),
+                "cost_rub": str(costs.get(task.id) or 0),
+                "in_training_set": task.id in stored,
+                "feedback": (
+                    {
+                        "rating": fb.rating,
+                        "acceptance": fb.acceptance,
+                        "comment": fb.comment,
+                        "user_edit": fb.user_edit,
+                        "created_at": _iso_utc(fb.created_at),
+                    }
+                    if fb is not None
+                    else None
+                ),
+            }
+        )
+    totals = {
+        "tasks": session.scalar(select(func.count()).select_from(Task)) or 0,
+        "rated": session.scalar(select(func.count()).select_from(TaskFeedback)) or 0,
+        "thumbs_up": session.scalar(select(func.count()).select_from(TaskFeedback).where(TaskFeedback.rating == 1)) or 0,
+        "thumbs_down": session.scalar(select(func.count()).select_from(TaskFeedback).where(TaskFeedback.rating == -1)) or 0,
+        "trajectories": session.scalar(select(func.count()).select_from(Trajectory)) or 0,
+    }
+    return {"totals": totals, "tasks": tasks}
+
+
+@router.get("/admin/incidents")
+def admin_incidents(
+    limit: int = 50,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    """Bug reports from the app, newest first. The screenshot is a separate download."""
+    _require_admin(user)
+    from sqlalchemy import select
+
+    from app.models import IncidentReport
+
+    rows = session.execute(
+        select(IncidentReport, User.email)
+        .join(User, User.id == IncidentReport.user_id)
+        .order_by(IncidentReport.created_at.desc())
+        .limit(max(1, min(limit, 500)))
+    ).all()
+    return {
+        "reports": [
+            {
+                "id": str(row.id),
+                "created_at": _iso_utc(row.created_at),
+                "user": email,
+                "message": row.message,
+                "log_excerpt": row.log_excerpt,
+                "screenshot": f"/v1/admin/incidents/{row.id}/screenshot" if row.screenshot else None,
+            }
+            for row, email in rows
+        ]
+    }
+
+
+@router.get("/admin/incidents/{report_id}/screenshot")
+def admin_incident_screenshot(
+    report_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+):
+    _require_admin(user)
+    from fastapi.responses import Response
+
+    from app.models import IncidentReport
+
+    row = session.get(IncidentReport, report_id)
+    if row is None or not row.screenshot:
+        raise HTTPException(status_code=404, detail="not_found")
+    kind = "image/jpeg" if row.screenshot[:3] == b"\xff\xd8\xff" else "image/png"
+    return Response(content=row.screenshot, media_type=kind)
+
+
 @router.patch("/admin/users/{user_id}/limit")
 def set_user_limit(
     user_id: uuid.UUID,

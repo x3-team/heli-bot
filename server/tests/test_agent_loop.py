@@ -282,6 +282,12 @@ def test_stream_runs_client_tool_and_records_trajectory(client, session, monkeyp
     assert steps[2].tool_name == "browser_open" and steps[2].observation_type == "dom"
     assert "Сделки: 3" in steps[2].result_text
 
+    session.expire_all()
+    from app.models import Task, Trajectory
+
+    assert session.get(Task, task.id).outcome == "success"
+    assert session.scalar(select(Trajectory).where(Trajectory.task_id == task.id)) is not None
+
     replay = client.get(f"/v1/tasks/{task.id}/events?after=0", headers=headers)
     assert [e["type"] for e in _sse_events(replay.text)] == types
     other = client.post(f"/v1/tasks/{task.id}/control", json={"action": "stop"}, headers=headers)
