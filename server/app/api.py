@@ -13,12 +13,14 @@ from sqlalchemy.orm import Session
 
 from app.auth import (
     AuthError,
+    create_invite,
     issue_login_code,
     issue_login_code_for_user,
     issue_recovery_code,
     issue_token,
     login_with_password,
     open_access_user,
+    sync_admin,
     read_user_id,
     register_user,
     reset_password,
@@ -74,6 +76,7 @@ router = APIRouter(prefix="/v1")
 _STATUS = {
     "auth_not_configured": 503,
     "invite_invalid": 400,
+    "invite_required": 403,
     "code_invalid": 401,
     "token_invalid": 401,
     "pdn_consent_required": 403,
@@ -130,6 +133,11 @@ def get_current_user(
     user = session.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=401, detail="token_invalid")
+    settings = get_settings()
+    if not settings.open_access and user.email == settings.open_access_email.strip().lower():
+        # Shared test account: its old tokens stop working once sign-up is back.
+        raise HTTPException(status_code=401, detail="token_invalid")
+    sync_admin(user)
     return user
 
 
@@ -148,6 +156,7 @@ class RegisterBody(BaseModel):
     password: str = Field(min_length=8, max_length=256)
     consent_pdn: bool = False
     consent_training: bool = False
+    invite_code: str | None = Field(default=None, max_length=128)
 
 
 class PasswordLoginBody(BaseModel):
@@ -218,6 +227,7 @@ def register(body: RegisterBody, session: Session = Depends(get_db)) -> dict:
             body.password,
             consent_pdn=body.consent_pdn,
             consent_training=body.consent_training,
+            invite_code=(body.invite_code or "").strip() or None,
         )
         token = issue_token(user.id)
     except AuthError as exc:
@@ -314,8 +324,78 @@ def verify_code(body: CodeVerify, session: Session = Depends(get_db)) -> dict:
 def me(user: User = Depends(get_current_user)) -> dict:
     return {
         "id": str(user.id),
+        "email": user.email,
+        "is_admin": user.is_admin,
         "consent_pdn": user.consent_pdn,
         "consent_training": user.consent_training,
+    }
+
+
+@router.get("/auth/config")
+def auth_config() -> dict:
+    return {"invite_only": get_settings().invite_only}
+
+
+class AdminInviteBody(BaseModel):
+    max_uses: int = Field(default=1, ge=1, le=50)
+
+
+class AdminCodeBody(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    purpose: str = Field(default="login", pattern="^(login|reset)$")
+
+
+@router.post("/admin/invites", status_code=201)
+def admin_create_invite(
+    body: AdminInviteBody,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    _require_admin(user)
+    code = create_invite(session, max_uses=body.max_uses)
+    log.info("invite created by admin max_uses=%s", body.max_uses)
+    return {"invite_code": code, "max_uses": body.max_uses}
+
+
+@router.post("/admin/codes", status_code=201)
+def admin_issue_code(
+    body: AdminCodeBody,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    """Login or password-reset code for a tester while mail is not wired."""
+    _require_admin(user)
+    try:
+        if body.purpose == "reset":
+            code = issue_recovery_code(session, body.email)
+        else:
+            code = issue_login_code_for_user(session, body.email)
+    except AuthError as exc:
+        _fail(exc)
+    log.info("%s code issued by admin", body.purpose)
+    return {"code": code, "purpose": body.purpose, "expires_in_minutes": 10}
+
+
+@router.get("/admin/users")
+def admin_users(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    _require_admin(user)
+    from sqlalchemy import select
+
+    people = session.scalars(select(User).order_by(User.created_at)).all()
+    return {
+        "users": [
+            {
+                "id": str(person.id),
+                "email": person.email,
+                "is_admin": person.is_admin,
+                "created_at": _iso_utc(person.created_at),
+                "trial_active": trial_active(person),
+            }
+            for person in people
+        ]
     }
 
 

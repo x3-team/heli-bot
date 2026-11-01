@@ -11,6 +11,8 @@ export interface Usage {
 export interface SessionUser {
   consentPdn: boolean;
   consentTraining: boolean;
+  email?: string;
+  isAdmin?: boolean;
 }
 
 import { parseAuthResponse, type AuthResult } from "./authSession";
@@ -70,6 +72,7 @@ export async function registerAccount(
   password: string,
   consentPdn: boolean,
   consentTraining: boolean,
+  inviteCode?: string,
 ): Promise<AuthResult> {
   const response = await send(base, "/v1/auth/register", {
     method: "POST",
@@ -79,6 +82,7 @@ export async function registerAccount(
       password,
       consent_pdn: consentPdn,
       consent_training: consentTraining,
+      invite_code: inviteCode?.trim() || undefined,
     }),
   });
   if (!response.ok) throw new ApiError(await readError(response));
@@ -148,8 +152,18 @@ export async function loadMe(base: string, token: string): Promise<SessionUser> 
     headers: { authorization: `Bearer ${token}` },
   });
   if (!response.ok) throw new ApiError(await readError(response));
-  const body = (await response.json()) as { consent_pdn: boolean; consent_training: boolean };
-  return { consentPdn: body.consent_pdn, consentTraining: body.consent_training };
+  const body = (await response.json()) as {
+    consent_pdn: boolean;
+    consent_training: boolean;
+    email?: string;
+    is_admin?: boolean;
+  };
+  return {
+    consentPdn: body.consent_pdn,
+    consentTraining: body.consent_training,
+    email: body.email,
+    isAdmin: Boolean(body.is_admin),
+  };
 }
 
 export async function loadUsage(base: string, token: string): Promise<Usage> {
@@ -475,4 +489,68 @@ async function readBrowser(response: Response): Promise<BrowserView> {
     localBrowser: body.local_browser ?? null,
     localPort: body.local_port ?? null,
   };
+}
+
+/** Whether sign-up needs an invite. Older servers without the endpoint: no. */
+export async function loadAuthConfig(base: string): Promise<{ inviteOnly: boolean }> {
+  try {
+    const response = await send(base, "/v1/auth/config", {});
+    if (!response.ok) return { inviteOnly: false };
+    const body = (await response.json()) as { invite_only?: boolean };
+    return { inviteOnly: Boolean(body.invite_only) };
+  } catch {
+    return { inviteOnly: false };
+  }
+}
+
+export interface AdminUser {
+  id: string;
+  email: string;
+  isAdmin: boolean;
+  createdAt: string | null;
+  trialActive: boolean;
+}
+
+function adminHeaders(token: string): Record<string, string> {
+  return { "content-type": "application/json", authorization: `Bearer ${token}` };
+}
+
+export async function adminCreateInvite(base: string, token: string, maxUses = 1): Promise<string> {
+  const response = await send(base, "/v1/admin/invites", {
+    method: "POST",
+    headers: adminHeaders(token),
+    body: JSON.stringify({ max_uses: maxUses }),
+  });
+  if (!response.ok) throw new ApiError(await readError(response), response.status);
+  return ((await response.json()) as { invite_code: string }).invite_code;
+}
+
+export async function adminIssueCode(
+  base: string,
+  token: string,
+  email: string,
+  purpose: "login" | "reset",
+): Promise<string> {
+  const response = await send(base, "/v1/admin/codes", {
+    method: "POST",
+    headers: adminHeaders(token),
+    body: JSON.stringify({ email: email.trim(), purpose }),
+  });
+  if (!response.ok) throw new ApiError(await readError(response), response.status);
+  return ((await response.json()) as { code: string }).code;
+}
+
+export async function adminListUsers(base: string, token: string): Promise<AdminUser[]> {
+  const response = await send(base, "/v1/admin/users", { headers: adminHeaders(token) });
+  if (!response.ok) throw new ApiError(await readError(response), response.status);
+  const body = (await response.json()) as {
+    users: { id: string; email: string; is_admin: boolean; created_at: string | null; trial_active: boolean }[];
+  };
+  return body.users.map((u) => ({
+    id: u.id,
+    email: u.email,
+    isAdmin: u.is_admin,
+    createdAt: u.created_at,
+    trialActive: u.trial_active,
+  }));
 }

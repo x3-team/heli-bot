@@ -91,6 +91,7 @@ def register_user(
     *,
     consent_pdn: bool,
     consent_training: bool,
+    invite_code: str | None = None,
 ) -> User:
     normalized = _normalize_email(email)
     if session.scalar(select(User).where(User.email == normalized)):
@@ -99,6 +100,13 @@ def register_user(
         raise AuthError("pdn_consent_required")
     now = datetime.now(timezone.utc)
     settings = get_settings()
+    invite = None
+    # Admins from HELI_ADMIN_EMAILS sign up without an invite, everyone else needs one.
+    if (settings.invite_only and normalized not in admin_emails()) or invite_code:
+        invite = _find_invite(session, invite_code or "") if invite_code else None
+        if invite is None or invite.uses >= invite.max_uses:
+            raise AuthError("invite_required" if not invite_code else "invite_invalid")
+        invite.uses += 1
     user = User(
         email=normalized,
         consent_pdn=True,
@@ -242,25 +250,35 @@ def verify_login_code(session: Session, email: str, code: str) -> User:
     return user
 
 
-def open_access_user(session: Session, email: str) -> User:
-    """The shared account used while sign-up is switched off for testing.
+def admin_emails() -> set[str]:
+    raw = get_settings().admin_emails
+    return {_normalize_email(part) for part in raw.split(",") if part.strip()}
 
-    It is an admin so the owner can read ratings and reports (/v1/admin/feedback).
-    Before real users: HELI_OPEN_ACCESS=0 and take is_admin off this account (tokens live on).
-    """
+
+def sync_admin(user: User) -> None:
+    """Admin rights follow HELI_ADMIN_EMAILS; the shared test account never has them."""
+    if user.email == _normalize_email(get_settings().open_access_email):
+        should = False
+    elif admin_emails():
+        should = user.email in admin_emails()
+    else:
+        return  # not configured: keep whatever the database says
+    if user.is_admin != should:
+        user.is_admin = should
+
+
+def open_access_user(session: Session, email: str) -> User:
+    """The shared account used while sign-up is switched off (HELI_OPEN_ACCESS=1). Never an admin."""
     normalized = _normalize_email(email)
     user = session.scalar(select(User).where(User.email == normalized))
     if user is not None:
-        if not user.is_admin:
-            user.is_admin = True
-            session.flush()
         return user
     now = datetime.now(timezone.utc)
     user = User(
         email=normalized,
         consent_pdn=True,
         consent_training=False,
-        is_admin=True,
+        is_admin=False,
         monthly_limit_rub=get_settings().default_monthly_limit_rub,
         trial_ends_at=now + TRIAL,
         created_at=now,

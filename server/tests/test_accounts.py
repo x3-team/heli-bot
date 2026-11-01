@@ -134,10 +134,16 @@ def test_open_access_reuses_one_account(client, monkeypatch) -> None:
     assert me1["consent_pdn"] is True
 
 
-def test_open_access_account_reads_feedback_and_reports(client, monkeypatch) -> None:
-    monkeypatch.setenv("HELI_OPEN_ACCESS", "1")
-    token = client.post("/v1/auth/open").json()["access_token"]
+def _register(client, email: str, **extra) -> dict:
+    body = {"email": email, "password": "long-enough-secret", "consent_pdn": True, **extra}
+    return client.post("/v1/auth/register", json=body)
+
+
+def test_admin_from_env_reads_feedback_and_reports(client, monkeypatch) -> None:
+    monkeypatch.setenv("HELI_ADMIN_EMAILS", "boss@example.com, other@example.com")
+    token = _register(client, "Boss@example.com").json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
+    assert client.get("/v1/me", headers=headers).json()["is_admin"] is True
     task = client.post("/v1/tasks", json={"request": "Найди аренду видеокарты", "context": {}}, headers=headers)
     assert task.status_code in (200, 201), task.text
     task_id = task.json()["id"]
@@ -172,3 +178,58 @@ def test_admin_feedback_needs_admin(client, session) -> None:
     headers = {"Authorization": f"Bearer {issue_token(user.id)}"}
     assert client.get("/v1/admin/feedback", headers=headers).status_code == 403
     assert client.get("/v1/admin/incidents", headers=headers).status_code == 403
+
+
+def test_open_access_account_is_never_admin_and_dies_with_the_flag(client, monkeypatch) -> None:
+    monkeypatch.setenv("HELI_OPEN_ACCESS", "1")
+    monkeypatch.setenv("HELI_ADMIN_EMAILS", "owner@heli.local")
+    token = client.post("/v1/auth/open").json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    assert client.get("/v1/me", headers=headers).json()["is_admin"] is False
+    assert client.get("/v1/admin/feedback", headers=headers).status_code == 403
+    monkeypatch.setenv("HELI_OPEN_ACCESS", "0")
+    assert client.get("/v1/me", headers=headers).status_code == 401
+    assert client.post("/v1/auth/open").status_code == 404
+
+
+def test_admin_rights_follow_the_env_list(client, monkeypatch) -> None:
+    monkeypatch.setenv("HELI_ADMIN_EMAILS", "boss@example.com")
+    token = _register(client, "boss@example.com").json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    assert client.get("/v1/me", headers=headers).json()["is_admin"] is True
+    monkeypatch.setenv("HELI_ADMIN_EMAILS", "someone-else@example.com")
+    assert client.get("/v1/me", headers=headers).json()["is_admin"] is False
+
+
+def test_invite_only_sign_up_with_admin_issued_invite_and_codes(client, session, monkeypatch) -> None:
+    monkeypatch.setenv("HELI_INVITE_ONLY", "1")
+    monkeypatch.setenv("HELI_ADMIN_EMAILS", "boss@example.com")
+    assert client.get("/v1/auth/config").json() == {"invite_only": True}
+    # the admin signs up without an invite
+    boss = _register(client, "boss@example.com").json()["access_token"]
+    admin = {"Authorization": f"Bearer {boss}"}
+
+    no_invite = _register(client, "tester@example.com")
+    assert no_invite.status_code == 403 and no_invite.json()["detail"] == "invite_required"
+    wrong = _register(client, "tester@example.com", invite_code="nope-nope")
+    assert wrong.status_code == 400 and wrong.json()["detail"] == "invite_invalid"
+
+    invite = client.post("/v1/admin/invites", json={"max_uses": 1}, headers=admin).json()["invite_code"]
+    ok = _register(client, "tester@example.com", invite_code=invite)
+    assert ok.status_code == 201
+    tester = {"Authorization": f"Bearer {ok.json()['access_token']}"}
+    assert _register(client, "second@example.com", invite_code=invite).json()["detail"] == "invite_invalid"
+
+    assert client.post("/v1/admin/invites", json={}, headers=tester).status_code == 403
+    users = client.get("/v1/admin/users", headers=admin).json()["users"]
+    assert [u["email"] for u in users] == ["boss@example.com", "tester@example.com"]
+
+    reset = client.post("/v1/admin/codes", json={"email": "tester@example.com", "purpose": "reset"}, headers=admin)
+    assert reset.status_code == 201
+    done = client.post(
+        "/v1/auth/recover/reset",
+        json={"email": "tester@example.com", "code": reset.json()["code"], "password": "brand-new-pass"},
+    )
+    assert done.status_code == 200
+    login_code = client.post("/v1/admin/codes", json={"email": "tester@example.com"}, headers=admin).json()["code"]
+    assert client.post("/v1/auth/verify", json={"email": "tester@example.com", "code": login_code}).status_code == 200

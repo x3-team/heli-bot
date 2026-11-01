@@ -2,6 +2,11 @@ name: deploy-shared-server
 
 on:
   workflow_dispatch:
+    inputs:
+      admin_emails:
+        description: "Почты админов через запятую (HELI_ADMIN_EMAILS). Пусто — оставить как на сервере."
+        required: false
+        default: ""
   pull_request:
     paths:
       - "infra/deploy/**"
@@ -79,6 +84,7 @@ jobs:
           HELI_DEPLOY_JWT_SECRET: ${{ secrets.HELI_DEPLOY_JWT_SECRET }}
           HELI_DEPLOY_TRAJECTORY_HASH_PEPPER: ${{ secrets.HELI_DEPLOY_TRAJECTORY_HASH_PEPPER }}
           HELI_API_KEY: ${{ secrets.HELI_API_KEY }}
+          HELI_DEPLOY_ADMIN_EMAILS: ${{ inputs.admin_emails }}
         with:
           host: ${{ secrets.HELI_DEPLOY_SSH_HOST }}
           username: ${{ secrets.HELI_DEPLOY_SSH_USER }}
@@ -86,7 +92,7 @@ jobs:
           port: ${{ secrets.HELI_DEPLOY_SSH_PORT || 22 }}
           debug: true
           script_stop: true
-          envs: HELI_DEPLOY_JWT_SECRET,HELI_DEPLOY_TRAJECTORY_HASH_PEPPER,HELI_API_KEY
+          envs: HELI_DEPLOY_JWT_SECRET,HELI_DEPLOY_TRAJECTORY_HASH_PEPPER,HELI_API_KEY,HELI_DEPLOY_ADMIN_EMAILS
           script: |
             set -euxo pipefail
             exec 2>&1
