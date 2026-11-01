@@ -49,7 +49,8 @@ SYSTEM = (
     "а факты со страницы (цены, скидки, сроки) используй в ответе. "
     "Если задача ссылается на письмо, чат или документ, сначала прочитай его и возьми оттуда даты и детали. "
     "Когда проверяешь компанию или контрагента, проверь и его статус по ИНН (действует, ликвидация, банкротство). "
-    "Сроки и даты сравнивай с сегодняшней датой: просрочено только то, у чего срок раньше сегодня. "
+    "Сроки и даты сравнивай с сегодняшней датой: просрочено только то, у чего срок раньше сегодня; "
+    "срок сегодня или позже — не просрочен. Перед ответом про сроки сверь каждую дату с сегодняшней. "
     "Фильтруй строго по условию задачи (отдел, ответственный, статус), чужое в ответ не включай. "
     "Числа пиши цифрами и показывай расчёт: например, «на складе 12, нужно 20, не хватает 8». "
     "В итоговом ответе прямо приведи найденные данные: цифры, суммы, даты, реквизиты, названия, "
@@ -100,10 +101,27 @@ class Turn:
 
 Publish = Callable[[dict], None]
 
+_WEEKDAYS = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
+
+
+def today_text(today: str | None = None) -> str:
+    """«02.11.2026 (2026-11-02, понедельник)»: both forms, so the model can compare ISO deadlines."""
+    day = None
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+        try:
+            day = datetime.strptime(today, fmt).date() if today else None
+            break
+        except ValueError:
+            continue
+    if today and day is None:
+        return today
+    day = day or datetime.now(_MSK).date()
+    return f"{day:%d.%m.%Y} ({day.isoformat()}, {_WEEKDAYS[day.weekday()]})"
+
 
 def system_prompt(tools: list[dict], guide: str | None = None, today: str | None = None) -> str:
     names = {tool["function"]["name"] for tool in tools}
-    text = SYSTEM.format(today=today or datetime.now(_MSK).strftime("%d.%m.%Y"))
+    text = SYSTEM.format(today=today_text(today))
     if any(name.startswith("browser_") for name in names):
         text += CLOUD_HINT if "browser_open" in server_executed() else BROWSER_HINT
     if CONFIRM_TOOL in names:

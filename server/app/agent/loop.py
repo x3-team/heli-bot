@@ -8,6 +8,7 @@ It knows nothing about the database or HTTP. The caller passes:
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -61,6 +62,15 @@ FINISH_NOTE = (
 )
 
 
+def repeat_key(name: str, args: dict) -> str | None:
+    """Identity of a call for the repeat check: the tool and its text arguments (limits and counts aside).
+    Browser tools and confirmations are left out: the page or the user's answer can change between calls."""
+    if name.startswith("browser_") or name == CONFIRM_TOOL:
+        return None
+    texts = {k: v.strip().lower() for k, v in args.items() if isinstance(v, str)}
+    return name + json.dumps(texts, ensure_ascii=False, sort_keys=True)
+
+
 def run_agent(
     messages: list[dict],
     *,
@@ -81,6 +91,7 @@ def run_agent(
     can_ask = CONFIRM_TOOL in guard.schemas
     calls_used = 0
     auto_ids = 0
+    failed: dict[str, str] = {}  # same call that already failed -> its error
 
     def run_call(call_id: str, name: str, args: dict) -> ToolResult:
         emit({"type": "step", "kind": "tool_call", "call_id": call_id, "tool": name, "args": args})
@@ -151,6 +162,18 @@ def run_agent(
                     continue
                 control.checkpoint()
                 args = parse_args(call.arguments)
+                key = repeat_key(call.name, args)
+                if key and key in failed:
+                    # The model repeats a call that already failed the same way: don't spend a step on it.
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "content": f"Не выполнено: этот вызов уже вернул ошибку ({failed[key]}). "
+                            "Не повторяй его, попробуй другие аргументы или другой инструмент.",
+                        }
+                    )
+                    continue
                 if guard.needs_approval(call.name, args) and not guard.consume(call.name):
                     # The model skipped ask_confirmation: the loop asks, and never runs the tool unasked.
                     if not can_ask:
@@ -183,6 +206,8 @@ def run_agent(
                 result = run_call(call.id, call.name, args)
                 calls_used += 1
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": result.content})
+                if key and result.error:
+                    failed[key] = result.error
                 guard.remember_page(result.content)
                 if call.name == CONFIRM_TOOL:
                     ok = approved(result)

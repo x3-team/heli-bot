@@ -49,7 +49,7 @@ def run(
 
     max_rub = budget.get("max_rub")
     outcome = run_agent(
-        [{"role": "system", "content": system_prompt(tools, today=_ru_date(today))}, {"role": "user", "content": task}],
+        [{"role": "system", "content": system_prompt(tools, today=today)}, {"role": "user", "content": task}],
         tools=tools,
         call_tool=call,
         complete=complete,
@@ -73,12 +73,3 @@ def _json(value) -> str:
     import json
 
     return json.dumps(value, ensure_ascii=False, default=str)
-
-
-def _ru_date(value: str | None) -> str | None:
-    if not value:
-        return None
-    if len(value) == 10 and value[4] == "-":
-        year, month, day = value.split("-")
-        return f"{day}.{month}.{year}"
-    return value
