@@ -1,13 +1,15 @@
-import { StrictMode, useEffect } from "react";
+import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { Shell, checkForAppUpdates } from "@heli/ui";
+import { Shell, UpdateNotice } from "@heli/ui";
 import "@heli/ui/tokens.css";
 
 function Boot() {
-  useEffect(() => {
-    void checkForAppUpdates();
-  }, []);
-  return <Shell />;
+  return (
+    <>
+      <Shell />
+      <UpdateNotice />
+    </>
+  );
 }
 
 const root = document.getElementById("root");

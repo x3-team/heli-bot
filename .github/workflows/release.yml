@@ -1,0 +1,95 @@
+name: release
+
+# Every merge to main that touches the desktop app publishes a signed build as a GitHub release.
+# Installed apps read releases/latest/download/latest.json, download the new installer and offer «Обновить».
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/desktop/**"
+      - "packages/**"
+      - "crates/**"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-release
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: release (x86_64-pc-windows-msvc)
+    runs-on: windows-latest
+    env:
+      HELI_VERSION: 0.1.${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check signing key
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::Нет секрета TAURI_SIGNING_PRIVATE_KEY: без подписи приложения не примут обновление."
+            exit 1
+          fi
+      - name: Stamp version and turn on updater artifacts
+        shell: bash
+        run: |
+          node -e '
+            const fs = require("fs");
+            const p = "apps/desktop/src-tauri/tauri.conf.json";
+            const c = JSON.parse(fs.readFileSync(p, "utf8"));
+            c.version = process.env.HELI_VERSION;
+            c.bundle.createUpdaterArtifacts = true;
+            fs.writeFileSync(p, JSON.stringify(c, null, 2) + "\n");
+          '
+          echo "Heli $HELI_VERSION"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.90.0
+          targets: x86_64-pc-windows-msvc
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build, sign and publish
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          VITE_HELI_API_BASE: https://bot-api.getheli.ru
+        with:
+          projectPath: apps/desktop
+          tauriScript: pnpm tauri
+          args: --bundles nsis
+          tagName: app-v__VERSION__
+          releaseName: Heli __VERSION__
+          releaseBody: Сборка из main (${{ github.sha }}). Установленные приложения обновятся сами.
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true
+      - name: Check latest.json is published
+        shell: bash
+        run: |
+          for i in 1 2 3 4 5 6; do
+            body=$(curl -fsSL "https://github.com/${{ github.repository }}/releases/download/app-v${HELI_VERSION}/latest.json" || true)
+            if echo "$body" | grep -q "\"version\": *\"${HELI_VERSION}\""; then
+              echo "$body"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::latest.json для ${HELI_VERSION} не появился в релизе."
+          exit 1

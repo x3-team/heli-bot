@@ -570,3 +570,47 @@ h1, h2 { text-wrap: balance; }
 .cloud-empty .mascot, .cloud-empty .mascot-working { width: min(140px, 100%); height: auto; }
 .cloud-hint { margin: 0; font-size: 13px; }
 button.link { background: none; border: 0; padding: 0; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; }
+
+/* Update ready: quiet card in the corner, same calm look as the rest of «Воздух». */
+.update-notice {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: calc(100vw - 40px);
+  padding: 10px 10px 10px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+}
+.update-notice .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--live); flex: none; }
+.update-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.update-text b { font-weight: 500; }
+.update-text span { color: var(--muted); font-size: 12.5px; }
+.update-go {
+  border: 0;
+  border-radius: 999px;
+  padding: 7px 14px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  cursor: pointer;
+  flex: none;
+}
+.update-go:disabled { opacity: 0.6; cursor: default; }
+.update-later {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  cursor: pointer;
+  flex: none;
+  font-size: 18px;
+  line-height: 1;
+}
+.update-later:hover { background: var(--soft); }

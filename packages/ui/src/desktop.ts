@@ -49,13 +49,27 @@ export async function tryLaunchLocalBrowser(): Promise<{ browser: "chrome" | "ed
   }
 }
 
-export async function checkForAppUpdates(): Promise<void> {
-  if (!tauri()) return;
+export type ReadyUpdate = {
+  version: string;
+  install: () => Promise<void>;
+};
+
+/**
+ * Looks for a newer signed build and downloads it in the background.
+ * Returns null when there is nothing to do (web build, no update, offline).
+ * Installing on Windows closes the app, runs the installer quietly and opens Heli again.
+ */
+export async function prepareAppUpdate(): Promise<ReadyUpdate | null> {
+  if (!tauri()) return null;
   try {
     const { check } = await import("@tauri-apps/plugin-updater");
     const update = await check();
-    if (update) await update.downloadAndInstall();
-  } catch {
-    // updater optional until release signing is configured
+    if (!update) return null;
+    await update.download();
+    pushClientLog(`update ${update.currentVersion} -> ${update.version} downloaded`);
+    return { version: update.version, install: () => update.install() };
+  } catch (err) {
+    pushClientLog(`update check failed: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
   }
 }
