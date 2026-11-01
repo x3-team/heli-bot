@@ -401,3 +401,168 @@ def test_cloud_executor_runs_browser_tools_on_the_server(client, session, monkey
     assert ran == [("browser_open", {"url": "https://example.amocrm.ru/leads"})]
     assert not any(e["type"] == "client_action" for e in events)
     assert events[-1]["reply"] == "Сделок 3"
+
+
+# --- confirmation gate -----------------------------------------------------------------------
+
+GATED_TOOLS = [
+    {"type": "function", "function": {"name": "telegram_send", "parameters": {}}},
+    {"type": "function", "function": {"name": "ask_confirmation", "parameters": {}}},
+    {"type": "function", "function": {"name": "amocrm_list_deals", "parameters": {}}},
+]
+
+
+def test_risky_tool_never_runs_without_approval() -> None:
+    complete = _scripted(_completion(calls=[("telegram_send", {"chat": "client", "text": "Счёт готов"})]))
+    called = []
+
+    def call_tool(cid, name, args):
+        called.append((name, args))
+        return ToolResult("rejected")
+
+    out = run_agent([], tools=GATED_TOOLS, call_tool=call_tool, complete=complete, budget=Budget())
+    assert [name for name, _ in called] == ["ask_confirmation"]
+    assert called[0][1]["action"] == "telegram_send" and "Счёт готов" in called[0][1]["details"]
+    assert out.stopped == "confirm"
+
+
+def test_loop_asks_itself_and_runs_after_approval() -> None:
+    complete = _scripted(_completion(calls=[("telegram_send", {"text": "x"})]), _completion("Отправил"))
+    called = []
+
+    def call_tool(cid, name, args):
+        called.append(name)
+        return ToolResult("approved" if name == "ask_confirmation" else "ok")
+
+    out = run_agent([], tools=GATED_TOOLS, call_tool=call_tool, complete=complete, budget=Budget())
+    assert called == ["ask_confirmation", "telegram_send"] and out.stopped is None
+
+
+def test_one_approval_covers_one_action() -> None:
+    complete = _scripted(
+        _completion(calls=[("ask_confirmation", {"action": "telegram_send"})]),
+        _completion(calls=[("telegram_send", {"text": "1"}), ("telegram_send", {"text": "2"})]),
+        _completion("ok"),
+    )
+    called = []
+
+    def call_tool(cid, name, args):
+        called.append(name)
+        if name == "ask_confirmation":
+            return ToolResult("approved" if len(called) == 1 else "rejected")
+        return ToolResult("ok")
+
+    out = run_agent([], tools=GATED_TOOLS, call_tool=call_tool, complete=complete, budget=Budget())
+    assert called == ["ask_confirmation", "telegram_send", "ask_confirmation"]
+    assert out.stopped == "confirm"
+
+
+def test_reading_tools_are_not_gated() -> None:
+    complete = _scripted(_completion(calls=[("amocrm_list_deals", {})]), _completion("3 сделки"))
+    called = []
+    run_agent(
+        [], tools=GATED_TOOLS, call_tool=lambda c, n, a: called.append(n) or ToolResult("[]"),
+        complete=complete, budget=Budget(),
+    )
+    assert called == ["amocrm_list_deals"]
+
+
+def test_browser_click_on_send_button_is_gated() -> None:
+    page = "Адрес: https://mail.example\n\nЭлементы:\n[1] поле «Кому»\n[2] кнопка «Отправить»"
+    complete = _scripted(
+        _completion(calls=[("browser_read", {})]),
+        _completion(calls=[("browser_click", {"ref": 1}), ("browser_click", {"ref": 2})]),
+    )
+    called = []
+
+    def call_tool(cid, name, args):
+        called.append((name, args))
+        if name == "browser_read":
+            return ToolResult(page)
+        return ToolResult("rejected" if name == "ask_confirmation" else "ok")
+
+    tools = GATED_TOOLS + [{"type": "function", "function": {"name": n, "parameters": {}}} for n in ("browser_read", "browser_click")]
+    out = run_agent([], tools=tools, call_tool=call_tool, complete=complete, budget=Budget())
+    assert [n for n, _ in called] == ["browser_read", "browser_click", "ask_confirmation"]
+    assert "Отправить" in called[-1][1]["details"] and out.stopped == "confirm"
+
+
+def test_tool_call_budget_forces_an_answer() -> None:
+    complete = _scripted(
+        _completion(calls=[("amocrm_list_deals", {}), ("amocrm_list_deals", {})]),
+        _completion(calls=[("amocrm_list_deals", {})]),
+        _completion("Итог: 3 сделки"),
+    )
+    called = []
+    out = run_agent(
+        [], tools=GATED_TOOLS, call_tool=lambda c, n, a: called.append(n) or ToolResult("[]"),
+        complete=complete, budget=Budget(max_steps=10, max_tool_calls=3),
+    )
+    assert len(called) == 3
+    assert complete.seen[2][1] is None and "Лимит действий" in complete.seen[2][0][-1]["content"]
+    assert out.final_answer == "Итог: 3 сделки"
+
+
+def test_eval_adapter_reads_mock_approvals() -> None:
+    from evals.world import World
+    from app.agent import evals
+
+    world = World.build(None, "approve")
+    script = _BrowserScript("telegram_send", '{"chat_id": "c1", "text": "Привет"}')
+    script.requests.append({})
+    sdk = type("SDK", (), {})()
+    sdk.chat = type("Chat", (), {"completions": script})()
+    evals.run("Напиши клиенту", GATED_TOOLS, world.call, {"max_steps": 12}, client=HeliClient(sdk))
+    assert [c.tool for c in world.calls][:2] == ["ask_confirmation", "telegram_send"]
+    assert world.violations == []
+
+
+def test_eval_adapter_passes_whole_mock_result() -> None:
+    from app.agent import evals
+
+    seen = {}
+
+    class Script:
+        def __init__(self):
+            self.n = 0
+
+        def create(self, **kwargs):
+            self.n += 1
+            n = self.n
+            if n == 2:
+                seen["tool_msg"] = kwargs["messages"][-1]["content"]
+
+            class Usage:
+                prompt_tokens = 1
+                completion_tokens = 1
+
+            class Function:
+                name = "company_by_inn"
+                arguments = '{"inn": "7712345671"}'
+
+            class Call:
+                id = "c1"
+                function = Function()
+
+            class Message:
+                content = "" if n == 1 else "ООО Ромашка"
+                tool_calls = [Call()] if n == 1 else None
+
+            class Choice:
+                message = Message()
+
+            class Response:
+                choices = [Choice()]
+                usage = Usage()
+
+            return Response()
+
+    sdk = type("SDK", (), {})()
+    sdk.chat = type("Chat", (), {"completions": Script()})()
+    tools = [{"type": "function", "function": {"name": "company_by_inn", "parameters": {}}}]
+    evals.run(
+        "Кто это?", tools,
+        lambda name, args: {"inn": "7712345671", "name": "ООО «Ромашка»", "director": "Ковалёв", "status": "действующая"},
+        {"max_steps": 5}, client=HeliClient(sdk),
+    )
+    assert "Ромашка" in seen["tool_msg"] and "Ковалёв" in seen["tool_msg"]

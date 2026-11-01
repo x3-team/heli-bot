@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from app.agent.control import Control, NoControl, Stopped
+from app.agent.guard import Guard, describe
 from app.llm.client import Completion
 from app.llm.tools import parse_args
 
@@ -24,6 +25,8 @@ CONFIRM_TOOL = "ask_confirmation"
 @dataclass
 class Budget:
     max_steps: int = 15
+    # Tool calls allowed in the run (None = only max_steps model rounds count).
+    max_tool_calls: int | None = None
     max_rub: Decimal | None = None
     estimate_rub: Decimal | None = None
     autopause: bool = True
@@ -48,7 +51,14 @@ class Outcome:
 
 
 def approved(result: ToolResult) -> bool:
-    return result.error is None and result.content.strip().lower().startswith("approved")
+    text = result.content.strip().lower()
+    return result.error is None and (text.startswith("approved") or text.startswith('{"approved": true'))
+
+
+FINISH_NOTE = (
+    "Лимит действий исчерпан. Больше инструменты не вызывай: ответь пользователю тем, что уже нашёл, "
+    "с конкретными цифрами и источниками, и скажи, что не успел."
+)
 
 
 def run_agent(
@@ -67,6 +77,29 @@ def run_agent(
     spent = start_cost
     threshold = budget.estimate_rub * AUTOPAUSE_RATIO if budget.estimate_rub else None
     out = Outcome(final_answer="", steps=0, cost_rub=spent, stopped=None)
+    guard = Guard(schemas={t["function"]["name"]: t for t in tools})
+    can_ask = CONFIRM_TOOL in guard.schemas
+    calls_used = 0
+    auto_ids = 0
+
+    def run_call(call_id: str, name: str, args: dict) -> ToolResult:
+        emit({"type": "step", "kind": "tool_call", "call_id": call_id, "tool": name, "args": args})
+        result = call_tool(call_id, name, args)
+        content = result.content[:TOOL_RESULT_LIMIT]
+        emit(
+            {
+                "type": "step",
+                "kind": "tool_result",
+                "call_id": call_id,
+                "tool": name,
+                "args": args,
+                "text": content,
+                "error": result.error,
+                "data": result.data,
+            }
+        )
+        return ToolResult(content, result.error, result.data)
+
     try:
         for round_index in range(budget.max_steps):
             control.checkpoint()
@@ -80,8 +113,12 @@ def run_agent(
                 )
                 # Resumed: pause again if the run costs another half of what it has spent.
                 threshold = spent * AUTOPAUSE_RATIO
-            last = round_index == budget.max_steps - 1
-            completion = complete(messages, None if last else tools)
+            out_of_calls = budget.max_tool_calls is not None and calls_used >= budget.max_tool_calls
+            last = round_index == budget.max_steps - 1 or out_of_calls
+            round_messages = messages
+            if out_of_calls:
+                round_messages = messages + [{"role": "user", "content": FINISH_NOTE}]
+            completion = complete(round_messages, None if last else tools)
             out.steps += 1
             spent += completion.cost_rub
             out.alias = completion.alias
@@ -99,36 +136,59 @@ def run_agent(
                     "spent_rub": spent,
                 }
             )
-            if not completion.tool_calls:
+            if not completion.tool_calls or last:
                 out.final_answer = completion.text
                 break
             messages.append(completion.assistant_message())
             stop_after = None
             for call in completion.tool_calls:
-                if stop_after:
+                skip = stop_after or (
+                    budget.max_tool_calls is not None and calls_used >= budget.max_tool_calls
+                )
+                if skip:
                     # The model must see an answer to every call it made.
                     messages.append({"role": "tool", "tool_call_id": call.id, "content": "Не выполнено."})
                     continue
                 control.checkpoint()
                 args = parse_args(call.arguments)
-                emit({"type": "step", "kind": "tool_call", "call_id": call.id, "tool": call.name, "args": args})
-                result = call_tool(call.id, call.name, args)
-                content = result.content[:TOOL_RESULT_LIMIT]
-                emit(
-                    {
-                        "type": "step",
-                        "kind": "tool_result",
-                        "call_id": call.id,
-                        "tool": call.name,
-                        "args": args,
-                        "text": content,
-                        "error": result.error,
-                        "data": result.data,
-                    }
-                )
-                messages.append({"role": "tool", "tool_call_id": call.id, "content": content})
-                if call.name == CONFIRM_TOOL and not approved(result):
-                    stop_after = "confirm"
+                if guard.needs_approval(call.name, args) and not guard.consume(call.name):
+                    # The model skipped ask_confirmation: the loop asks, and never runs the tool unasked.
+                    if not can_ask:
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": call.id,
+                                "content": "Ошибка: это действие нельзя выполнить без подтверждения пользователя.",
+                            }
+                        )
+                        stop_after = "confirm"
+                        continue
+                    auto_ids += 1
+                    label = None
+                    if call.name == "browser_click" and isinstance(args.get("ref"), int):
+                        label = guard.elements.get(args["ref"])
+                    ask_args = {"action": call.name, "details": describe(call.name, args, label)}
+                    answer = run_call(f"{call.id}_confirm{auto_ids}", CONFIRM_TOOL, ask_args)
+                    calls_used += 1
+                    if not approved(answer):
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": call.id,
+                                "content": "Не выполнено: пользователь не разрешил это действие.",
+                            }
+                        )
+                        stop_after = "confirm"
+                        continue
+                result = run_call(call.id, call.name, args)
+                calls_used += 1
+                messages.append({"role": "tool", "tool_call_id": call.id, "content": result.content})
+                guard.remember_page(result.content)
+                if call.name == CONFIRM_TOOL:
+                    ok = approved(result)
+                    guard.record_approval(args, ok)
+                    if not ok:
+                        stop_after = "confirm"
             if stop_after:
                 out.stopped = stop_after
                 out.final_answer = "Остановился: действие не подтверждено."
