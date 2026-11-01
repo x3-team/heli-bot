@@ -509,6 +509,8 @@ function Workspace({
           } else if (event.type === "resumed") {
             setPaused(null);
             setMascot("working");
+          } else if (event.type === "notice") {
+            setNotice(String(event.text ?? ""));
           } else if (event.type === "step" && event.kind === "tool_result") {
             setNotice("");
           }

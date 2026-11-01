@@ -2,7 +2,7 @@
 
 export interface AgentEvent {
   seq: number;
-  type: "started" | "step" | "client_action" | "paused" | "resumed" | "done" | "error";
+  type: "started" | "step" | "client_action" | "paused" | "resumed" | "notice" | "screen" | "done" | "error";
   [key: string]: unknown;
 }
 
