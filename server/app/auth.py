@@ -243,17 +243,24 @@ def verify_login_code(session: Session, email: str, code: str) -> User:
 
 
 def open_access_user(session: Session, email: str) -> User:
-    """The shared account used while sign-up is switched off for testing."""
+    """The shared account used while sign-up is switched off for testing.
+
+    It is an admin so the owner can read ratings and reports (/v1/admin/feedback).
+    Before real users: HELI_OPEN_ACCESS=0 and take is_admin off this account (tokens live on).
+    """
     normalized = _normalize_email(email)
     user = session.scalar(select(User).where(User.email == normalized))
     if user is not None:
+        if not user.is_admin:
+            user.is_admin = True
+            session.flush()
         return user
     now = datetime.now(timezone.utc)
     user = User(
         email=normalized,
         consent_pdn=True,
         consent_training=False,
-        is_admin=False,
+        is_admin=True,
         monthly_limit_rub=get_settings().default_monthly_limit_rub,
         trial_ends_at=now + TRIAL,
         created_at=now,

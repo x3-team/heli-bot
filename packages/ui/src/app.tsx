@@ -431,6 +431,10 @@ function Workspace({
   const [costHint, setCostHint] = useState<string | null>(null);
   const [feedbackTask, setFeedbackTask] = useState<{ taskId: string; reply: string } | null>(null);
   const [consents, setConsents] = useState({ pdn: true, training: false });
+  const [consentsLoaded, setConsentsLoaded] = useState(false);
+  const [trainingAsked, setTrainingAsked] = useState(readTrainingAsked);
+  // Asked once, under the first finished task, never during a run.
+  const trainingAsk = consentsLoaded && !consents.training && !trainingAsked;
   const [historyOpen, setHistoryOpen] = useState(false);
   const [computerOpen, setComputerOpen] = useState(false);
   const [computerWidth, setComputerWidth] = useState<number | null>(() => readComputerWidth());
@@ -469,7 +473,10 @@ function Workspace({
         }
       });
     void loadMe(apiBase, token)
-      .then((me) => setConsents({ pdn: me.consentPdn, training: me.consentTraining }))
+      .then((me) => {
+        setConsents({ pdn: me.consentPdn, training: me.consentTraining });
+        setConsentsLoaded(true);
+      })
       .catch((err) => {
         if (err instanceof ApiError && err.message.includes("войти снова")) {
           onSignOut();
@@ -579,6 +586,8 @@ function Workspace({
     setPaused(null);
     setNotice("");
     haltedRef.current = false;
+    // Known once the server creates the task: a failed run can still be rated.
+    let startedTaskId: string | null = null;
     try {
       const fileIds: string[] = [];
       if (files.length) {
@@ -595,7 +604,10 @@ function Workspace({
         clientTools: availableClientTools(),
         autopause,
         signal: controller.signal,
-        onTask: setRunTaskId,
+        onTask: (id) => {
+          startedTaskId = id;
+          setRunTaskId(id);
+        },
         onEvent: (event: AgentEvent) => {
           const item = feedItem(event);
           if (item) setFeed((list) => [...list, item].slice(-40));
@@ -644,7 +656,8 @@ function Workspace({
         ),
       );
       if (note && result.reply) setError(note);
-      setFeedbackTask(result.reply ? { taskId: result.taskId, reply: result.reply } : null);
+      // Every task gets the rating card, stopped ones too: these ratings are the training signal.
+      setFeedbackTask({ taskId: result.taskId, reply: result.reply });
       setMascot(result.stopped ? "waiting" : "done");
     } catch (err) {
       if (controller.signal.aborted) {
@@ -654,6 +667,7 @@ function Workspace({
         setError(err instanceof ApiError ? err.message : "Не получилось выполнить задачу.");
         setMascot("error");
       }
+      if (startedTaskId) setFeedbackTask({ taskId: startedTaskId, reply: "" });
     } finally {
       setBusy(false);
       setAbort(null);
@@ -821,13 +835,23 @@ function Workspace({
               if (!feedbackTask) return;
               try {
                 await submitTaskFeedback(apiBase, token, feedbackTask.taskId, worked, comment);
-                await finishTask(apiBase, token, feedbackTask.taskId, "success", feedbackTask.reply);
+                await finishTask(apiBase, token, feedbackTask.taskId, worked ? "success" : "fail", feedbackTask.reply);
                 setFeedbackTask(null);
+                setNotice("Спасибо, отзыв сохранён.");
               } catch (err) {
                 setError(err instanceof ApiError ? err.message : "Не получилось сохранить отзыв.");
               }
             }}
             costHint={costHint}
+            trainingAsk={trainingAsk}
+            onTrainingAnswer={(yes) => {
+              rememberTrainingAsked();
+              setTrainingAsked(true);
+              if (!yes) return;
+              void saveConsents(apiBase, token, consents.pdn, true)
+                .then(() => setConsents({ ...consents, training: true }))
+                .catch(() => setError("Не получилось сохранить согласие. Его можно включить в настройках."));
+            }}
             paused={paused}
             notice={notice}
             ask={ask}
@@ -946,6 +970,8 @@ function Chat({
   costHint,
   feedback,
   onFeedback,
+  trainingAsk,
+  onTrainingAnswer,
 }: {
   title: string;
   mascot: MascotState;
@@ -973,6 +999,8 @@ function Chat({
   ask: { action: string; details: string } | null;
   onAnswer: (ok: boolean) => void;
   onFeedback: (worked: boolean, comment: string) => Promise<void>;
+  trainingAsk: boolean;
+  onTrainingAnswer: (yes: boolean) => void;
 }) {
   const [comment, setComment] = useState("");
   const threadEnd = useRef<HTMLDivElement>(null);
@@ -1189,11 +1217,32 @@ function Chat({
               onChange={(event) => setComment(event.target.value)}
             />
             <div className="row">
-              <button type="button" data-emphasis="primary" onClick={() => void onFeedback(true, comment)}>
+              <button
+                type="button"
+                data-emphasis="primary"
+                onClick={() => void onFeedback(true, comment).then(() => setComment(""))}
+              >
                 Сработало
               </button>
-              <button type="button" onClick={() => void onFeedback(false, comment)}>
+              <button type="button" onClick={() => void onFeedback(false, comment).then(() => setComment(""))}>
                 Не сработало
+              </button>
+            </div>
+          </article>
+        ) : null}
+        {trainingAsk && !busy && messages.length > 0 ? (
+          <article className="card">
+            <h2>Помочь Heli стать лучше?</h2>
+            <p className="muted">
+              Разрешите использовать ваши задачи и оценки для обучения. Личные данные, пароли и ключи
+              перед этим скрываются. Передумать можно в настройках.
+            </p>
+            <div className="row">
+              <button type="button" data-emphasis="primary" onClick={() => onTrainingAnswer(true)}>
+                Разрешить
+              </button>
+              <button type="button" onClick={() => onTrainingAnswer(false)}>
+                Не сейчас
               </button>
             </div>
           </article>
@@ -1734,6 +1783,24 @@ function Settings({
 
 const AUTOPAUSE_KEY = "heli.autopause";
 const COMPUTER_WIDTH_KEY = "heli.computerWidth";
+
+const TRAINING_ASKED_KEY = "heli.trainingAsked";
+
+function readTrainingAsked(): boolean {
+  try {
+    return window.localStorage.getItem(TRAINING_ASKED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function rememberTrainingAsked(): void {
+  try {
+    window.localStorage.setItem(TRAINING_ASKED_KEY, "1");
+  } catch {
+    // Private mode: the card may come back next launch, which is harmless.
+  }
+}
 
 function clampComputerWidth(width: number, historyOpen: boolean): number {
   return clampWidth(width, historyOpen, window.innerWidth);

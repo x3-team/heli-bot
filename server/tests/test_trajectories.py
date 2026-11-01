@@ -301,3 +301,34 @@ def test_issue_code_helper_does_not_need_http(session) -> None:
     token = issue_token(user.id)
     assert token
     assert "b@example.com" not in token
+
+
+def test_auto_finish_closes_unrated_task_and_rating_overrides(session) -> None:
+    from datetime import datetime, timezone
+
+    from sqlalchemy import select
+
+    from app.models import Trajectory, User
+    from app.trajectories import auto_finish, finish_task, start_task
+
+    user = User(
+        email="auto@example.com",
+        consent_pdn=True,
+        consent_training=True,
+        is_admin=False,
+        created_at=datetime.now(timezone.utc),
+    )
+    session.add(user)
+    session.flush()
+    task = start_task(session, user, "Найди аренду видеокарты", {})
+    auto_finish(session, task.id, "success", "Терафeрма от 12 ₽/ч")
+    assert task.outcome == "success"
+    doc = session.scalar(select(Trajectory).where(Trajectory.task_id == task.id))
+    assert doc is not None and doc.outcome == "success"
+    # The run never overrides an outcome that is already set.
+    auto_finish(session, task.id, "fail", None)
+    assert task.outcome == "success"
+    # The user's «Не сработало» does, and keeps the run's answer when it sends none.
+    finish_task(session, user, task.id, "fail", "")
+    assert task.outcome == "fail" and task.final_answer == "Терафeрма от 12 ₽/ч"
+    assert session.scalar(select(Trajectory).where(Trajectory.task_id == task.id)).outcome == "fail"
