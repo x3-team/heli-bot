@@ -63,8 +63,19 @@ python -m pip install -U pip wheel
 log "host: $(nproc 2>/dev/null || echo '?') CPU"
 free -m 2>/dev/null || true
 
+# Heli's own browser needs ~1.2 GB free. On a host with less, keep it off so getheli and Fili are not squeezed.
+CLOUD_MIN_FREE_MB="${CLOUD_MIN_FREE_MB:-1200}"
+FREE_MB="$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)"
+log "host memory available: ${FREE_MB} MB (cloud browser needs ${CLOUD_MIN_FREE_MB} MB)"
+if grep -Eq '^CLOUD_BROWSER_ENABLED=(1|true|yes)' "$ENV_FILE" && [ "$FREE_MB" -lt "$CLOUD_MIN_FREE_MB" ]; then
+  log "CLOUD_BROWSER_SKIPPED_LOW_MEMORY: setting CLOUD_BROWSER_ENABLED=0 and keeping the 256 MB cap"
+  sed -i 's/^CLOUD_BROWSER_ENABLED=.*/CLOUD_BROWSER_ENABLED=0/' "$ENV_FILE"
+fi
+CLOUD_ON=0
+if grep -Eq '^CLOUD_BROWSER_ENABLED=(1|true|yes)' "$ENV_FILE"; then CLOUD_ON=1; fi
+
 # Heli's own browser on this host (CLOUD_BROWSER_ENABLED=1 in .env): Playwright + Chromium, no root.
-if grep -Eq '^CLOUD_BROWSER_ENABLED=(1|true|yes)' "$ENV_FILE"; then
+if [ "$CLOUD_ON" = 1 ]; then
   log "cloud browser: installing Playwright Chromium"
   python -m pip install -e "$APP_DIR/server[cloud]"
   export PLAYWRIGHT_BROWSERS_PATH="$APP_DIR/var/ms-playwright"
@@ -99,6 +110,11 @@ cd "$APP_DIR/server"
 alembic upgrade head
 
 install -m 0644 "$APP_DIR/infra/deploy/systemd-user/helibot.slice" "$APP_DIR/.config/systemd/user/helibot.slice"
+if [ "$CLOUD_ON" != 1 ]; then
+  # No cloud browser: the API alone keeps the old 256 MB cap.
+  sed -i -e 's/^MemoryMax=.*/MemoryMax=256M/' -e '/^CPUQuota=/d' "$APP_DIR/.config/systemd/user/helibot.slice"
+fi
+log "slice: $(grep -E '^(MemoryMax|CPUQuota)=' "$APP_DIR/.config/systemd/user/helibot.slice" | tr '\n' ' ')"
 install -m 0644 "$APP_DIR/infra/deploy/systemd-user/heli-bot-api.service" "$APP_DIR/.config/systemd/user/heli-bot-api.service"
 
 if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -d "/run/user/$(id -u)" ]; then
