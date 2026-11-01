@@ -44,6 +44,11 @@ from app.web import WebError, check_url
 log = logging.getLogger(__name__)
 
 IDLE_S = 10 * 60
+# All browsers taken: an account's browser unused this long gives its place to the next one.
+EVICT_IDLE_S = 60
+# The agent waits in line this long for a free browser.
+BUSY_WAIT_S = 5 * 60
+BUSY_NOTICE = "Все облачные браузеры сейчас заняты. Задача в очереди, начну, как только освободится место."
 CALL_TIMEOUT_S = 60
 # The agent waits this long for the user to pass a captcha on the live screen.
 CAPTCHA_WAIT_S = 10 * 60
@@ -506,6 +511,12 @@ class Page:
             self.context.close()
         except Exception:  # noqa: BLE001
             pass
+        browser = getattr(self, "browser", None)
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def run_tool(page: Page, tool: str, args: dict) -> str:
@@ -564,11 +575,6 @@ def playwright_launcher():
     if settings.cloud_browser_executable:
         options["executable_path"] = settings.cloud_browser_executable
     options["env"] = env
-    try:
-        browser = pw.chromium.launch(**options)
-    except Exception:
-        pw.stop()
-        raise
 
     def guard(route) -> None:
         if request_allowed_cached(route.request.url):
@@ -577,6 +583,16 @@ def playwright_launcher():
             route.abort("blockedbyclient")
 
     def new_page(storage_state: dict | None) -> Page:
+        # Each account gets its own Chromium process: a page in one account's browser
+        # cannot reach another account's memory, cookies or open mail.
+        browser = pw.chromium.launch(**options)
+        try:
+            return _open_page(browser, storage_state)
+        except Exception:
+            browser.close()
+            raise
+
+    def _open_page(browser, storage_state: dict | None) -> Page:
         context = browser.new_context(
             viewport=VIEWPORT,
             locale="ru-RU",
@@ -588,13 +604,12 @@ def playwright_launcher():
         context.route("**/*", guard)
         page = context.new_page()
         page.set_default_timeout(20_000)
-        return Page(context, page)
+        result = Page(context, page)
+        result.browser = browser
+        return result
 
     def shutdown() -> None:
-        try:
-            browser.close()
-        finally:
-            pw.stop()
+        pw.stop()
 
     return new_page, shutdown
 
@@ -784,7 +799,7 @@ class CloudBrowser:
         page = self.sessions.get(user_id)
         if page is not None:
             return page
-        if len(self.sessions) >= self.max_sessions:
+        if len(self.sessions) >= self.max_sessions and not self._evict_idle():
             raise CloudError("browser_busy")
         if self._new_page is None:
             try:
@@ -869,6 +884,51 @@ class CloudBrowser:
             self._save(user_id, page)
             page.close()
         self._maybe_shutdown()
+
+    def _evict_idle(self) -> bool:
+        """All browsers taken: close the one unused longest, if nobody touched it for EVICT_IDLE_S
+        and its owner is not watching the screen. Its sign-ins are saved first."""
+        now = time.monotonic()
+        idle = [
+            (page.last_used, user_id)
+            for user_id, page in self.sessions.items()
+            if now - page.last_used >= EVICT_IDLE_S and now - self._watched.get(user_id, -1e9) >= WATCH_S
+        ]
+        if not idle:
+            return False
+        self._close(min(idle)[1])
+        return True
+
+    def reserve(
+        self,
+        user_id: uuid.UUID,
+        wait_s: float = BUSY_WAIT_S,
+        on_wait: Callable[[bool], None] | None = None,
+        halted: Callable[[], bool] | None = None,
+        poll_s: float = 3.0,
+    ) -> str | None:
+        """Make sure this account has a browser. When all are taken, wait in line up to wait_s.
+        Returns None when the browser is ready, or the error code."""
+        deadline = time.monotonic() + wait_s
+        waiting = False
+        try:
+            while True:
+                try:
+                    self._submit(lambda: (self._page(user_id), None)[1]).result(timeout=CALL_TIMEOUT_S)
+                    return None
+                except CloudError as exc:
+                    if exc.code != "browser_busy" or time.monotonic() >= deadline or (halted and halted()):
+                        return exc.code
+                except FutureTimeout:
+                    return "timeout"
+                if not waiting:
+                    waiting = True
+                    if on_wait:
+                        on_wait(True)
+                time.sleep(poll_s)
+        finally:
+            if waiting and on_wait:
+                on_wait(False)
 
     def _reap(self) -> None:
         now = time.monotonic()
@@ -995,6 +1055,14 @@ def execute(session, user, task_id, name: str, args: dict):
     browser = pool()
     agent_run = _run_for(task_id, user.id)
     publish = agent_run.publish if agent_run else (lambda event: None)
+    busy = browser.reserve(
+        user.id,
+        on_wait=lambda on: publish({"type": "notice", "text": BUSY_NOTICE if on else ""}),
+        halted=(lambda: agent_run.control.stopped) if agent_run else None,
+    )
+    if busy:
+        text = "Ошибка: все облачные браузеры заняты, попробуй позже" if busy == "browser_busy" else f"Ошибка облачного браузера: {busy}"
+        return ClientResult(text, busy)
     if name == SEARCH_TOOL:
         result = browser.search(
             user.id,
@@ -1044,7 +1112,10 @@ def probe(browser: CloudBrowser) -> bool:
 
     def job() -> bool:
         new_page, shutdown = browser.launcher()
-        shutdown()
+        try:
+            new_page(None).close()
+        finally:
+            shutdown()
         return True
 
     try:

@@ -20,5 +20,5 @@ if ! grep -q '^CLOUD_BROWSER_ENABLED=' "$ENV_FILE"; then
 fi
 if ! grep -q '^CLOUD_BROWSER_MAX=' "$ENV_FILE"; then
   printf 'CLOUD_BROWSER_MAX=2\n' >>"$ENV_FILE"
-  log "set CLOUD_BROWSER_MAX=2"
+  log "set CLOUD_BROWSER_MAX=2 (remote-install.sh raises it to 4 when the host has room)"
 fi
