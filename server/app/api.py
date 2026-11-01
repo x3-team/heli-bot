@@ -1,4 +1,5 @@
 import base64
+import json
 import binascii
 import logging
 import uuid
@@ -6,7 +7,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -46,6 +47,9 @@ from app.config import get_settings
 from app.db import get_db
 from app.models import TaskStep, User
 from app.llm.client import HeliClient, HeliError
+from app.agent import runs
+from app.agent.control import ClientResult
+from app.agent.task_run import decode_screenshot
 from app.llm.run import run_turn
 from app.memory import MemoryError, delete_memory, list_memory, remember
 from app.quota import QuotaError, estimate_turn_reserve, public_usage, snapshot
@@ -687,17 +691,42 @@ def set_user_limit(
     return public_usage(snapshot(session, target), trial_active=trial_active(target))
 
 
-@router.post("/tasks/{task_id}/run")
+class RunBody(BaseModel):
+    client_tools: list[str] = Field(default_factory=list, max_length=32)
+    estimate_rub: Decimal | None = Field(default=None, ge=0, le=Decimal("1000000"))
+    autopause: bool = True
+
+
+@router.post("/tasks/{task_id}/run", response_model=None)
 def run(
     task_id: uuid.UUID,
+    request: Request,
+    body: RunBody | None = None,
     user: User = Depends(get_current_user),
     session: Session = Depends(get_db),
     client: HeliClient = Depends(get_heli_client),
-) -> dict:
+):
+    """JSON: one blocking turn with server tools. Accept: text/event-stream: background run with a step stream."""
     from app.trajectories import _own_task
 
     try:
         task = _own_task(session, user, task_id)
+    except TrajectoryError as exc:
+        _fail(exc)
+    if "text/event-stream" in request.headers.get("accept", ""):
+        options = body or RunBody()
+        session.commit()
+        agent_run = runs.registry.start(
+            task_id=task.id,
+            user_id=user.id,
+            session_factory=get_run_session_factory(),
+            client=client,
+            client_tools=options.client_tools,
+            estimate_rub=options.estimate_rub,
+            autopause=options.autopause,
+        )
+        return _sse(agent_run, 0)
+    try:
         turn = run_turn(session, user, task, client)
     except TrajectoryError as exc:
         _fail(exc)
@@ -711,9 +740,86 @@ def run(
         "reply": turn.text,
         "task_type": turn.task_type,
         "complexity": turn.complexity,
+        "stopped": turn.stopped,
     }
 
 
+def get_run_session_factory():
+    from app.db import get_session_factory
+
+    return get_session_factory()
+
+
+def _sse(agent_run: "runs.AgentRun", after: int) -> StreamingResponse:
+    def body():
+        for event in agent_run.stream(after):
+            if event is None:
+                yield ": ping\n\n"
+                continue
+            data = json.dumps(event, ensure_ascii=False, default=str)
+            yield f"id: {event['seq']}\nevent: {event['type']}\ndata: {data}\n\n"
+
+    return StreamingResponse(
+        body(),
+        media_type="text/event-stream",
+        headers={"cache-control": "no-cache", "x-accel-buffering": "no"},
+    )
+
+
+def _own_run(task_id: uuid.UUID, user: User) -> "runs.AgentRun":
+    agent_run = runs.registry.get(task_id, user.id)
+    if agent_run is None:
+        raise HTTPException(status_code=404, detail="run_not_found")
+    return agent_run
+
+
+@router.get("/tasks/{task_id}/events", response_model=None)
+def run_events(
+    task_id: uuid.UUID,
+    after: int = 0,
+    last_event_id: str | None = Header(default=None),
+    user: User = Depends(get_current_user),
+) -> StreamingResponse:
+    agent_run = _own_run(task_id, user)
+    if last_event_id and last_event_id.isdigit():
+        after = max(after, int(last_event_id))
+    return _sse(agent_run, after)
+
+
+class ControlBody(BaseModel):
+    action: str = Field(pattern="^(pause|resume|stop)$")
+
+
+@router.post("/tasks/{task_id}/control")
+def run_control(task_id: uuid.UUID, body: ControlBody, user: User = Depends(get_current_user)) -> dict:
+    agent_run = _own_run(task_id, user)
+    if body.action == "pause":
+        agent_run.control.pause()
+    elif body.action == "resume":
+        agent_run.control.resume()
+    else:
+        agent_run.control.stop()
+    return {"paused": agent_run.control.paused, "stopped": agent_run.control.stopped, "finished": agent_run.finished}
+
+
+class ToolResultBody(BaseModel):
+    call_id: str = Field(min_length=1, max_length=128)
+    content: str = Field(default="", max_length=200_000)
+    error: str | None = Field(default=None, max_length=200)
+    screenshot_base64: str | None = Field(default=None, max_length=3_000_000)
+
+
+@router.post("/tasks/{task_id}/tool-results")
+def run_tool_result(task_id: uuid.UUID, body: ToolResultBody, user: User = Depends(get_current_user)) -> dict:
+    agent_run = _own_run(task_id, user)
+    delivered = agent_run.control.deliver(
+        body.call_id,
+        ClientResult(content=body.content, error=body.error, screenshot=decode_screenshot(body.screenshot_base64)),
+    )
+    if not delivered:
+        raise HTTPException(status_code=409, detail="call_not_waiting")
+    agent_run.forget_secret_args(body.call_id)
+    return {"ok": True}
 class ComputerHistoryBody(BaseModel):
     action: str = Field(min_length=1, max_length=32)
     target: str | None = Field(default=None, max_length=300)

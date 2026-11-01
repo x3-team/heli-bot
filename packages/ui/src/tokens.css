@@ -504,6 +504,29 @@ h1, h2 { text-wrap: balance; }
   .rail { grid-row: 1 / span 3; }
 }
 
+.step-feed {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+  line-height: 1.35;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.step-feed li {
+  overflow-wrap: anywhere;
+}
+
+.step-feed li[data-tone="muted"] {
+  opacity: 0.65;
+}
+
+.step-feed li[data-tone="error"] {
+  color: var(--danger, #c0392b);
+}
 /* PC hands: confirmation card with the screen and a marker on the target. */
 .computer-shot {
   position: relative;

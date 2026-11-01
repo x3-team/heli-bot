@@ -3,6 +3,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde::Serialize;
 
 static AGENT_STOPPED: AtomicBool = AtomicBool::new(false);
+static LAUNCHED: std::sync::Mutex<Option<(String, u16)>> = std::sync::Mutex::new(None);
+
+mod local_browser;
 
 #[derive(Serialize)]
 struct BrowserLaunch {
@@ -24,6 +27,7 @@ pub fn run() {
             computer_decide,
             computer_act,
             browser_launch,
+            browser_page_ws,
             log_agent_step,
         ])
         .run(tauri::generate_context!())
@@ -135,13 +139,33 @@ async fn computer_act(
 }
 
 #[tauri::command]
-fn browser_launch() -> Result<BrowserLaunch, String> {
+fn browser_launch(app: tauri::AppHandle) -> Result<BrowserLaunch, String> {
     if let Ok(port) = std::env::var("HELI_LOCAL_BROWSER_PORT") {
         let port: u16 = port.parse().map_err(|_| "bad_port".to_string())?;
         let browser = std::env::var("HELI_LOCAL_BROWSER").unwrap_or_else(|_| "chrome".into());
         return Ok(BrowserLaunch { browser, port });
     }
-    Err("local_browser_launcher_not_configured".to_string())
+    use tauri::Manager;
+    let profile = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|_| "no_data_dir".to_string())?
+        .join("browser-profile");
+    let mut guard = LAUNCHED.lock().map_err(|_| "lock".to_string())?;
+    if let Some((browser, port)) = guard.clone() {
+        if local_browser::alive(port) {
+            return Ok(BrowserLaunch { browser, port });
+        }
+    }
+    let (browser, port) = local_browser::launch(&profile)?;
+    *guard = Some((browser.clone(), port));
+    Ok(BrowserLaunch { browser, port })
+}
+
+/// DevTools websocket of the first normal tab (the webview cannot read /json itself: no CORS there).
+#[tauri::command]
+fn browser_page_ws(port: u16) -> Result<String, String> {
+    local_browser::page_ws(port)
 }
 
 #[tauri::command]

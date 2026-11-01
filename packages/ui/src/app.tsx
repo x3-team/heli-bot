@@ -18,11 +18,9 @@ import {
   requestCode,
   estimateTask,
   finishTask,
-  runTask,
   saveConsents,
   submitIncidentReport,
   submitTaskFeedback,
-  TaskAbortedError,
   attachLocalBrowser,
   saveMemory,
   saveCredential,
@@ -49,6 +47,9 @@ import {
   tryLaunchLocalBrowser,
 } from "./desktop";
 import { INTEGRATION_LOGOS } from "./integrations";
+import { controlRun, runAgentTask, stoppedNote, type AgentEvent } from "./agentRun";
+import { StepFeed, feedItem, type FeedItem } from "./agentFeed";
+import { availableClientTools, runClientAction } from "./clientActions";
 import { Mascot, mascotLabel, type MascotState } from "./mascot";
 
 type View = "chat" | "limits" | "schedules" | "memory" | "settings";
@@ -406,6 +407,13 @@ function Workspace({
   const [consents, setConsents] = useState({ pdn: true, training: false });
   const [historyOpen, setHistoryOpen] = useState(false);
   const [computerOpen, setComputerOpen] = useState(false);
+  const [runTaskId, setRunTaskId] = useState<string | null>(null);
+  const [feed, setFeed] = useState<FeedItem[]>([]);
+  const [paused, setPaused] = useState<{ reason: string; spent?: string; estimate?: string } | null>(null);
+  const [notice, setNotice] = useState("");
+  const [ask, setAsk] = useState<{ action: string; details: string; resolve: (ok: boolean) => void } | null>(null);
+  const [autopause, setAutopause] = useState(() => readAutopause());
+  const haltedRef = useRef(false);
 
   const active = threads.find((thread) => thread.id === activeId) ?? null;
   const stopped = usage.blocked || limitTone(usage.weekPercent) === "stop" || limitTone(usage.monthPercent) === "stop";
@@ -481,19 +489,61 @@ function Workspace({
       ),
     );
     setDraft("");
+    setFeed([]);
+    setPaused(null);
+    setNotice("");
+    haltedRef.current = false;
     try {
       setMascot("working");
-      const result = await runTask(apiBase, token, text, controller.signal);
-      const answer: Message = { id: crypto.randomUUID(), role: "assistant", text: result.reply };
+      const result = await runAgentTask(apiBase, token, text, {
+        clientTools: availableClientTools(),
+        autopause,
+        signal: controller.signal,
+        onTask: setRunTaskId,
+        onEvent: (event: AgentEvent) => {
+          const item = feedItem(event);
+          if (item) setFeed((list) => [...list, item].slice(-40));
+          if (event.type === "paused") {
+            setPaused({
+              reason: String(event.reason ?? "user"),
+              spent: event.spent_rub ? String(event.spent_rub) : undefined,
+              estimate: event.estimate_rub ? String(event.estimate_rub) : undefined,
+            });
+            setMascot("waiting");
+          } else if (event.type === "resumed") {
+            setPaused(null);
+            setMascot("working");
+          } else if (event.type === "notice") {
+            setNotice(String(event.text ?? ""));
+          } else if (event.type === "step" && event.kind === "tool_result") {
+            setNotice("");
+          }
+        },
+        onClientAction: (tool, args, callId, taskId) =>
+          runClientAction(tool, args, {
+            confirm: (action, details) =>
+              new Promise<boolean>((resolve) => setAsk({ action, details, resolve })),
+            notice: setNotice,
+            halted: () => haltedRef.current,
+            run: { base: apiBase, token, taskId, callId },
+          }),
+      });
+      const note = stoppedNote(result.stopped);
+      const answer: Message = {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        text: result.reply || note || "Готово.",
+      };
       setThreads((list) =>
         list.map((thread) =>
           thread.id === threadId ? { ...thread, messages: [...thread.messages, answer] } : thread,
         ),
       );
-      setFeedbackTask(result);
-      setMascot("done");
+      if (note && result.reply) setError(note);
+      setFeedbackTask(result.reply ? { taskId: result.taskId, reply: result.reply } : null);
+      setMascot(result.stopped ? "waiting" : "done");
     } catch (err) {
-      if (err instanceof TaskAbortedError || controller.signal.aborted) {
+      if (controller.signal.aborted) {
         setMascot("waiting");
         setError("Остановлено. Управление снова у вас.");
       } else {
@@ -503,8 +553,43 @@ function Workspace({
     } finally {
       setBusy(false);
       setAbort(null);
+      setRunTaskId(null);
+      setPaused(null);
+      setNotice("");
+      setAsk((current) => {
+        current?.resolve(false);
+        return null;
+      });
       void loadUsage(apiBase, token).then(setUsage).catch(() => undefined);
     }
+  }
+
+  async function togglePause() {
+    if (!runTaskId) {
+      void handControlBack();
+      return;
+    }
+    if (paused) {
+      void resetAgentControl();
+      haltedRef.current = false;
+      await controlRun(apiBase, token, runTaskId, "resume").catch(() => undefined);
+      setPaused(null);
+      setMascot("working");
+    } else {
+      void handControlBack();
+      await controlRun(apiBase, token, runTaskId, "pause").catch(() => undefined);
+      setPaused({ reason: "user" });
+      setMascot("waiting");
+    }
+  }
+
+  function stopRun() {
+    haltedRef.current = true;
+    void handControlBack();
+    if (runTaskId) void controlRun(apiBase, token, runTaskId, "stop").catch(() => undefined);
+    ask?.resolve(false);
+    setAsk(null);
+    abort?.abort();
   }
 
   function submitDraft() {
@@ -625,10 +710,15 @@ function Workspace({
               }
             }}
             costHint={costHint}
-            onStop={() => {
-              void handControlBack();
-              abort?.abort();
+            paused={paused}
+            notice={notice}
+            ask={ask}
+            onAnswer={(ok) => {
+              ask?.resolve(ok);
+              setAsk(null);
             }}
+            onPause={() => void togglePause()}
+            onStop={stopRun}
           />
         ) : null}
         {view === "limits" ? <Limits usage={usage} /> : null}
@@ -646,6 +736,11 @@ function Workspace({
               setConsents(next);
             }}
             onSignOut={onSignOut}
+            autopause={autopause}
+            onAutopause={(on) => {
+              setAutopause(on);
+              writeAutopause(on);
+            }}
           />
         ) : null}
       </section>
@@ -654,9 +749,9 @@ function Workspace({
         token={token}
         state={stopped ? "waiting" : mascot}
         hidden={!showComputer}
-        onPause={() => {
-          void handControlBack();
-        }}
+        onPause={() => void togglePause()}
+        paused={paused !== null}
+        feed={feed}
         busy={busy}
         onClose={() => setComputerOpen(false)}
       />
@@ -713,6 +808,11 @@ function Chat({
   onEdit,
   onReject,
   onStop,
+  onPause,
+  paused,
+  notice,
+  ask,
+  onAnswer,
   costHint,
   feedback,
   onFeedback,
@@ -734,6 +834,11 @@ function Chat({
   onEdit: () => void;
   onReject: () => void;
   onStop: () => void;
+  onPause: () => void;
+  paused: { reason: string; spent?: string; estimate?: string } | null;
+  notice: string;
+  ask: { action: string; details: string } | null;
+  onAnswer: (ok: boolean) => void;
   onFeedback: (worked: boolean, comment: string) => Promise<void>;
 }) {
   const [comment, setComment] = useState("");
@@ -742,7 +847,7 @@ function Chat({
 
   useEffect(() => {
     threadEnd.current?.scrollIntoView({ block: "end" });
-  }, [messages.length, pending, feedback, busy]);
+  }, [messages.length, pending, feedback, busy, ask, paused, notice]);
 
   const composer = (
     <form
@@ -848,6 +953,31 @@ function Chat({
             </div>
           </article>
         ) : null}
+        {ask ? (
+          <article className="card danger">
+            <p className="muted">Heli спрашивает разрешение</p>
+            <h2>{ask.action || "Выполнить действие?"}</h2>
+            {ask.details ? <p>{ask.details}</p> : null}
+            <div className="row">
+              <button type="button" data-emphasis="primary" onClick={() => onAnswer(true)}>Разрешить</button>
+              <button type="button" data-emphasis="danger" onClick={() => onAnswer(false)}>Отклонить</button>
+            </div>
+          </article>
+        ) : null}
+        {paused?.reason === "cost" ? (
+          <article className="card">
+            <p className="muted">Автопауза</p>
+            <h2>Задача дороже оценки</h2>
+            <p>
+              Потрачено {formatRub(paused.spent)} при оценке {formatRub(paused.estimate)}. Продолжить?
+            </p>
+            <div className="row">
+              <button type="button" data-emphasis="primary" onClick={onPause}>Продолжить</button>
+              <button type="button" data-emphasis="danger" onClick={onStop}>Стоп</button>
+            </div>
+          </article>
+        ) : null}
+        {notice ? <p className="muted">{notice}</p> : null}
         <ComputerConfirmCard />
         {stopped ? (
           <article className="card danger">
@@ -888,6 +1018,8 @@ function Computer({
   state,
   hidden,
   busy,
+  paused,
+  feed,
   onPause,
   onClose,
 }: {
@@ -896,6 +1028,8 @@ function Computer({
   state: MascotState;
   hidden: boolean;
   busy: boolean;
+  paused: boolean;
+  feed: FeedItem[];
   onPause: () => void;
   onClose: () => void;
 }) {
@@ -947,7 +1081,7 @@ function Computer({
           <span className={`live ${state}`}>{mascotLabel(state)}</span>
           <span className="computer-actions">
             {busy ? (
-              <button type="button" className="pill" onClick={onPause}>Пауза</button>
+              <button type="button" className="pill" onClick={onPause}>{paused ? "Продолжить" : "Пауза"}</button>
             ) : null}
             <button type="button" className="pill icon" title="Скрыть" aria-label="Скрыть" onClick={onClose}>
               <Icon d={ICONS.close} />
@@ -957,6 +1091,7 @@ function Computer({
         <div className="screen">
           <Mascot state={state} />
         </div>
+        <StepFeed items={feed} />
         <div className="computer-foot">
           <span className="muted">
             {browser.status === "running"
@@ -1133,6 +1268,8 @@ function Settings({
   onTheme,
   onConsents,
   onSignOut,
+  autopause,
+  onAutopause,
 }: {
   apiBase: string;
   token: string;
@@ -1141,6 +1278,8 @@ function Settings({
   onTheme: (theme: Theme) => void;
   onConsents: (next: { pdn: boolean; training: boolean }) => Promise<void>;
   onSignOut: () => void;
+  autopause: boolean;
+  onAutopause: (on: boolean) => void;
 }) {
   const [site, setSite] = useState("");
   const [username, setUsername] = useState("");
@@ -1162,6 +1301,13 @@ function Settings({
           <button type="button" aria-pressed={theme === "light"} onClick={() => onTheme("light")}>Светлая</button>
           <button type="button" aria-pressed={theme === "dark"} onClick={() => onTheme("dark")}>Тёмная</button>
         </div>
+      </section>
+      <section className="card">
+        <h2>Задачи</h2>
+        <label className="check">
+          <input type="checkbox" checked={autopause} onChange={(event) => onAutopause(event.target.checked)} />
+          <span>Ставить задачу на паузу, если она стоит больше чем в 1,5 раза дороже оценки</span>
+        </label>
       </section>
       <section className="card">
         <h2>Согласия</h2>
@@ -1285,4 +1431,27 @@ function Settings({
       <button type="button" onClick={onSignOut}>Выйти</button>
     </div>
   );
+}
+
+const AUTOPAUSE_KEY = "heli.autopause";
+
+function readAutopause(): boolean {
+  try {
+    return window.localStorage.getItem(AUTOPAUSE_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+function writeAutopause(on: boolean): void {
+  try {
+    window.localStorage.setItem(AUTOPAUSE_KEY, on ? "on" : "off");
+  } catch {
+    // per-device convenience only
+  }
+}
+
+function formatRub(value?: string): string {
+  const n = Number.parseFloat(value ?? "");
+  return Number.isFinite(n) ? `${n.toFixed(2)} ₽` : "—";
 }
