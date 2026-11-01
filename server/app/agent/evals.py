@@ -33,6 +33,10 @@ def run(
         raw = call_tool(name, args)
         if isinstance(raw, str):
             return ToolResult(raw)
+        if isinstance(raw, dict) and name == "ask_confirmation" and "approved" in raw:
+            if raw.get("approved"):
+                return ToolResult("approved")
+            return ToolResult(f"rejected: {raw.get('comment') or 'пользователь отказал'}")
         if isinstance(raw, dict):
             content = raw.get("content")
             if content is None:
@@ -49,7 +53,9 @@ def run(
         call_tool=call,
         complete=complete,
         budget=Budget(
-            max_steps=int(budget.get("max_steps", 15)),
+            # The eval counts tool calls; leave one extra model round for the final answer.
+            max_steps=int(budget.get("max_steps", 15)) + 1,
+            max_tool_calls=int(budget.get("max_steps", 15)),
             max_rub=Decimal(str(max_rub)) if max_rub is not None else None,
             estimate_rub=estimate_rub,
         ),
