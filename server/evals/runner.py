@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import time
 from dataclasses import asdict, dataclass, field
@@ -54,6 +55,13 @@ def load_scenarios(directory: Path = SCENARIOS_DIR, only: str | None = None) -> 
     return scenarios
 
 
+def _accepts(func: Callable, name: str) -> bool:
+    try:
+        return name in inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 def task_text(scenario: dict, world: World) -> str:
     return f"{scenario['task']}\n\n(Сегодня {world.state['today']}, понедельник.)"
 
@@ -73,7 +81,8 @@ def run_scenario(scenario: dict, agent: Agent) -> Result:
 
     started = time.monotonic()
     try:
-        out = agent(task_text(scenario, world), TOOLS, call_tool, budget) or {}
+        extra = {"today": world.state["today"]} if _accepts(agent, "today") else {}
+        out = agent(task_text(scenario, world), TOOLS, call_tool, budget, **extra) or {}
         crash = None
     except Exception as exc:  # агент упал: это провал сценария, а не всего прогона
         out, crash = {}, f"агент упал: {type(exc).__name__}: {exc}"
