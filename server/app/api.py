@@ -1046,3 +1046,93 @@ def cloud_browser_forget(user: User = Depends(get_current_user)) -> dict:
     _cloud_on()
     cloud_browser.pool().forget(user.id)
     return cloud_browser.pool().status(user.id)
+
+
+# --- files between the cloud computer and the user's PC ---------------------------------
+
+from urllib.parse import unquote  # noqa: E402
+
+from app import files as heli_files  # noqa: E402
+
+_FILE_STATUS = {"not_found": 404, "file_too_large": 413, "storage_full": 507, "bad_direction": 400}
+
+
+def _file_fail(exc: heli_files.FileError) -> None:
+    raise HTTPException(status_code=_FILE_STATUS.get(exc.code, 400), detail=exc.code) from None
+
+
+@router.post("/files", status_code=201)
+async def files_upload(
+    request: Request,
+    x_file_name: str = Header(default="", max_length=1024),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """The user attaches a file in the chat. Raw body; the name comes URL-encoded in X-File-Name."""
+    limit = heli_files.store().max_bytes
+    length = request.headers.get("content-length")
+    if length and length.isdigit() and int(length) > limit:
+        raise HTTPException(status_code=413, detail="file_too_large")
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(status_code=413, detail="file_too_large")
+        chunks.append(chunk)
+    if total == 0:
+        raise HTTPException(status_code=400, detail="empty_file")
+    try:
+        info = heli_files.store().put_bytes(user.id, unquote(x_file_name), b"".join(chunks), heli_files.FROM_PC)
+    except heli_files.FileError as exc:
+        _file_fail(exc)
+    return info.public()
+
+
+@router.get("/files")
+def files_list(
+    direction: str | None = None,
+    pending: bool = False,
+    user: User = Depends(get_current_user),
+) -> dict:
+    """pending=true: files for the PC that the app has not saved yet."""
+    items = heli_files.store().list(user.id, direction)
+    if pending:
+        items = [item for item in items if item.direction == heli_files.TO_PC and not item.delivered]
+    return {"files": [item.public() for item in items], "max_bytes": heli_files.store().max_bytes}
+
+
+@router.get("/files/{file_id}/content", response_model=None)
+def files_content(file_id: str, user: User = Depends(get_current_user)) -> Response:
+    try:
+        info, blob = heli_files.store().get(user.id, file_id)
+    except heli_files.FileError as exc:
+        _file_fail(exc)
+    from urllib.parse import quote as _quote
+
+    return Response(
+        content=blob.read_bytes(),
+        media_type="application/octet-stream",
+        headers={
+            "cache-control": "no-store",
+            "x-content-type-options": "nosniff",
+            "content-disposition": f"attachment; filename*=UTF-8''{_quote(info.name)}",
+            "x-file-name": _quote(info.name),
+        },
+    )
+
+
+@router.post("/files/{file_id}/delivered")
+def files_delivered(file_id: str, user: User = Depends(get_current_user)) -> dict:
+    try:
+        return heli_files.store().mark_delivered(user.id, file_id).public()
+    except heli_files.FileError as exc:
+        _file_fail(exc)
+
+
+@router.delete("/files/{file_id}")
+def files_delete(file_id: str, user: User = Depends(get_current_user)) -> dict:
+    try:
+        heli_files.store().delete(user.id, file_id)
+    except heli_files.FileError as exc:
+        _file_fail(exc)
+    return {"deleted": True}

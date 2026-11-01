@@ -16,6 +16,8 @@ export interface AgentRunOptions {
   clientTools: string[];
   autopause: boolean;
   estimateRub?: string | null;
+  /** Stored with the task, e.g. { files: [ids of attached files] }. */
+  context?: Record<string, unknown>;
   onEvent: (event: AgentEvent) => void;
   onClientAction: (tool: string, args: Record<string, unknown>, callId: string, taskId: string) => Promise<ClientActionResult>;
   onTask?: (taskId: string) => void;
@@ -88,7 +90,7 @@ export async function runAgentTask(
   const created = await fetch(`${base}/v1/tasks`, {
     method: "POST",
     headers: { "content-type": "application/json", ...auth(token) },
-    body: JSON.stringify({ request: text, context: {} }),
+    body: JSON.stringify({ request: text, context: options.context ?? {} }),
     signal: options.signal,
   });
   if (!created.ok) throw new ApiError(await readApiError(created), created.status);

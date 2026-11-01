@@ -264,7 +264,7 @@ def test_register_only_when_enabled(monkeypatch):
         assert executors.executor_for("browser_open") is cb.execute
         assert executors.executor_for("browser_search") is cb.execute
     finally:
-        executors.unregister_executor((*cb.TOOL_NAMES, cb.SEARCH_TOOL))
+        executors.unregister_executor((*cb.TOOL_NAMES, cb.SEARCH_TOOL, cb.UPLOAD_TOOL))
         cb._ready = False
 
 

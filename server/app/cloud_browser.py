@@ -31,6 +31,7 @@ from urllib.parse import quote, urlsplit
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from app import files as heli_files
 from app.config import get_settings
 from app.web import WebError, check_url
 
@@ -67,6 +68,7 @@ class Result:
     text: str
     error: str | None = None
     frame: bytes | None = None
+    files: list = field(default_factory=list)
 
 
 # Same snapshot as packages/ui/src/cdp.ts, so the model reads pages the same way everywhere.
@@ -250,6 +252,10 @@ class Page:
         self.context = context
         self.page = page
         self.last_used = time.monotonic()
+        # Downloads the page started; the browser moves them to the file store after each call.
+        self.downloads: list = []
+        if page is not None:
+            page.on("download", lambda download: self.downloads.append(download))
 
     def frame(self) -> bytes | None:
         try:
@@ -280,11 +286,24 @@ class Page:
         try:
             self.page.goto(target, wait_until="domcontentloaded", timeout=25_000)
         except Exception as exc:  # noqa: BLE001
-            raise CloudError("navigation_failed") from exc
+            # A direct link to a file: Chromium downloads it instead of opening a page
+            # ("Download is starting" or net::ERR_ABORTED, then a download event).
+            message = str(exc)
+            if "Download is starting" not in message and "ERR_ABORTED" not in message:
+                raise CloudError("navigation_failed") from exc
+            self.page.wait_for_timeout(700)
+            if not getattr(self, "downloads", None):
+                raise CloudError("navigation_failed") from exc
+            self.opened_file = True
+            return
         self.settle(1500)
 
     def open(self, url: str) -> str:
+        self.opened_file = False
         self.goto(url)
+        if self.opened_file:
+            # The tab still shows the previous page; reading it would make the model think the link failed.
+            return "По этому адресу файл, а не страница: браузер его скачал. Вкладка осталась на прежней странице."
         return self.read()
 
     def click(self, ref: int | None, text: str | None) -> str:
@@ -317,6 +336,39 @@ class Page:
         self.page.keyboard.press(" " if key == "Space" else key)
         self.settle(400)
         return f"Нажата клавиша {key}."
+
+    def upload(self, payload: dict, ref: int | None, text: str | None) -> str:
+        """Give a file to the page's file input: the field itself, a button that opens the picker,
+        or, failing both, the first file input on the page (they are often hidden behind a button)."""
+        handle = self.page.query_selector(f'[data-heli-ref="{int(ref)}"]') if ref is not None else None
+        is_input = bool(handle and handle.evaluate("(e) => e.tagName === 'INPUT' && e.type === 'file'"))
+        done = False
+        if is_input:
+            handle.set_input_files(payload)
+            done = True
+        elif ref is not None or text:
+            point = self.page.evaluate(FIND, [ref, text])
+            if point:
+                try:
+                    with self.page.expect_file_chooser(timeout=5_000) as chooser:
+                        self.page.mouse.click(point[0], point[1])
+                    chooser.value.set_files(payload)
+                    done = True
+                except Exception:  # noqa: BLE001
+                    done = False
+        if not done:
+            fallback = self.page.query_selector("input[type=file]")
+            if fallback is None:
+                raise CloudError("no_file_input")
+            fallback.set_input_files(payload)
+        self.settle(1000)
+        return f"Файл «{payload['name']}» выбран в форме.\n\n" + self.read()
+
+    def take_downloads(self) -> list:
+        pending = getattr(self, "downloads", None) or []
+        taken = list(pending)
+        pending.clear()
+        return taken
 
     def is_captcha(self) -> bool:
         try:
@@ -389,6 +441,12 @@ def run_tool(page: Page, tool: str, args: dict) -> str:
         return page.press(str(args.get("key") or "Enter"))
     if tool == "browser_screenshot":
         return "Снимок сделан."
+    if tool == UPLOAD_TOOL:
+        payload = args.get("_payload")
+        if not isinstance(payload, dict):
+            raise CloudError("not_found")
+        text = args.get("text") if isinstance(args.get("text"), str) else None
+        return page.upload(payload, ref, text)
     raise CloudError("unknown_tool")
 
 
@@ -439,7 +497,7 @@ def playwright_launcher():
             viewport=VIEWPORT,
             locale="ru-RU",
             timezone_id="Europe/Moscow",
-            accept_downloads=False,
+            accept_downloads=True,
             service_workers="block",
             storage_state=storage_state,
         )
@@ -486,9 +544,9 @@ class CloudBrowser:
 
     # --- public, any thread ---------------------------------------------------
 
-    def call(self, user_id: uuid.UUID, tool: str, args: dict) -> Result:
+    def call(self, user_id: uuid.UUID, tool: str, args: dict, task_id=None) -> Result:
         """Run one browser_* tool for the agent."""
-        return self._run(user_id, lambda page: run_tool(page, tool, args))
+        return self._run(user_id, lambda page: run_tool(page, tool, args), task_id=task_id)
 
     def search(
         self,
@@ -560,9 +618,9 @@ class CloudBrowser:
 
     # --- worker thread ----------------------------------------------------------
 
-    def _run(self, user_id: uuid.UUID, action: Callable[[Page], str], save: bool = True) -> Result:
+    def _run(self, user_id: uuid.UUID, action: Callable[[Page], str], save: bool = True, task_id=None) -> Result:
         try:
-            future = self._submit(lambda: self._do(user_id, action, save))
+            future = self._submit(lambda: self._do(user_id, action, save, task_id))
             return future.result(timeout=CALL_TIMEOUT_S)
         except CloudError as exc:
             return Result(f"Ошибка облачного браузера: {exc.code}", exc.code, self.frame(user_id))
@@ -614,18 +672,52 @@ class CloudBrowser:
         self.sessions[user_id] = page
         return page
 
-    def _do(self, user_id: uuid.UUID, action: Callable[[Page], str], save: bool) -> Result:
+    def _do(self, user_id: uuid.UUID, action: Callable[[Page], str], save: bool, task_id=None) -> Result:
         page = self._page(user_id)
         page.last_used = time.monotonic()
         try:
             text = action(page)
         except CloudError:
             self._capture(user_id, page)
+            self._collect(user_id, page, task_id)
             raise
         frame = self._capture(user_id, page)
         if save:
             self._save(user_id, page)
-        return Result(text, None, frame)
+        saved = self._collect(user_id, page, task_id)
+        notes = [heli_files.saved_note(info) if isinstance(info, heli_files.FileInfo) else info for info in saved]
+        if notes:
+            text = "\n".join(notes) + ("\n\n" + text if text else "")
+        return Result(text, None, frame, [info for info in saved if isinstance(info, heli_files.FileInfo)])
+
+    def _collect(self, user_id: uuid.UUID, page: Page, task_id=None) -> list:
+        """Move finished downloads into the file store. Returns FileInfo items and notes on failures."""
+        out: list = []
+        for download in page.take_downloads():
+            name = heli_files.safe_name(getattr(download, "suggested_filename", "") or "", fallback="загрузка")
+            try:
+                if download.failure():
+                    out.append(f"Скачать «{name}» не удалось.")
+                    continue
+                store = heli_files.store()
+                tmp_dir = store.root / ".incoming"
+                tmp_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+                tmp = tmp_dir / uuid.uuid4().hex
+                download.save_as(str(tmp))
+                out.append(store.put_path(user_id, name, tmp, heli_files.TO_PC, task_id))
+            except heli_files.FileError as exc:
+                limit = heli_files.human_size(heli_files.store().max_bytes)
+                reason = f"больше {limit}" if exc.code == "file_too_large" else "хранилище файлов заполнено"
+                out.append(f"Файл «{name}» не передан пользователю: {reason}.")
+            except Exception as exc:  # noqa: BLE001
+                log.info("download failed: %s", type(exc).__name__)
+                out.append(f"Скачать «{name}» не удалось.")
+            finally:
+                try:
+                    download.delete()
+                except Exception:  # noqa: BLE001
+                    pass
+        return out
 
     def _capture(self, user_id: uuid.UUID, page: Page) -> bytes | None:
         jpeg = page.frame()
@@ -711,6 +803,7 @@ def set_pool(value: CloudBrowser | None) -> None:
 # --- the agent loop's executor ------------------------------------------------------
 
 SEARCH_TOOL = "browser_search"
+UPLOAD_TOOL = "browser_upload"
 CAPTCHA_NOTICE = "Яндекс просит пройти капчу. Пройдите её на экране «Компьютер агента», и я продолжу."
 _SHOT_TOOLS = {"browser_screenshot"}
 
@@ -739,11 +832,28 @@ def execute(session, user, task_id, name: str, args: dict):
             on_captcha=lambda on: publish({"type": "notice", "text": CAPTCHA_NOTICE if on else ""}),
             halted=halted,
         )
+    elif name == UPLOAD_TOOL:
+        try:
+            info, blob = heli_files.store().get(user.id, str(args.get("file_id") or ""))
+            if info.direction != heli_files.FROM_PC:
+                raise heli_files.FileError("not_found")
+        except heli_files.FileError:
+            return ClientResult("Ошибка: нет такого приложенного файла", "file_not_found")
+        payload = {"name": info.name, "mimeType": _mime(info.name), "buffer": blob.read_bytes()}
+        result = browser.call(user.id, name, {**args, "_payload": payload}, task_id=task_id)
     else:
-        result = browser.call(user.id, name, args)
+        result = browser.call(user.id, name, args, task_id=task_id)
+    for info in result.files:
+        publish(heli_files.published(info))
     publish({"type": "screen", "version": browser.frame_version(user.id)})
     shot = result.frame if (name in _SHOT_TOOLS or result.error) else None
     return ClientResult(result.text, result.error, shot)
+
+
+def _mime(name: str) -> str:
+    import mimetypes
+
+    return mimetypes.guess_type(name)[0] or "application/octet-stream"
 
 
 def probe(browser: CloudBrowser) -> bool:
@@ -785,7 +895,7 @@ def _try_register() -> bool:
     _last_probe = time.monotonic()
     if not probe(pool()):
         return False
-    register_executor((*TOOL_NAMES, SEARCH_TOOL), execute)
+    register_executor((*TOOL_NAMES, SEARCH_TOOL, UPLOAD_TOOL), execute)
     _ready = True
     log.info("cloud browser on: max %s sessions", pool().max_sessions)
     return True

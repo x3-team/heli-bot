@@ -52,6 +52,17 @@ import { StepFeed, feedItem, type FeedItem } from "./agentFeed";
 import { CloudScreen, type CloudStatus } from "./cloudScreen";
 import { availableClientTools, localBrowserEnabled, runClientAction } from "./clientActions";
 import { Mascot, mascotLabel, type MascotState } from "./mascot";
+import {
+  MAX_FILE_BYTES,
+  canOpenFiles,
+  deliverFile,
+  formatSize,
+  openSavedFile,
+  pendingFiles,
+  revealSavedFile,
+  uploadAttachment,
+  type SavedFile,
+} from "./files";
 
 type View = "chat" | "limits" | "schedules" | "memory" | "settings";
 type Theme = "light" | "dark";
@@ -60,6 +71,10 @@ interface Message {
   id: string;
   role: "user" | "assistant";
   text: string;
+  /** User: names of the files attached to this message. */
+  attachments?: string[];
+  /** Assistant: a file Heli put on this computer. */
+  file?: SavedFile;
 }
 
 interface Thread {
@@ -415,7 +430,11 @@ function Workspace({
   const [notice, setNotice] = useState("");
   const [ask, setAsk] = useState<{ action: string; details: string; resolve: (ok: boolean) => void } | null>(null);
   const [autopause, setAutopause] = useState(() => readAutopause());
+  const [attachments, setAttachments] = useState<File[]>([]);
   const haltedRef = useRef(false);
+  const receiving = useRef(new Set<string>());
+  const activeRef = useRef<string | null>(null);
+  activeRef.current = activeId;
 
   const active = threads.find((thread) => thread.id === activeId) ?? null;
   const stopped = usage.blocked || limitTone(usage.weekPercent) === "stop" || limitTone(usage.monthPercent) === "stop";
@@ -458,6 +477,44 @@ function Workspace({
     return () => window.clearTimeout(timer);
   }, [apiBase, token, draft, busy, stopped]);
 
+  /** Files Heli downloaded or made in the cloud: put each on this PC once and show it in the chat. */
+  async function receiveFiles(threadId?: string | null) {
+    const waiting = await pendingFiles(apiBase, token).catch(() => []);
+    let target = threadId ?? activeRef.current;
+    for (const file of waiting) {
+      if (receiving.current.has(file.id)) continue;
+      receiving.current.add(file.id);
+      try {
+        const saved = await deliverFile(apiBase, token, file);
+        const message: Message = { id: crypto.randomUUID(), role: "assistant", text: "", file: saved };
+        if (target) {
+          setThreads((list) =>
+            list.map((thread) => (thread.id === target ? { ...thread, messages: [...thread.messages, message] } : thread)),
+          );
+        } else {
+          const created: Thread = { id: crypto.randomUUID(), title: `Файл: ${saved.name}`.slice(0, 42), messages: [message] };
+          setThreads((list) => [created, ...list]);
+          setActiveId(created.id);
+          target = created.id;
+        }
+      } catch (err) {
+        receiving.current.delete(file.id);
+        setError(err instanceof Error ? `Не получилось сохранить «${file.name}»: ${err.message}` : "Не получилось сохранить файл.");
+      }
+    }
+  }
+
+  useEffect(() => {
+    void receiveFiles();
+  }, [apiBase, token]);
+
+  function addAttachments(list: FileList | File[]) {
+    const picked = Array.from(list);
+    const tooBig = picked.find((file) => file.size > MAX_FILE_BYTES);
+    if (tooBig) setError(`«${tooBig.name}» больше 25 МБ, такой файл не передать.`);
+    setAttachments((current) => [...current, ...picked.filter((file) => file.size <= MAX_FILE_BYTES)].slice(0, 10));
+  }
+
   function newThread() {
     const thread: Thread = { id: crypto.randomUUID(), title: "Новая задача", messages: [] };
     setThreads((list) => [thread, ...list]);
@@ -478,7 +535,13 @@ function Workspace({
     setError("");
     setMascot("thinking");
     setComputerOpen(true);
-    const userMessage: Message = { id: crypto.randomUUID(), role: "user", text };
+    const files = attachments;
+    const userMessage: Message = {
+      id: crypto.randomUUID(),
+      role: "user",
+      text,
+      attachments: files.length ? files.map((file) => file.name) : undefined,
+    };
     setThreads((list) =>
       list.map((thread) =>
         thread.id === threadId
@@ -491,13 +554,21 @@ function Workspace({
       ),
     );
     setDraft("");
+    setAttachments([]);
     setFeed([]);
     setPaused(null);
     setNotice("");
     haltedRef.current = false;
     try {
+      const fileIds: string[] = [];
+      if (files.length) {
+        setNotice(files.length === 1 ? "Передаю файл на компьютер Heli…" : `Передаю файлы на компьютер Heli: ${files.length}…`);
+        for (const file of files) fileIds.push((await uploadAttachment(apiBase, token, file)).id);
+        setNotice("");
+      }
       setMascot("working");
       const result = await runAgentTask(apiBase, token, text, {
+        context: fileIds.length ? { files: fileIds } : undefined,
         clientTools: availableClientTools(),
         autopause,
         signal: controller.signal,
@@ -517,6 +588,8 @@ function Workspace({
             setMascot("working");
           } else if (event.type === "screen") {
             setScreenTick((n) => n + 1);
+          } else if (event.type === "file") {
+            void receiveFiles(threadId);
           } else if (event.type === "notice") {
             setNotice(String(event.text ?? ""));
           } else if (event.type === "step" && event.kind === "tool_result") {
@@ -564,6 +637,7 @@ function Workspace({
         current?.resolve(false);
         return null;
       });
+      void receiveFiles(threadId);
       void loadUsage(apiBase, token).then(setUsage).catch(() => undefined);
     }
   }
@@ -597,7 +671,7 @@ function Workspace({
   }
 
   function submitDraft() {
-    const text = draft.trim();
+    const text = draft.trim() || (attachments.length ? "Посмотри приложенные файлы." : "");
     if (!text || busy || stopped) return;
     let threadId = active?.id;
     if (!threadId) {
@@ -684,6 +758,9 @@ function Workspace({
             mascot={stopped ? "waiting" : mascot}
             messages={active?.messages ?? []}
             draft={draft}
+            attachments={attachments}
+            onAttach={addAttachments}
+            onDetach={(index) => setAttachments((list) => list.filter((_, i) => i !== index))}
             busy={busy}
             stopped={stopped}
             error={error}
@@ -758,6 +835,7 @@ function Workspace({
         feed={feed}
         busy={busy}
         screenTick={screenTick}
+        onInput={() => void receiveFiles()}
         onClose={() => setComputerOpen(false)}
       />
     </div>
@@ -772,6 +850,7 @@ const ICONS = {
   screen: "M4 5h16v11H4zM9 20h6M12 16v4",
   gear: "M12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1",
   send: "M12 19V5M6 11l6-6 6 6",
+  clip: "M20 11.5l-8.2 8.2a5 5 0 0 1-7.1-7.1l8.6-8.6a3.4 3.4 0 0 1 4.8 4.8l-8.6 8.6a1.7 1.7 0 0 1-2.4-2.4l7.9-7.9",
   close: "M6 6l12 12M18 6L6 18",
 };
 
@@ -802,6 +881,9 @@ function Chat({
   mascot,
   messages,
   draft,
+  attachments,
+  onAttach,
+  onDetach,
   busy,
   stopped,
   error,
@@ -826,6 +908,9 @@ function Chat({
   mascot: MascotState;
   messages: Message[];
   draft: string;
+  attachments: File[];
+  onAttach: (files: FileList | File[]) => void;
+  onDetach: (index: number) => void;
   busy: boolean;
   stopped: boolean;
   error: string;
@@ -848,6 +933,7 @@ function Chat({
 }) {
   const [comment, setComment] = useState("");
   const threadEnd = useRef<HTMLDivElement>(null);
+  const filePicker = useRef<HTMLInputElement>(null);
   const empty = messages.length === 0 && !pending && !stopped;
 
   useEffect(() => {
@@ -861,8 +947,48 @@ function Chat({
         event.preventDefault();
         onSubmit();
       }}
+      onDragOver={(event) => {
+        if (event.dataTransfer.types.includes("Files")) event.preventDefault();
+      }}
+      onDrop={(event) => {
+        if (!event.dataTransfer.files.length || stopped) return;
+        event.preventDefault();
+        onAttach(event.dataTransfer.files);
+      }}
     >
+      {attachments.length ? (
+        <ul className="attachments" aria-label="Приложенные файлы">
+          {attachments.map((file, index) => (
+            <li key={`${file.name}-${index}`}>
+              <span aria-hidden="true">📎</span> {file.name} <span className="muted">{formatSize(file.size)}</span>
+              <button type="button" className="chip-x" aria-label={`Убрать ${file.name}`} title="Убрать" onClick={() => onDetach(index)}>
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
       <div className="composer-box">
+        <input
+          ref={filePicker}
+          type="file"
+          multiple
+          hidden
+          onChange={(event) => {
+            if (event.target.files?.length) onAttach(event.target.files);
+            event.target.value = "";
+          }}
+        />
+        <button
+          type="button"
+          className="attach-button"
+          title="Приложить файл"
+          aria-label="Приложить файл"
+          disabled={stopped || busy}
+          onClick={() => filePicker.current?.click()}
+        >
+          <Icon d={ICONS.clip} />
+        </button>
         <textarea
           aria-label="Текст задачи"
           placeholder={stopped ? "Лимит исчерпан до сброса" : "Опишите задачу"}
@@ -884,7 +1010,7 @@ function Chat({
             </svg>
           </button>
         ) : (
-          <button type="submit" className="round-button" title="Отправить" aria-label="Отправить" disabled={stopped || !draft.trim()}>
+          <button type="submit" className="round-button" title="Отправить" aria-label="Отправить" disabled={stopped || (!draft.trim() && attachments.length === 0)}>
             <Icon d={ICONS.send} />
           </button>
         )}
@@ -925,7 +1051,9 @@ function Chat({
       </header>
       <div className="thread">
         {messages.map((message) =>
-          message.role === "assistant" ? (
+          message.file ? (
+            <FileCard key={message.id} file={message.file} />
+          ) : message.role === "assistant" ? (
             <div key={message.id} className="bubble assistant">
               <span className="bubble-avatar" aria-hidden="true">
                 <Mascot state="waiting" size={28} />
@@ -935,6 +1063,13 @@ function Chat({
           ) : (
             <div key={message.id} className="bubble user">
               {message.text}
+              {message.attachments?.length ? (
+                <span className="bubble-files">
+                  {message.attachments.map((name) => (
+                    <span key={name}>📎 {name}</span>
+                  ))}
+                </span>
+              ) : null}
             </div>
           ),
         )}
@@ -1017,6 +1152,45 @@ function Chat({
   );
 }
 
+function FileCard({ file }: { file: SavedFile }) {
+  const [note, setNote] = useState("");
+  const desktop = canOpenFiles() && Boolean(file.path);
+  async function act(action: () => Promise<void>) {
+    setNote("");
+    try {
+      await action();
+    } catch (err) {
+      setNote(String(err) === "risky_file" ? "Программы и скрипты Heli не открывает." : "Не получилось открыть.");
+    }
+  }
+  return (
+    <article className="card file-card">
+      <p className="muted">{desktop ? "Файл на вашем компьютере" : "Файл скачан браузером"}</p>
+      <h2>{file.name}</h2>
+      <p className="muted">
+        {desktop ? "Загрузки › Heli · " : ""}
+        {formatSize(file.size)}
+      </p>
+      {file.risky ? (
+        <p className="muted">Это программа или скрипт. Heli такие файлы не запускает: откройте сами, если доверяете источнику.</p>
+      ) : null}
+      {desktop ? (
+        <div className="row">
+          {file.risky ? null : (
+            <button type="button" data-emphasis="primary" onClick={() => void act(() => openSavedFile(file.path ?? ""))}>
+              Открыть
+            </button>
+          )}
+          <button type="button" onClick={() => void act(() => revealSavedFile(file.path))}>
+            Показать в папке
+          </button>
+        </div>
+      ) : null}
+      {note ? <p className="error">{note}</p> : null}
+    </article>
+  );
+}
+
 function Computer({
   apiBase,
   token,
@@ -1027,6 +1201,7 @@ function Computer({
   feed,
   screenTick,
   onPause,
+  onInput,
   onClose,
 }: {
   apiBase: string;
@@ -1038,6 +1213,7 @@ function Computer({
   feed: FeedItem[];
   screenTick: number;
   onPause: () => void;
+  onInput: () => void;
   onClose: () => void;
 }) {
   const [cloud, setCloud] = useState<CloudStatus | null>(null);
@@ -1102,6 +1278,7 @@ function Computer({
           tick={screenTick}
           busy={busy}
           onStatus={setCloud}
+          onInput={onInput}
           placeholder={<Mascot state={state} />}
         />
         {cloud?.enabled ? null : (

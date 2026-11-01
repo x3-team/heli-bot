@@ -195,7 +195,9 @@ def test_run_turn_calls_tools_and_feeds_results_back(session, monkeypatch) -> No
     assert opened == ["https://www.amocrm.ru/"]
     assert turn.text == "Официальный сайт: https://www.amocrm.ru/"
     assert "tools" not in script.requests[0]
-    assert {tool["function"]["name"] for tool in script.requests[1]["tools"]} == {"web_search", "open_url"}
+    offered = {tool["function"]["name"] for tool in script.requests[1]["tools"]}
+    # save_file / read_file come with the files bridge (app/files.py) when the app registered it.
+    assert offered - {"save_file", "read_file"} == {"web_search", "open_url"}
     final_messages = script.requests[2]["messages"]
     assert final_messages[-2]["tool_calls"][0]["function"]["name"] == "open_url"
     assert final_messages[-1] == {"role": "tool", "tool_call_id": "call_1", "content": final_messages[-1]["content"]}

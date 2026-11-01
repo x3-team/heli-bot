@@ -21,6 +21,9 @@ const ERRORS: Record<string, string> = {
   local_browser_required: "Нужен локальный Chrome или Edge на этом компьютере.",
   bad_browser: "Поддерживаются только Chrome и Edge.",
   cloud_running: "Сначала остановите облачный браузер.",
+  file_too_large: "Файл больше 25 МБ.",
+  storage_full: "Место для файлов на сервере закончилось. Попробуйте позже.",
+  empty_file: "Файл пустой.",
 };
 
 export function mapErrorCode(code: string): string {

@@ -126,6 +126,10 @@ def system_prompt(tools: list[dict], guide: str | None = None, today: str | None
         text += CLOUD_HINT if "browser_open" in server_executed() else BROWSER_HINT
     if CONFIRM_TOOL in names:
         text += CONFIRM_HINT
+    if "save_file" in names:
+        from app.files import FILES_HINT
+
+        text += FILES_HINT
     if guide:
         text += "\n\n" + guide
     return text
@@ -181,7 +185,11 @@ def execute_task(
     tools = tools_for(offered)
     browser_search = BROWSER_SEARCH in declared and search_provider() == "wikipedia"
 
-    prompt = with_memory(task.request_text, relevant(session, user, task.request_text))
+    from app.files import attachments_note
+
+    attached = (task.context or {}).get("files") if isinstance(task.context, dict) else None
+    request = task.request_text + attachments_note(user.id, attached if isinstance(attached, list) else [])
+    prompt = with_memory(request, relevant(session, user, task.request_text))
     classified = metered_complete(
         session, user, task.id, client, "heli-fast", classification_messages(prompt), max_tokens=80
     )

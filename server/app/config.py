@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     # Libraries unpacked without root by remote-install.sh, handed to Chromium as LD_LIBRARY_PATH.
     cloud_browser_libs: str = Field(default="", validation_alias="CLOUD_BROWSER_LIBS")
     cloud_browser_profiles: str = Field(default="var/browser-profiles", validation_alias="CLOUD_BROWSER_PROFILES")
+    # Files between the cloud computer and the user's PC (app/files.py).
+    files_dir: str = Field(default="var/files", validation_alias="HELI_FILES_DIR")
+    files_max_mb: int = Field(default=25, validation_alias="HELI_FILES_MAX_MB")
+    files_account_mb: int = Field(default=200, validation_alias="HELI_FILES_ACCOUNT_MB")
 
     def __repr__(self) -> str:
         return f"Settings(app_env={self.app_env!r}, port={self.port})"

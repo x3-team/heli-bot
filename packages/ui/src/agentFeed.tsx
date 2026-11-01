@@ -18,6 +18,9 @@ const TOOL_LABELS: Record<string, string> = {
   browser_screenshot: "Снимок экрана",
   ask_confirmation: "Спрашиваю разрешение",
   use_computer: "Работаю на компьютере",
+  save_file: "Кладу файл вам на компьютер",
+  read_file: "Читаю ваш файл",
+  browser_upload: "Загружаю ваш файл на сайт",
 };
 
 function argSummary(tool: string, args: Record<string, unknown>): string {
@@ -28,6 +31,7 @@ function argSummary(tool: string, args: Record<string, unknown>): string {
   if (tool === "browser_press") return String(args.key ?? "");
   if (tool === "ask_confirmation") return String(args.action ?? "");
   if (tool === "use_computer") return String(args.goal ?? "");
+  if (tool === "save_file") return String(args.name ?? "");
   return "";
 }
 
@@ -60,6 +64,7 @@ export function feedItem(event: AgentEvent): FeedItem | null {
       tone: "muted",
     };
   }
+  if (event.type === "file") return { key, icon: "↓", text: `Файл в Загрузки › Heli: ${String(event.name ?? "")}` };
   if (event.type === "resumed") return { key, icon: "▶", text: "Продолжаю", tone: "muted" };
   if (event.type === "error") return { key, icon: "!", text: "Ошибка", tone: "error" };
   return null;
