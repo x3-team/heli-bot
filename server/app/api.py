@@ -968,3 +968,81 @@ def export_trajectories(
             lines.append(json.dumps(document, ensure_ascii=False))
     body = ("\n".join(lines) + "\n") if lines else ""
     return PlainTextResponse(body, media_type="application/x-ndjson")
+
+
+# --- Heli's own browser on the server (the «Компьютер агента» panel) ---------------------
+
+from fastapi.responses import Response  # noqa: E402
+
+from app import cloud_browser  # noqa: E402
+
+_CLOUD_STATUS = {"browser_busy": 429, "browser_unavailable": 503, "bad_input": 400, "bad_key": 400,
+                 "bad_url": 400, "blocked_address": 400, "dns_failed": 400}
+
+
+def _cloud_on() -> None:
+    if not cloud_browser.ready():
+        raise HTTPException(status_code=503, detail="cloud_browser_off")
+
+
+@router.get("/cloud-browser")
+def cloud_browser_status(user: User = Depends(get_current_user)) -> dict:
+    if not cloud_browser.ready():
+        return {
+            "enabled": False,
+            "running": False,
+            "version": 0,
+            "url": "",
+            "title": "",
+            "saved_logins": False,
+            "error": cloud_browser.last_error(),
+        }
+    return {"enabled": True, **cloud_browser.pool().status(user.id)}
+
+
+@router.get("/cloud-browser/screen", response_model=None)
+def cloud_browser_screen(user: User = Depends(get_current_user)) -> Response:
+    _cloud_on()
+    jpeg = cloud_browser.pool().frame(user.id)
+    if jpeg is None:
+        raise HTTPException(status_code=404, detail="no_screen")
+    return Response(
+        content=jpeg,
+        media_type="image/jpeg",
+        headers={"cache-control": "no-store", "x-screen-version": str(cloud_browser.pool().frame_version(user.id))},
+    )
+
+
+class CloudInputBody(BaseModel):
+    kind: str = Field(pattern="^(click|text|key|scroll|open|back|refresh)$")
+    x: float | None = Field(default=None, ge=0, le=1)
+    y: float | None = Field(default=None, ge=0, le=1)
+    text: str | None = Field(default=None, max_length=2000)
+    key: str | None = Field(default=None, max_length=32)
+    dy: float | None = Field(default=None, ge=-3000, le=3000)
+    url: str | None = Field(default=None, max_length=2000)
+
+
+@router.post("/cloud-browser/input")
+def cloud_browser_input(body: CloudInputBody, user: User = Depends(get_current_user)) -> dict:
+    """The user's own click or keystroke on the live screen: sign in to a service, pass a captcha."""
+    _cloud_on()
+    result = cloud_browser.pool().user_input(user.id, body.model_dump(exclude_none=True))
+    if result.error:
+        raise HTTPException(status_code=_CLOUD_STATUS.get(result.error, 502), detail=result.error)
+    return cloud_browser.pool().status(user.id)
+
+
+@router.post("/cloud-browser/stop")
+def cloud_browser_stop(user: User = Depends(get_current_user)) -> dict:
+    _cloud_on()
+    cloud_browser.pool().stop(user.id)
+    return cloud_browser.pool().status(user.id)
+
+
+@router.post("/cloud-browser/forget")
+def cloud_browser_forget(user: User = Depends(get_current_user)) -> dict:
+    """Sign out of every site in the cloud browser and delete the saved sign-ins."""
+    _cloud_on()
+    cloud_browser.pool().forget(user.id)
+    return cloud_browser.pool().status(user.id)

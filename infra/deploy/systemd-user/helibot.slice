@@ -2,4 +2,7 @@
 Description=Heli bot resource cap (user slice)
 
 [Slice]
-MemoryMax=256M
+# API ~150 MB + Heli's cloud browser: Chromium ~370 MB, plus ~150-300 MB per open account.
+# Enough for CLOUD_BROWSER_MAX=2. The host is shared, so this is a ceiling, not a reservation.
+MemoryMax=1536M
+CPUQuota=150%
