@@ -54,22 +54,38 @@ export type ReadyUpdate = {
   install: () => Promise<void>;
 };
 
+export type UpdateCheck =
+  | { kind: "web" }
+  | { kind: "latest" }
+  | { kind: "ready"; update: ReadyUpdate }
+  | { kind: "error"; message: string };
+
+export async function appVersion(): Promise<string | null> {
+  if (!tauri()) return null;
+  try {
+    const { getVersion } = await import("@tauri-apps/api/app");
+    return await getVersion();
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Looks for a newer signed build and downloads it in the background.
- * Returns null when there is nothing to do (web build, no update, offline).
  * Installing on Windows closes the app, runs the installer quietly and opens Heli again.
  */
-export async function prepareAppUpdate(): Promise<ReadyUpdate | null> {
-  if (!tauri()) return null;
+export async function prepareAppUpdate(): Promise<UpdateCheck> {
+  if (!tauri()) return { kind: "web" };
   try {
     const { check } = await import("@tauri-apps/plugin-updater");
     const update = await check();
-    if (!update) return null;
+    if (!update) return { kind: "latest" };
     await update.download();
     pushClientLog(`update ${update.currentVersion} -> ${update.version} downloaded`);
-    return { version: update.version, install: () => update.install() };
+    return { kind: "ready", update: { version: update.version, install: () => update.install() } };
   } catch (err) {
-    pushClientLog(`update check failed: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
+    const message = err instanceof Error ? err.message : String(err);
+    pushClientLog(`update check failed: ${message}`);
+    return { kind: "error", message };
   }
 }

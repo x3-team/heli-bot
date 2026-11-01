@@ -1,7 +1,7 @@
 export { Shell } from "./app";
 export { prepareAppUpdate, handControlBack, readClientLog, resetAgentControl } from "./desktop";
-export type { ReadyUpdate } from "./desktop";
-export { UpdateNotice } from "./updateNotice";
+export type { ReadyUpdate, UpdateCheck } from "./desktop";
+export { AppVersionCard, UpdateNotice } from "./updateNotice";
 export { INTEGRATION_LOGOS } from "./integrations";
 export { Mascot, mascotLabel, type MascotState } from "./mascot";
 export { clampPercent, confirmationNeeded, limitTone } from "./behavior";
