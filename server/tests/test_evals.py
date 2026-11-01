@@ -170,3 +170,30 @@ def test_confirmation_reply_matches_prod_loop() -> None:
     no = World.build(confirm="reject").call("ask_confirmation", {"action": "mail_send", "details": ""})
     assert approved(ToolResult(yes["content"])) and yes["approved"] is True
     assert not approved(ToolResult(no["content"])) and no["approved"] is False
+
+
+@pytest.mark.parametrize("query,url", [
+    ("погода Казань 5 ноября 2026", "https://pogoda.example/kazan"),
+    ("курс доллара ЦБ РФ 2 ноября 2026", "https://cbr.example/currency"),
+    ("ИНН 7712345671 выручка 2025", "https://rusprofile.example/id/7712345671"),
+])
+def test_web_search_is_forgiving_like_real_search(query, url) -> None:
+    results = World.build().call("web_search", {"query": query})["results"]
+    assert results and results[0]["url"] == url
+
+
+def test_mail_search_ranks_partial_matches() -> None:
+    found = World.build().call("mail_search", {"query": "лента 48 мм Мария Белова", "folder": "sent"})["messages"]
+    assert [m["id"] for m in found][:1] == ["m5"]
+    assert World.build().call("web_search", {"query": "квантовый телепорт"})["results"] == []
+
+
+def test_runner_passes_world_date_when_agent_wants_it() -> None:
+    seen = {}
+
+    def dated(task, tools, call_tool, budget, today=None):
+        seen["today"] = today
+        return noop_agent(task, tools, call_tool, budget)
+
+    run_scenario(SCENARIOS[0], dated)
+    assert seen["today"] == "2026-11-02"

@@ -11,7 +11,7 @@ import copy
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 BASE_WORLD_PATH = Path(__file__).with_name("base_world.json")
 
@@ -134,20 +134,33 @@ def _digits(value: Any) -> str:
     return "".join(ch for ch in str(value) if ch.isdigit())
 
 
-def _match(query: str, *fields: Any) -> bool:
+def _hits(query: str, *fields: Any) -> tuple[int, int]:
+    """(совпавших слов запроса, всего слов). Слова сравниваются по основе, числа — по цифрам."""
     words = [w for w in _norm(query).replace(",", " ").split() if len(w) > 1]
     hay = _norm(" ".join(str(f) for f in fields if f is not None))
     hay_digits = _digits(hay)
-    if not words:
-        return True
+    hits = 0
     for word in words:
         stem = word[:max(4, len(word) - 2)] if not word.isdigit() else word
-        if stem in hay:
-            continue
-        if word.isdigit() and word in hay_digits:
-            continue
-        return False
-    return True
+        if stem in hay or (word.isdigit() and word in hay_digits):
+            hits += 1
+    return hits, len(words)
+
+
+def _match(query: str, *fields: Any) -> bool:
+    """Строгий фильтр для CRM и учётных систем: все слова запроса."""
+    hits, total = _hits(query, *fields)
+    return hits == total
+
+
+def _ranked(query: str, items: list, fields: Callable[[Any], tuple]) -> list:
+    """Как поиск: совпала хотя бы половина слов, лучшие сверху."""
+    scored = []
+    for index, item in enumerate(items):
+        hits, total = _hits(query, *fields(item))
+        if total == 0 or (hits and hits * 2 >= total):
+            scored.append((-(hits / total if total else 1), index, item))
+    return [item for _, _, item in sorted(scored, key=lambda row: row[:2])]
 
 
 class ToolError(Exception):
@@ -196,13 +209,9 @@ class World:
 
     # --- интернет ---------------------------------------------------------
     def _t_web_search(self, query: str) -> dict:
-        hits = []
-        for page in self.state["web"]:
-            if _match(query, page["title"], page.get("keywords", "")) or any(
-                _match(query, k) for k in page.get("aliases", [])
-            ):
-                hits.append({"title": page["title"], "url": page["url"], "snippet": page["text"][:160]})
-        return {"results": hits[:5]}
+        pages = _ranked(query, self.state["web"],
+                        lambda p: (p["title"], p.get("keywords", ""), " ".join(p.get("aliases", [])), p["text"]))
+        return {"results": [{"title": p["title"], "url": p["url"], "snippet": p["text"][:160]} for p in pages[:5]]}
 
     def _t_open_url(self, url: str) -> dict:
         clean = url.strip().rstrip("/").removeprefix("https://").removeprefix("http://").removeprefix("www.")
@@ -380,8 +389,8 @@ class World:
 
     # --- Почта Яндекс 360 -------------------------------------------------
     def _t_mail_search(self, query: str, folder: str = "") -> dict:
-        rows = [m for m in self.state["mail"]["messages"]
-                if (not folder or m["folder"] == folder) and _match(query, m["from"], m["to"], m["subject"], m["body"])]
+        box = [m for m in self.state["mail"]["messages"] if not folder or m["folder"] == folder]
+        rows = _ranked(query, box, lambda m: (m["from"], m["to"], m["subject"], m["body"], m["date"]))
         return {"messages": [{k: m[k] for k in ("id", "folder", "from", "to", "subject", "date")} for m in rows]}
 
     def _t_mail_read(self, message_id: str) -> dict:
