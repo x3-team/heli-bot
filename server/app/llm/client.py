@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 
 from openai import OpenAI
@@ -24,12 +24,33 @@ class HeliError(Exception):
 
 
 @dataclass
+class ToolCall:
+    id: str
+    name: str
+    arguments: str
+
+
+@dataclass
 class Completion:
     alias: str
     text: str
     input_tokens: int
     output_tokens: int
     cost_rub: Decimal
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    # Extra assistant fields some models need echoed back on the next request
+    # (reasoning traces during tool use).
+    extra: dict = field(default_factory=dict)
+
+    def assistant_message(self) -> dict:
+        message: dict = {"role": "assistant", "content": self.text or None}
+        if self.tool_calls:
+            message["tool_calls"] = [
+                {"id": call.id, "type": "function", "function": {"name": call.name, "arguments": call.arguments}}
+                for call in self.tool_calls
+            ]
+        message.update(self.extra)
+        return message
 
     def __repr__(self) -> str:
         return (
@@ -50,17 +71,27 @@ class HeliClient:
         base_url = os.environ.get("HELI_BASE_URL", "https://getheli.ru/v1")
         return cls(OpenAI(api_key=key, base_url=base_url, max_retries=0))
 
-    def complete(self, alias: str, messages: list[dict], max_tokens: int = 256) -> Completion:
+    def complete(
+        self,
+        alias: str,
+        messages: list[dict],
+        max_tokens: int = 256,
+        tools: list[dict] | None = None,
+    ) -> Completion:
         try:
             model = upstream(alias)
         except CatalogError as exc:
             raise HeliError(exc.code) from None
+        kwargs: dict = {}
+        if tools:
+            kwargs["tools"] = tools
         try:
             response = self._client.chat.completions.create(
                 model=model,
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=0,
+                **kwargs,
             )
         except Exception:
             log.info("model request failed alias=%s", alias)
@@ -69,14 +100,37 @@ class HeliClient:
         input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
         output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
         text = ""
+        calls: list[ToolCall] = []
+        extra: dict = {}
         if response.choices:
-            text = response.choices[0].message.content or ""
+            message = response.choices[0].message
+            text = message.content or ""
+            for call in getattr(message, "tool_calls", None) or []:
+                function = getattr(call, "function", None)
+                if function is None:
+                    continue
+                calls.append(
+                    ToolCall(
+                        id=str(getattr(call, "id", "") or f"call_{len(calls)}"),
+                        name=str(getattr(function, "name", "") or ""),
+                        arguments=str(getattr(function, "arguments", "") or "{}"),
+                    )
+                )
+            if calls:
+                for key in ("reasoning_content", "reasoning", "reasoning_details"):
+                    value = getattr(message, key, None)
+                    if value is None:
+                        value = (getattr(message, "model_extra", None) or {}).get(key)
+                    if value:
+                        extra[key] = value
         return Completion(
             alias=alias,
             text=text,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cost_rub=cost_rub(alias, input_tokens, output_tokens),
+            tool_calls=calls,
+            extra=extra,
         )
 
     def embed(self, text: str) -> list[float]:
