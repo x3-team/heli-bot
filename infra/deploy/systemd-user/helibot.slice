@@ -2,7 +2,8 @@
 Description=Heli bot resource cap (user slice)
 
 [Slice]
-# API ~150 MB + Heli's cloud browser: Chromium ~370 MB, plus ~150-300 MB per open account.
-# Enough for CLOUD_BROWSER_MAX=2. The host is shared, so this is a ceiling, not a reservation.
+# API ~150 MB + Heli's cloud browser: one Chromium process per account, ~370 MB for the first,
+# ~200-300 MB for each next. remote-install.sh raises this to 2560M (4 browsers) when the host
+# has 2.6 GB free. The host is shared, so this is a ceiling, not a reservation.
 MemoryMax=1536M
 CPUQuota=150%

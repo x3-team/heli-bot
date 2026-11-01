@@ -20,6 +20,7 @@ jobs:
           bash -n infra/deploy/ensure-port-in-env.sh
           bash -n infra/deploy/ensure-open-access-in-env.sh
           bash -n infra/deploy/ensure-cloud-browser-in-env.sh
+          bash -n infra/deploy/ensure-vault-key-in-env.sh
           test -f infra/deploy/systemd-user/heli-bot-api.service
           test -f infra/deploy/systemd-system/heli-bot-api.service
 
@@ -103,6 +104,8 @@ jobs:
             "$APP_DIR/infra/deploy/ensure-open-access-in-env.sh" "$ENV_FILE"
             chmod +x "$APP_DIR/infra/deploy/ensure-cloud-browser-in-env.sh" 2>/dev/null || true
             "$APP_DIR/infra/deploy/ensure-cloud-browser-in-env.sh" "$ENV_FILE"
+            chmod +x "$APP_DIR/infra/deploy/ensure-vault-key-in-env.sh" 2>/dev/null || true
+            "$APP_DIR/infra/deploy/ensure-vault-key-in-env.sh" "$ENV_FILE"
             if [ ! -f "$ENV_FILE" ]; then
               echo "[heli-deploy] env file still missing after bootstrap" >&2
               exit 1

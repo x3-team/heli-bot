@@ -74,6 +74,19 @@ fi
 CLOUD_ON=0
 if grep -Eq '^CLOUD_BROWSER_ENABLED=(1|true|yes)' "$ENV_FILE"; then CLOUD_ON=1; fi
 
+# How many accounts get a browser at once. Each account has its own Chromium process:
+# ~370 MB for the first, ~200-300 MB for each next one. With 2.6 GB free: 4 browsers in a 2.5 GB cap.
+CLOUD_SLICE_MB=1536
+CLOUD_MAX=2
+if [ "$CLOUD_ON" = 1 ] && [ "$FREE_MB" -ge "${CLOUD_BIG_FREE_MB:-2600}" ]; then
+  CLOUD_SLICE_MB=2560
+  CLOUD_MAX=4
+fi
+if [ "$CLOUD_ON" = 1 ] && grep -Eq '^CLOUD_BROWSER_MAX=(2|4)$' "$ENV_FILE"; then
+  sed -i "s/^CLOUD_BROWSER_MAX=.*/CLOUD_BROWSER_MAX=$CLOUD_MAX/" "$ENV_FILE"
+fi
+log "cloud browser: $(grep -E '^CLOUD_BROWSER_MAX=' "$ENV_FILE" || echo 'CLOUD_BROWSER_MAX unset') in a ${CLOUD_SLICE_MB} MB cap"
+
 # Heli's own browser on this host (CLOUD_BROWSER_ENABLED=1 in .env): Playwright + Chromium, no root.
 if [ "$CLOUD_ON" = 1 ]; then
   log "cloud browser: installing Playwright Chromium"
@@ -128,12 +141,15 @@ else
   python -m pip install -e "$APP_DIR/server"
 fi
 
+# Secrets in the env file must not reach the deploy log: no tracing while it is read.
+{ set +x; } 2>/dev/null
 set +u
 set -a
 # shellcheck disable=SC1090
 source "$ENV_FILE"
 set +a
 set -u
+set -x
 
 export DATABASE_URL="${DATABASE_URL:-sqlite:///$APP_DIR/var/heli.db}"
 export HOST="${HOST:-127.0.0.1}"
@@ -146,6 +162,12 @@ cd "$APP_DIR/server"
 alembic upgrade head
 
 install -m 0644 "$APP_DIR/infra/deploy/systemd-user/helibot.slice" "$APP_DIR/.config/systemd/user/helibot.slice"
+if [ "$CLOUD_ON" = 1 ]; then
+  sed -i "s/^MemoryMax=.*/MemoryMax=${CLOUD_SLICE_MB}M/" "$APP_DIR/.config/systemd/user/helibot.slice"
+  if [ "$CLOUD_SLICE_MB" -gt 1536 ]; then
+    sed -i 's/^CPUQuota=.*/CPUQuota=250%/' "$APP_DIR/.config/systemd/user/helibot.slice"
+  fi
+fi
 if [ "$CLOUD_ON" != 1 ]; then
   # No cloud browser: the API alone keeps the old 256 MB cap.
   sed -i -e 's/^MemoryMax=.*/MemoryMax=256M/' -e '/^CPUQuota=/d' "$APP_DIR/.config/systemd/user/helibot.slice"

@@ -147,6 +147,50 @@ def test_pool_limit(browser):
     assert third.error == "browser_busy"
 
 
+def test_idle_browser_gives_its_place_to_the_next_account(browser, monkeypatch):
+    a, b, c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    browser.call(a, "browser_open", {"url": "https://amocrm.ru"})
+    browser.call(b, "browser_read", {})
+    browser.sessions[a].last_used -= cb.EVICT_IDLE_S + 1
+    third = browser.call(c, "browser_read", {})
+    assert third.error is None
+    assert set(browser.sessions) == {b, c}
+    # a's sign-ins were saved before its browser closed
+    assert browser.store.load(a)["cookies"][0]["value"] == "1"
+
+
+def test_watched_browser_is_not_evicted(browser):
+    a, b = uuid.uuid4(), uuid.uuid4()
+    browser.call(a, "browser_read", {})
+    browser.call(b, "browser_read", {})
+    browser.sessions[a].last_used -= cb.EVICT_IDLE_S + 1
+    browser._watched[a] = cb.time.monotonic()
+    assert browser.call(uuid.uuid4(), "browser_read", {}).error == "browser_busy"
+
+
+def test_agent_waits_in_line_for_a_free_browser(browser):
+    a, b, c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    browser.call(a, "browser_read", {})
+    browser.call(b, "browser_read", {})
+    notices: list[bool] = []
+
+    def on_wait(on: bool) -> None:
+        notices.append(on)
+        if on:
+            threading.Timer(0.05, lambda: browser.stop(a)).start()
+
+    assert browser.reserve(c, wait_s=5, on_wait=on_wait, poll_s=0.02) is None
+    assert notices == [True, False]
+    assert c in browser.sessions
+
+
+def test_waiting_in_line_ends_on_stop_or_timeout(browser):
+    browser.call(uuid.uuid4(), "browser_read", {})
+    browser.call(uuid.uuid4(), "browser_read", {})
+    assert browser.reserve(uuid.uuid4(), wait_s=0.05, poll_s=0.01) == "browser_busy"
+    assert browser.reserve(uuid.uuid4(), wait_s=5, halted=lambda: True, poll_s=0.01) == "browser_busy"
+
+
 def test_sign_ins_are_saved_encrypted_and_restored(browser, tmp_path):
     user = uuid.uuid4()
     browser.call(user, "browser_open", {"url": "https://amocrm.ru"})
