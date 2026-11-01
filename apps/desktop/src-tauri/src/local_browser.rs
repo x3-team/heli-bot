@@ -60,6 +60,10 @@ pub fn launch(profile: &Path) -> Result<(String, u16), String> {
         .arg(format!("--user-data-dir={}", profile.display()))
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
+        // The user keeps working in other windows: the agent's window must not stall when it is covered or minimized.
+        .arg("--disable-backgrounding-occluded-windows")
+        .arg("--disable-renderer-backgrounding")
+        .arg("--disable-background-timer-throttling")
         .arg("about:blank")
         .spawn()
         .map_err(|_| "browser_start_failed".to_string())?;
