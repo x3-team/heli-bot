@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="240" height="240" fill="none" role="img" aria-label="Хели"><title>Хели</title>
+<g><rect x="18" y="21" width="84" height="4.5" rx="2.25" fill="#111412"/></g>
+<rect x="57.5" y="23" width="5" height="13" rx="2" fill="#111412"/>
+<rect x="27" y="33" width="66" height="56" rx="28" fill="#111412"/>
+<rect x="36" y="46" width="48" height="24" rx="12" fill="#28312C"/>
+<rect x="44" y="56" width="13" height="5" rx="2.5" fill="#3FD08F"/><rect x="63" y="56" width="13" height="5" rx="2.5" fill="#3FD08F"/>
+<path d="M47 88 L44 99 M73 88 L76 99 M34 99 H86" stroke="#111412" stroke-width="4.5" stroke-linecap="round" fill="none"/>
+</svg>
