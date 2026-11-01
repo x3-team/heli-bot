@@ -13,6 +13,8 @@ def session(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", "test-jwt-secret-padding-32bytes!")
     monkeypatch.setenv("TRAJECTORY_HASH_PEPPER", "test-pepper")
     monkeypatch.setenv("DATABASE_URL", "sqlite://")
+    # Most tests sign up directly; invite-only sign-up has its own tests.
+    monkeypatch.setenv("HELI_INVITE_ONLY", "0")
     engine = make_engine("sqlite://")
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
