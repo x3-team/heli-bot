@@ -293,3 +293,23 @@ input, textarea {
 .step-feed li[data-tone="error"] {
   color: var(--danger, #c0392b);
 }
+
+/* Live screen of Heli's cloud browser in «Компьютер агента». */
+.cloud { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.cloud-bar { display: flex; gap: 6px; }
+.cloud-bar input { flex: 1; min-width: 0; }
+.cloud-screen {
+  border-radius: 16px;
+  background: var(--screen);
+  overflow: hidden;
+  aspect-ratio: 1280 / 800;
+  display: grid;
+  place-items: center;
+  outline-offset: 2px;
+}
+.cloud-screen:focus-visible { outline: 2px solid var(--accent, currentColor); }
+.cloud-screen img { width: 100%; height: 100%; object-fit: contain; cursor: pointer; user-select: none; display: block; }
+.cloud-empty { display: grid; gap: 12px; justify-items: center; padding: 16px; }
+.cloud-empty .mascot, .cloud-empty .mascot-working { width: min(140px, 100%); height: auto; }
+.cloud-hint { margin: 0; font-size: 13px; }
+button.link { background: none; border: 0; padding: 0; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; }

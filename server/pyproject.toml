@@ -21,6 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+cloud = ["playwright==1.49.1"]
 
 [build-system]
 requires = ["setuptools>=68"]

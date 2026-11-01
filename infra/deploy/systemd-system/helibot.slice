@@ -2,4 +2,4 @@
 Description=Heli bot resource cap
 
 [Slice]
-MemoryMax=256M
+MemoryMax=1536M

@@ -12,6 +12,8 @@ User=helibot
 Group=helibot
 WorkingDirectory=/opt/heli-bot/server
 EnvironmentFile=-/opt/heli-bot/.env
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/heli-bot/var/ms-playwright
+Environment=CLOUD_BROWSER_PROFILES=/opt/heli-bot/var/browser-profiles
 ExecStart=/opt/heli-bot/venv/bin/python -m app.main
 Restart=on-failure
 RestartSec=5

@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     )
     browser_max: int = Field(default=8, validation_alias="BROWSER_MAX")
     browser_image: str = Field(default="heli-browser:local", validation_alias="BROWSER_IMAGE")
+    # Heli's own browser on this server (app/cloud_browser.py). Needs `pip install -e .[cloud]`.
+    cloud_browser_enabled: bool = Field(default=False, validation_alias="CLOUD_BROWSER_ENABLED")
+    cloud_browser_max: int = Field(default=2, validation_alias="CLOUD_BROWSER_MAX")
+    cloud_browser_executable: str = Field(default="", validation_alias="CLOUD_BROWSER_EXECUTABLE")
+    cloud_browser_profiles: str = Field(default="var/browser-profiles", validation_alias="CLOUD_BROWSER_PROFILES")
 
     def __repr__(self) -> str:
         return f"Settings(app_env={self.app_env!r}, port={self.port})"

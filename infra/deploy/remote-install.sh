@@ -59,7 +59,27 @@ source "$APP_DIR/venv/bin/activate"
 
 export PIP_NO_CACHE_DIR=1
 python -m pip install -U pip wheel
-python -m pip install -e "$APP_DIR/server"
+
+log "host: $(nproc 2>/dev/null || echo '?') CPU"
+free -m 2>/dev/null || true
+
+# Heli's own browser on this host (CLOUD_BROWSER_ENABLED=1 in .env): Playwright + Chromium, no root.
+if grep -Eq '^CLOUD_BROWSER_ENABLED=(1|true|yes)' "$ENV_FILE"; then
+  log "cloud browser: installing Playwright Chromium"
+  python -m pip install -e "$APP_DIR/server[cloud]"
+  export PLAYWRIGHT_BROWSERS_PATH="$APP_DIR/var/ms-playwright"
+  python -m playwright install chromium-headless-shell || python -m playwright install chromium
+  CHROME_BIN="$(find "$PLAYWRIGHT_BROWSERS_PATH" -type f \( -name chrome-headless-shell -o -name chrome \) | head -n 1 || true)"
+  if [ -n "$CHROME_BIN" ]; then
+    MISSING="$(ldd "$CHROME_BIN" 2>/dev/null | grep 'not found' || true)"
+    if [ -n "$MISSING" ]; then
+      log "cloud browser: Chromium is missing system libraries (ask the host admin to run 'playwright install-deps chromium'):"
+      echo "$MISSING"
+    fi
+  fi
+else
+  python -m pip install -e "$APP_DIR/server"
+fi
 
 set +u
 set -a

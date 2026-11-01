@@ -48,7 +48,8 @@ import {
 import { INTEGRATION_LOGOS } from "./integrations";
 import { controlRun, runAgentTask, stoppedNote, type AgentEvent } from "./agentRun";
 import { StepFeed, feedItem, type FeedItem } from "./agentFeed";
-import { availableClientTools, runClientAction } from "./clientActions";
+import { CloudScreen, type CloudStatus } from "./cloudScreen";
+import { availableClientTools, localBrowserEnabled, runClientAction } from "./clientActions";
 import { Mascot, avatarFor, mascotLabel, type MascotState } from "./mascot";
 
 type View = "chat" | "limits" | "schedules" | "memory" | "settings";
@@ -406,6 +407,7 @@ function Workspace({
   const [consents, setConsents] = useState({ pdn: true, training: false });
   const [runTaskId, setRunTaskId] = useState<string | null>(null);
   const [feed, setFeed] = useState<FeedItem[]>([]);
+  const [screenTick, setScreenTick] = useState(0);
   const [paused, setPaused] = useState<{ reason: string; spent?: string; estimate?: string } | null>(null);
   const [notice, setNotice] = useState("");
   const [ask, setAsk] = useState<{ action: string; details: string; resolve: (ok: boolean) => void } | null>(null);
@@ -509,6 +511,8 @@ function Workspace({
           } else if (event.type === "resumed") {
             setPaused(null);
             setMascot("working");
+          } else if (event.type === "screen") {
+            setScreenTick((n) => n + 1);
           } else if (event.type === "notice") {
             setNotice(String(event.text ?? ""));
           } else if (event.type === "step" && event.kind === "tool_result") {
@@ -718,7 +722,14 @@ function Workspace({
           />
         ) : null}
       </section>
-      <Computer apiBase={apiBase} token={token} state={stopped ? "waiting" : mascot} feed={feed} />
+      <Computer
+        apiBase={apiBase}
+        token={token}
+        state={stopped ? "waiting" : mascot}
+        feed={feed}
+        screenTick={screenTick}
+        busy={busy}
+      />
     </div>
   );
 }
@@ -880,12 +891,17 @@ function Computer({
   token,
   state,
   feed,
+  screenTick,
+  busy,
 }: {
   apiBase: string;
   token: string;
   state: MascotState;
   feed: FeedItem[];
+  screenTick: number;
+  busy: boolean;
 }) {
+  const [cloud, setCloud] = useState<CloudStatus | null>(null);
   const [browser, setBrowser] = useState<BrowserView>({
     status: "stopped",
     mode: "cloud",
@@ -932,10 +948,22 @@ function Computer({
         <h2>Компьютер агента</h2>
         <span>{mascotLabel(state)}</span>
       </div>
-      <div className="screen">
-        <Mascot state={state} />
-      </div>
+      <CloudScreen
+        apiBase={apiBase}
+        token={token}
+        tick={screenTick}
+        busy={busy}
+        onStatus={setCloud}
+        placeholder={<Mascot state={state} />}
+      />
+      {cloud?.enabled ? null : (
+        <div className="screen">
+          <Mascot state={state} />
+        </div>
+      )}
       <StepFeed items={feed} />
+      {cloud?.enabled && !localBrowserEnabled() ? null : (
+        <>
       {browser.status === "running" ? (
         <p className="muted">
           {browser.mode === "local"
@@ -951,6 +979,8 @@ function Computer({
           <a href={browser.novncUrl} target="_blank" rel="noreferrer">Смотреть</a>
         ) : null}
       </div>
+        </>
+      )}
       {note ? <p className="error">{note}</p> : null}
     </aside>
   );

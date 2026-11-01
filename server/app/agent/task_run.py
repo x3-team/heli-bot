@@ -48,6 +48,14 @@ BROWSER_HINT = (
     "нажимай элементы по номеру ref и вводи текст. После каждого действия смотри, что изменилось. "
     "Пароли не спрашивай и не печатай в ответе."
 )
+CLOUD_HINT = (
+    " У тебя есть свой компьютер Heli на сервере с браузером (инструменты browser_*). Пользователь видит "
+    "его экран в панели «Компьютер агента». Работай в нём: открой адрес, прочитай страницу, нажимай элементы "
+    "по номеру ref и вводи текст. После каждого действия смотри, что изменилось. Входы в сервисы, которые "
+    "пользователь сделал на этом экране, сохраняются. Если сайт просит войти, а входа нет, не подбирай пароль: "
+    "попроси пользователя войти прямо на экране «Компьютер агента» и написать, когда готово. "
+    "Пароли не спрашивай и не печатай в ответе."
+)
 CONFIRM_HINT = (
     " Перед действием, которое трудно отменить (отправить, оплатить, удалить, изменить данные клиента), "
     "вызови ask_confirmation и продолжай только при ответе approved."
@@ -79,7 +87,7 @@ def system_prompt(tools: list[dict], guide: str | None = None) -> str:
     names = {tool["function"]["name"] for tool in tools}
     text = SYSTEM.format(today=datetime.now(_MSK).strftime("%d.%m.%Y"))
     if any(name.startswith("browser_") for name in names):
-        text += BROWSER_HINT
+        text += CLOUD_HINT if "browser_open" in server_executed() else BROWSER_HINT
     if CONFIRM_TOOL in names:
         text += CONFIRM_HINT
     if guide:
