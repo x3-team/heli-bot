@@ -552,7 +552,7 @@ function Workspace({
         setError("Остановлено. Управление снова у вас.");
       } else {
         setError(err instanceof ApiError ? err.message : "Не получилось выполнить задачу.");
-        setMascot("waiting");
+        setMascot("error");
       }
     } finally {
       setBusy(false);

@@ -78,9 +78,6 @@ importers:
       '@fontsource/onest':
         specifier: ^5.2.8
         version: 5.3.1
-      lottie-web:
-        specifier: ^5.12.2
-        version: 5.13.0
     devDependencies:
       '@tauri-apps/api':
         specifier: ^2.2.0
@@ -699,9 +696,6 @@ packages:
     engines: {node: '>=6'}
     hasBin: true
 
-  lottie-web@5.13.0:
-    resolution: {integrity: sha512-+gfBXl6sxXMPe8tKQm7qzLnUy5DUPJPKIyRHwtpCpyUEYjHYRJC/5gjUvdkuO2c3JllrPtHXH5UJJK8LRYl5yQ==}
-
   lru-cache@5.1.1:
     resolution: {integrity: sha512-KpNARQA3Iwv+jTA0utUVVbrh+Jlrr1Fv0e56GGzAFOXN7dk/FviaDW8LHmK52DlcH4WP2n6gI8vN1aesBFgo9w==}
 
@@ -1274,8 +1268,6 @@ snapshots:
   jsesc@3.1.0: {}
 
   json5@2.2.3: {}
-
-  lottie-web@5.13.0: {}
 
   lru-cache@5.1.1:
     dependencies:

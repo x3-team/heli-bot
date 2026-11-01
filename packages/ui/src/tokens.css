@@ -11,7 +11,11 @@
   --panel: #ffffff;
   --soft: #f3f4f2;
   --mint: #e4efe9;
-  --mascot-ground: #e4efe9;
+  --mascot-ground: #eef1ee;
+  --heli-body: #111412;
+  --heli-visor: #28312c;
+  --heli-glow: #3fd08f;
+  --heli-alarm: #e2574c;
   --accent: #101211;
   --accent-ink: #ffffff;
   --live: #1f9d68;
@@ -31,7 +35,11 @@
   --panel: #161917;
   --soft: #1b1e1c;
   --mint: #24302b;
-  --mascot-ground: #dfeae4;
+  --mascot-ground: #1d2220;
+  --heli-body: #eceae3;
+  --heli-visor: #111412;
+  --heli-glow: #3fd08f;
+  --heli-alarm: #e2574c;
   --accent: #eef0ec;
   --accent-ink: #0f1110;
   --live: #3faf82;
@@ -268,6 +276,7 @@ h1, h2 { text-wrap: balance; }
 .live.working::before, .live.thinking::before { background: var(--live); animation: heli-pulse 1.3s infinite; }
 .live.thinking::before { background: var(--signal); }
 .live.done::before { background: var(--live); }
+.live.error::before { background: var(--danger); }
 
 .thread {
   flex: 1;
@@ -397,8 +406,7 @@ h1, h2 { text-wrap: balance; }
   padding: 16px;
 }
 
-.screen .mascot,
-.screen .mascot-working {
+.screen .mascot {
   width: min(170px, 100%);
   height: auto;
   aspect-ratio: 1;
@@ -407,7 +415,6 @@ h1, h2 { text-wrap: balance; }
   padding: 14px;
 }
 
-.mascot-working svg { width: 100%; height: 100%; }
 
 /* ---------- Pages ---------- */
 
@@ -483,10 +490,46 @@ h1, h2 { text-wrap: balance; }
 .error { color: var(--danger); margin: 0; }
 
 @keyframes heli-hover { 50% { transform: translateY(-4px); } }
+
+/* ---------- Mascot «Визор» ---------- */
+.heli { display: block; overflow: visible; }
+.heli-ink, .heli-rotor { fill: var(--heli-body); }
+.heli-visor { fill: var(--heli-visor); }
+.heli-eyes { fill: var(--heli-glow); }
+.heli-line { fill: none; stroke: var(--heli-glow); stroke-linecap: round; }
+.heli-line.heli-x { stroke: var(--heli-alarm); }
+.heli-skid { fill: none; stroke: var(--heli-body); stroke-width: 4.5; stroke-linecap: round; }
+.heli-scan { fill: var(--heli-glow); opacity: 0.18; animation: heli-scan 1.1s ease-in-out infinite alternate; }
+
+.heli { --heli-spin: 2.6s; }
+.heli-thinking { --heli-spin: 4.2s; }
+.heli-working { --heli-spin: 0.26s; }
+.heli-done { --heli-spin: 1.8s; }
+.heli-rotor { transform-box: fill-box; transform-origin: center; animation: heli-spin var(--heli-spin) ease-in-out infinite; }
+.heli-error .heli-rotor { animation: none; }
+
+.heli-hover { animation: heli-float 3.4s ease-in-out infinite; }
+.heli-working .heli-hover { animation: heli-buzz 0.32s linear infinite; }
+.heli-done .heli-hover { animation: heli-hop 2.2s cubic-bezier(0.3, 0.7, 0.4, 1) infinite; }
+.heli-error .heli-hover { animation: none; }
+.heli-error .heli-body { transform-origin: 60px 70px; animation: heli-wobble 2.6s ease-in-out infinite; }
+
+.heli-blink { transform-box: fill-box; transform-origin: center; animation: heli-blink 4.6s infinite; }
+.heli-look { animation: heli-look 3.6s ease-in-out infinite; }
+
+@keyframes heli-spin { 0%, 50%, 100% { transform: scaleX(1); } 25%, 75% { transform: scaleX(0.1); } }
+@keyframes heli-float { 50% { transform: translateY(-3px); } }
+@keyframes heli-buzz { 25% { transform: translate(0.5px, -1px); } 75% { transform: translate(-0.5px, -0.5px); } }
+@keyframes heli-hop { 0%, 55%, 100% { transform: translateY(0); } 15% { transform: translateY(-9px); } 30% { transform: translateY(0); } 40% { transform: translateY(-3px); } }
+@keyframes heli-wobble { 0%, 40%, 100% { transform: rotate(0); } 8% { transform: rotate(-5deg); } 18% { transform: rotate(4deg); } 28% { transform: rotate(-2deg); } }
+@keyframes heli-blink { 0%, 93%, 100% { transform: scaleY(1); } 96% { transform: scaleY(0.08); } }
+@keyframes heli-look { 40%, 55% { transform: translate(4px, -2px); } }
+@keyframes heli-scan { from { transform: translateX(-16px); } to { transform: translateX(16px); } }
 @keyframes heli-pulse { 50% { opacity: 0.35; } }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before { animation: none !important; transition: none !important; }
+  .heli * { animation: none !important; }
 }
 
 @media (max-width: 960px) {
@@ -567,7 +610,7 @@ h1, h2 { text-wrap: balance; }
 .cloud-screen:focus-visible { outline: 2px solid var(--accent, currentColor); }
 .cloud-screen img { width: 100%; height: 100%; object-fit: contain; cursor: pointer; user-select: none; display: block; }
 .cloud-empty { display: grid; gap: 12px; justify-items: center; padding: 16px; }
-.cloud-empty .mascot, .cloud-empty .mascot-working { width: min(140px, 100%); height: auto; }
+.cloud-empty .mascot { width: min(140px, 100%); height: auto; }
 .cloud-hint { margin: 0; font-size: 13px; }
 button.link { background: none; border: 0; padding: 0; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; }
 
