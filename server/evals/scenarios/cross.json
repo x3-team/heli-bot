@@ -47,7 +47,7 @@
    "expect": [
      {"type": "called", "tool": "telegram_read"},
      {"type": "called", "tool": "bitrix24_create_task", "args": {"responsible": "Кузнецов"}, "max": 1},
-     {"type": "state", "path": "amocrm.deals[id=4002].notes", "equals": ["6 ноября"]}
+     {"type": "state", "path": "amocrm.deals[id=4002].notes", "any_of": [["6 ноября"], ["06.11"]]}
    ],
    "golden": {"calls": [{"tool": "telegram_read", "args": {"chat": "Отдел продаж"}},
                         {"tool": "bitrix24_create_task", "args": {"title": "Перенести отгрузку КазаньСтройМаш на 6 ноября", "responsible": "Кузнецов", "deadline": "2026-11-06"}},

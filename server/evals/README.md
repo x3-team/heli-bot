@@ -71,7 +71,7 @@ run(task: str, tools: list[dict], call_tool: Callable[[str, dict], Any],
    и `"expect_stop": "confirm"`.
 2. Проверки: `called` (`tool` или список, `args` — подмножество, строки сравниваются по вхождению,
    `max`), `not_called`, `answer_contains` (`all` / `any`, числа «128 400» = «128400»),
-   `answer_not_contains`, `state` (`path` вида `amocrm.deals[id=4001].stage`, `equals` / `length`), `stopped`.
+   `answer_not_contains`, `state` (`path` вида `amocrm.deals[id=4001].stage`, `equals` / `any_of` (список вариантов, годится любой) / `length`), `stopped`.
 3. `python -m pytest tests/test_evals.py` — golden должен пройти, `noop` провалиться.
 
 Лучшие источники новых сценариев — реальные задачи пользователей из траекторий с низкой оценкой.

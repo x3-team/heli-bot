@@ -93,6 +93,8 @@ def run_check(check: dict, world: World, answer: str, stopped: str | None) -> st
             return f"нет состояния {check['path']}"
         if "equals" in check and not args_match(check["equals"], value):
             return f"{check['path']} = {value!r}, ждали {check['equals']!r}"
+        if "any_of" in check and not any(args_match(opt, value) for opt in check["any_of"]):
+            return f"{check['path']} = {value!r}, ждали одно из {check['any_of']!r}"
         if "length" in check and len(value) != check["length"]:
             return f"длина {check['path']} = {len(value)}, ждали {check['length']}"
         return None
