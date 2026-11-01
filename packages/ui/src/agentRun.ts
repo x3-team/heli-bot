@@ -166,7 +166,8 @@ export function runErrorMessage(code: string): string {
     case "request_failed":
       return "Модель сейчас недоступна. Попробуйте ещё раз через минуту.";
     default:
-      return "Не получилось выполнить задачу.";
+      // The code helps when the user sends a screenshot of the failure.
+      return code ? `Не получилось выполнить задачу (${code}).` : "Не получилось выполнить задачу.";
   }
 }
 

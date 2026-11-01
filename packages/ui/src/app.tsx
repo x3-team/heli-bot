@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import {
   ApiError,
   type AuthResult,
@@ -36,7 +36,7 @@ import {
 } from "./api";
 import { resolveApiBase } from "./apiBase";
 import { trialLabel } from "./authSession";
-import { clampPercent, confirmationNeeded, limitTone } from "./behavior";
+import { clampComputerWidth as clampWidth, clampPercent, confirmationNeeded, limitTone } from "./behavior";
 import { ComputerConfirmCard } from "./computerCard";
 import { networkErrorMessage } from "./errors";
 import {
@@ -423,10 +423,18 @@ function Workspace({
   const [consents, setConsents] = useState({ pdn: true, training: false });
   const [historyOpen, setHistoryOpen] = useState(false);
   const [computerOpen, setComputerOpen] = useState(false);
+  const [computerWidth, setComputerWidth] = useState<number | null>(() => readComputerWidth());
+  const [, setViewport] = useState(0);
+  useEffect(() => {
+    // The dragged width is clamped to the window: re-render when the window changes.
+    const onResize = () => setViewport(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
   const [runTaskId, setRunTaskId] = useState<string | null>(null);
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [screenTick, setScreenTick] = useState(0);
-  const [paused, setPaused] = useState<{ reason: string; spent?: string; estimate?: string } | null>(null);
+  const [paused, setPaused] = useState<{ reason: string; spent?: string; estimate?: string; text?: string } | null>(null);
   const [notice, setNotice] = useState("");
   const [ask, setAsk] = useState<{ action: string; details: string; resolve: (ok: boolean) => void } | null>(null);
   const [autopause, setAutopause] = useState(() => readAutopause());
@@ -577,12 +585,16 @@ function Workspace({
           const item = feedItem(event);
           if (item) setFeed((list) => [...list, item].slice(-40));
           if (event.type === "paused") {
+            const reason = String(event.reason ?? "user");
             setPaused({
-              reason: String(event.reason ?? "user"),
+              reason,
               spent: event.spent_rub ? String(event.spent_rub) : undefined,
               estimate: event.estimate_rub ? String(event.estimate_rub) : undefined,
+              text: event.text ? String(event.text) : undefined,
             });
             setMascot("waiting");
+            // A captcha is passed by hand on the live screen: show it.
+            if (reason === "captcha") setComputerOpen(true);
           } else if (event.type === "resumed") {
             setPaused(null);
             setMascot("working");
@@ -692,7 +704,17 @@ function Workspace({
   const showComputer = computerOpen && view === "chat";
 
   return (
-    <div className="workspace" data-view={view} data-history={historyOpen ? "open" : "closed"} data-computer={showComputer ? "open" : "closed"}>
+    <div
+      className="workspace"
+      data-view={view}
+      data-history={historyOpen ? "open" : "closed"}
+      data-computer={showComputer ? "open" : "closed"}
+      style={
+        computerWidth
+          ? ({ "--computer-w": `${clampComputerWidth(computerWidth, historyOpen)}px` } as CSSProperties)
+          : undefined
+      }
+    >
       <nav className="rail" aria-label="Разделы">
         <RailButton label="Новая задача" onClick={newThread} icon={ICONS.plus} />
         <RailButton
@@ -832,11 +854,17 @@ function Workspace({
         hidden={!showComputer}
         onPause={() => void togglePause()}
         paused={paused !== null}
+        captcha={paused?.reason === "captcha"}
         feed={feed}
         busy={busy}
         screenTick={screenTick}
         onInput={() => void receiveFiles()}
         onClose={() => setComputerOpen(false)}
+        onResize={(width, done) => {
+          const next = width === null ? null : clampComputerWidth(width, historyOpen);
+          setComputerWidth(next);
+          if (done) writeComputerWidth(next);
+        }}
       />
     </div>
   );
@@ -925,7 +953,7 @@ function Chat({
   onReject: () => void;
   onStop: () => void;
   onPause: () => void;
-  paused: { reason: string; spent?: string; estimate?: string } | null;
+  paused: { reason: string; spent?: string; estimate?: string; text?: string } | null;
   notice: string;
   ask: { action: string; details: string } | null;
   onAnswer: (ok: boolean) => void;
@@ -1117,6 +1145,17 @@ function Chat({
             </div>
           </article>
         ) : null}
+        {paused?.reason === "captcha" ? (
+          <article className="card">
+            <p className="muted">Нужна ваша помощь</p>
+            <h2>Пройдите капчу</h2>
+            <p>{paused.text || "Сайт просит пройти капчу. Пройдите её на экране «Компьютер агента», и я продолжу сам."}</p>
+            <div className="row">
+              <button type="button" data-emphasis="primary" onClick={onPause}>Готово, продолжай</button>
+              <button type="button" data-emphasis="danger" onClick={onStop}>Стоп</button>
+            </div>
+          </article>
+        ) : null}
         {notice ? <p className="muted">{notice}</p> : null}
         <ComputerConfirmCard />
         {stopped ? (
@@ -1198,11 +1237,13 @@ function Computer({
   hidden,
   busy,
   paused,
+  captcha,
   feed,
   screenTick,
   onPause,
   onInput,
   onClose,
+  onResize,
 }: {
   apiBase: string;
   token: string;
@@ -1210,12 +1251,18 @@ function Computer({
   hidden: boolean;
   busy: boolean;
   paused: boolean;
+  /** The task waits for the user to pass a captcha on the live screen. */
+  captcha: boolean;
   feed: FeedItem[];
   screenTick: number;
   onPause: () => void;
   onInput: () => void;
   onClose: () => void;
+  /** New panel width while dragging (done = the drag ended); null resets it. */
+  onResize: (width: number | null, done: boolean) => void;
 }) {
+  const panel = useRef<HTMLElement>(null);
+  const drag = useRef<{ x: number; width: number; last: number } | null>(null);
   const [cloud, setCloud] = useState<CloudStatus | null>(null);
   const [browser, setBrowser] = useState<BrowserView>({
     status: "stopped",
@@ -1258,7 +1305,40 @@ function Computer({
   }
 
   return (
-    <aside className="computer" aria-label="Компьютер агента" hidden={hidden}>
+    <aside className="computer" aria-label="Компьютер агента" hidden={hidden} ref={panel}>
+      <div
+        className="computer-resize"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Ширина панели: тяните влево или вправо, двойной щелчок вернёт как было"
+        title="Тяните, чтобы изменить ширину. Двойной щелчок вернёт как было."
+        tabIndex={0}
+        onPointerDown={(event) => {
+          const width = panel.current?.getBoundingClientRect().width ?? 0;
+          drag.current = { x: event.clientX, width, last: width };
+          event.currentTarget.setPointerCapture(event.pointerId);
+          event.preventDefault();
+        }}
+        onPointerMove={(event) => {
+          if (!drag.current) return;
+          drag.current.last = drag.current.width + (drag.current.x - event.clientX);
+          onResize(drag.current.last, false);
+        }}
+        onPointerUp={(event) => {
+          if (!drag.current) return;
+          onResize(drag.current.last, true);
+          drag.current = null;
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        }}
+        onDoubleClick={() => onResize(null, true)}
+        onKeyDown={(event) => {
+          const width = panel.current?.getBoundingClientRect().width ?? 0;
+          if (event.key === "ArrowLeft") onResize(width + 40, true);
+          else if (event.key === "ArrowRight") onResize(width - 40, true);
+          else return;
+          event.preventDefault();
+        }}
+      />
       <div className="computer-in">
         <div className="computer-top">
           <b>Компьютер агента</b>
@@ -1267,16 +1347,22 @@ function Computer({
             {busy ? (
               <button type="button" className="pill" onClick={onPause}>{paused ? "Продолжить" : "Пауза"}</button>
             ) : null}
-            <button type="button" className="pill icon" title="Скрыть" aria-label="Скрыть" onClick={onClose}>
+            <button type="button" className="pill icon" title="Свернуть панель" aria-label="Свернуть панель" onClick={onClose}>
               <Icon d={ICONS.close} />
             </button>
           </span>
         </div>
+        {captcha ? (
+          <p className="computer-ask">
+            Пройдите капчу здесь: нажмите на поле или картинку и печатайте с клавиатуры. Я продолжу сам, когда она пропадёт.
+          </p>
+        ) : null}
         <CloudScreen
           apiBase={apiBase}
           token={token}
           tick={screenTick}
           busy={busy}
+          focus={captcha}
           onStatus={setCloud}
           onInput={onInput}
           placeholder={<Mascot state={state} />}
@@ -1631,6 +1717,30 @@ function Settings({
 }
 
 const AUTOPAUSE_KEY = "heli.autopause";
+const COMPUTER_WIDTH_KEY = "heli.computerWidth";
+
+function clampComputerWidth(width: number, historyOpen: boolean): number {
+  return clampWidth(width, historyOpen, window.innerWidth);
+}
+
+/** The width the user dragged the «Компьютер агента» panel to; null: the default. */
+function readComputerWidth(): number | null {
+  try {
+    const value = Number(window.localStorage.getItem(COMPUTER_WIDTH_KEY));
+    return Number.isFinite(value) && value > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeComputerWidth(width: number | null): void {
+  try {
+    if (width === null) window.localStorage.removeItem(COMPUTER_WIDTH_KEY);
+    else window.localStorage.setItem(COMPUTER_WIDTH_KEY, String(width));
+  } catch {
+    // per-device convenience only
+  }
+}
 
 function readAutopause(): boolean {
   try {

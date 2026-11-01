@@ -997,6 +997,8 @@ def cloud_browser_status(user: User = Depends(get_current_user)) -> dict:
             "saved_logins": False,
             "error": cloud_browser.last_error(),
         }
+    # The panel polls this while it is open: keep its screen live.
+    cloud_browser.pool().watch(user.id)
     return {"enabled": True, **cloud_browser.pool().status(user.id)}
 
 

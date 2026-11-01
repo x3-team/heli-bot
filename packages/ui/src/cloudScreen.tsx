@@ -72,6 +72,7 @@ export function CloudScreen({
   token,
   tick,
   busy,
+  focus = false,
   onStatus,
   onInput,
   placeholder,
@@ -82,6 +83,8 @@ export function CloudScreen({
   tick: number;
   /** A task is running: refresh more often. */
   busy: boolean;
+  /** The user is asked to pass a captcha: put the keyboard on the screen, refresh every second. */
+  focus?: boolean;
   onStatus?: (status: CloudStatus) => void;
   /** After each click or key of the user: a click may have downloaded a file. */
   onInput?: () => void;
@@ -96,6 +99,7 @@ export function CloudScreen({
   const typed = useRef("");
   const flushTimer = useRef<number | null>(null);
   const wheel = useRef({ dy: 0, timer: null as number | null });
+  const screen = useRef<HTMLDivElement>(null);
 
   const apply = useCallback(
     (next: CloudStatus) => {
@@ -125,9 +129,13 @@ export function CloudScreen({
   }, [poll, tick]);
 
   useEffect(() => {
-    const id = window.setInterval(() => void poll(), busy ? 1500 : 5000);
+    const id = window.setInterval(() => void poll(), focus ? 1000 : busy ? 1500 : 5000);
     return () => window.clearInterval(id);
-  }, [poll, busy]);
+  }, [poll, busy, focus]);
+
+  useEffect(() => {
+    if (focus) screen.current?.focus({ preventScroll: true });
+  }, [focus, image]);
 
   useEffect(() => () => {
     if (image) URL.revokeObjectURL(image);
@@ -169,6 +177,8 @@ export function CloudScreen({
   }
 
   function onClick(event: MouseEvent<HTMLImageElement>) {
+    // Typing goes to the screen after a click on it, as on a real computer.
+    screen.current?.focus({ preventScroll: true });
     flushTyped();
     const point = relativePoint(event.clientX, event.clientY, event.currentTarget.getBoundingClientRect());
     void send({ kind: "click", ...point });
@@ -197,7 +207,9 @@ export function CloudScreen({
         <button type="submit">Открыть</button>
       </form>
       <div
+        ref={screen}
         className="cloud-screen"
+        data-ask={focus ? "captcha" : undefined}
         tabIndex={0}
         onKeyDown={onKeyDown}
         onPaste={(event) => {
