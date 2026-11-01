@@ -807,7 +807,7 @@ function Workspace({
               if (!feedbackTask) return;
               try {
                 await submitTaskFeedback(apiBase, token, feedbackTask.taskId, worked, comment);
-                await finishTask(apiBase, token, feedbackTask.taskId, "success", feedbackTask.reply);
+                await finishTask(apiBase, token, feedbackTask.taskId, worked ? "success" : "fail", feedbackTask.reply);
                 setFeedbackTask(null);
               } catch (err) {
                 setError(err instanceof ApiError ? err.message : "Не получилось сохранить отзыв.");
