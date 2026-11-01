@@ -197,3 +197,10 @@ def test_runner_passes_world_date_when_agent_wants_it() -> None:
 
     run_scenario(SCENARIOS[0], dated)
     assert seen["today"] == "2026-11-02"
+
+
+def test_unknown_chat_error_lists_real_chats() -> None:
+    world = World.build()
+    result = world.call("telegram_read", {"chat": "КазаньСтройМаш"})
+    assert "Отдел продаж" in result["error"] and "@heli_sales_team" in result["error"]
+    assert world.call("telegram_list_chats", {})["chats"][0]["username"] == "@heli_sales_team"

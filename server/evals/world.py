@@ -90,6 +90,7 @@ TOOLS: list[dict] = [
                     "items": {"type": "object",
                               "properties": {"sku": {"type": "string"}, "qty": {"type": "number"}},
                               "required": ["sku", "qty"]}})),
+    _tool("telegram_list_chats", "Список чатов Telegram: название и @username.", _s()),
     _tool("telegram_read", "Прочитать последние сообщения чата Telegram.",
           _s(chat=_str("Чат или @username"), limit=_num("Сколько сообщений", True))),
     _tool("telegram_send", "Отправить сообщение в Telegram.",
@@ -376,7 +377,11 @@ class World:
         for item in self.state["telegram"]["chats"]:
             if key in (_norm(item["title"]), _norm(item["username"]).lstrip("@")):
                 return item
-        raise ToolError("chat_not_found")
+        names = ", ".join(f"{c['title']} ({c['username']})" for c in self.state["telegram"]["chats"])
+        raise ToolError(f"chat_not_found; доступные чаты: {names}")
+
+    def _t_telegram_list_chats(self) -> dict:
+        return {"chats": [{"title": c["title"], "username": c["username"]} for c in self.state["telegram"]["chats"]]}
 
     def _t_telegram_read(self, chat: str, limit: int = 20) -> dict:
         return {"messages": self._chat(chat)["messages"][-int(limit):]}
