@@ -179,20 +179,24 @@ def test_client_timeout() -> None:
 class _BrowserScript:
     """classify → browser_open (client tool) → answer."""
 
-    def __init__(self) -> None:
+    def __init__(self, tool="browser_open", arguments='{"url": "https://example.amocrm.ru/leads"}') -> None:
         self.requests = []
+        self.tool = tool
+        self.arguments = arguments
 
     def create(self, **kwargs):
         self.requests.append(kwargs)
         n = len(self.requests)
+        tool, arguments = self.tool, self.arguments
 
         class Usage:
             prompt_tokens = 10
             completion_tokens = 4
 
         class Function:
-            name = "browser_open"
-            arguments = '{"url": "https://example.amocrm.ru/leads"}'
+            name = tool
+
+        Function.arguments = arguments
 
         class Call:
             id = "call_b1"
@@ -302,3 +306,76 @@ def test_eval_entry_point_uses_the_same_loop() -> None:
     )
     assert calls == [("browser_open", {"url": "https://example.amocrm.ru/leads"})]
     assert result["final_answer"] == "Сделок 3" and result["stopped"] is None and result["steps"] == 2
+
+
+def _run_with_client(client, session, monkeypatch, request_text, script, client_tools, answer):
+    user = User(
+        email=f"u{time.monotonic_ns()}@example.com",
+        consent_pdn=True,
+        consent_training=True,
+        is_admin=False,
+        created_at=datetime.now(timezone.utc),
+    )
+    session.add(user)
+    session.flush()
+    task = start_task(session, user, request_text, {})
+    session.commit()
+    sdk = type("SDK", (), {})()
+    sdk.chat = type("Chat", (), {"completions": script})()
+    client.app.dependency_overrides[get_heli_client] = lambda: HeliClient(sdk)
+    monkeypatch.setattr(api, "get_run_session_factory", lambda: sessionmaker(bind=session.get_bind()))
+    headers = {"Authorization": f"Bearer {issue_token(user.id)}"}
+
+    def answer_client():
+        for _ in range(200):
+            agent_run = runs.registry.get(task.id, user.id)
+            action = agent_run and next((e for e in agent_run.events if e["type"] == "client_action"), None)
+            if action:
+                client.post(f"/v1/tasks/{task.id}/tool-results", json={"call_id": action["call_id"], **answer}, headers=headers)
+                return
+            time.sleep(0.02)
+
+    helper = threading.Thread(target=answer_client)
+    helper.start()
+    response = client.post(
+        f"/v1/tasks/{task.id}/run",
+        json={"client_tools": client_tools},
+        headers={**headers, "Accept": "text/event-stream"},
+    )
+    helper.join(5)
+    return _sse_events(response.text)
+
+
+def test_search_goes_through_the_users_browser_without_api_key(client, session, monkeypatch) -> None:
+    from app.llm import tools as server_tools
+
+    monkeypatch.delenv("YANDEX_SEARCH_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("HELI_SEARCH_PROVIDER", raising=False)
+    monkeypatch.setattr(server_tools, "web_search", lambda q: pytest.fail("server search must not run"))
+    script = _BrowserScript("web_search", '{"query": "amoCRM цены"}')
+    events = _run_with_client(
+        client, session, monkeypatch, "Сколько стоит amoCRM?", script,
+        ["browser_open", "browser_search"], {"content": "1. amoCRM — тарифы\nhttps://www.amocrm.ru/prices"},
+    )
+    action = next(e for e in events if e["type"] == "client_action")
+    assert action["tool"] == "browser_search" and action["args"] == {"query": "amoCRM цены"}
+    assert "amocrm.ru/prices" in script.requests[2]["messages"][-1]["content"]
+    assert events[-1]["type"] == "done"
+
+
+def test_browser_search_falls_back_to_server_search_on_captcha(client, session, monkeypatch) -> None:
+    from app.llm import tools as server_tools
+    from app.web import SearchHit
+
+    monkeypatch.delenv("YANDEX_SEARCH_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("HELI_SEARCH_PROVIDER", raising=False)
+    monkeypatch.setattr(server_tools, "web_search", lambda q: [SearchHit("Вики", "https://ru.wikipedia.org/x", "фрагмент")])
+    script = _BrowserScript("web_search", '{"query": "amoCRM"}')
+    events = _run_with_client(
+        client, session, monkeypatch, "Что такое amoCRM?", script,
+        ["browser_search"], {"content": "", "error": "captcha"},
+    )
+    assert "ru.wikipedia.org" in script.requests[2]["messages"][-1]["content"]
+    assert events[-1]["type"] == "done"

@@ -269,3 +269,27 @@ input, textarea {
   .sidebar { border-right: 0; border-bottom: 1px solid var(--line); }
   .computer { border-left: 0; border-top: 1px solid var(--line); }
 }
+
+.step-feed {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+  line-height: 1.35;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.step-feed li {
+  overflow-wrap: anywhere;
+}
+
+.step-feed li[data-tone="muted"] {
+  opacity: 0.65;
+}
+
+.step-feed li[data-tone="error"] {
+  color: var(--danger, #c0392b);
+}

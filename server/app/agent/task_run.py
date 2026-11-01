@@ -23,6 +23,7 @@ from app.memory import relevant, with_memory
 from app.models import Task, User
 from app.quota import estimate_turn_reserve, metered_complete, remaining_ratio, snapshot
 from app.trajectories import add_step
+from app.web import search_provider
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +53,8 @@ CONFIRM_HINT = (
 )
 ANSWER_MAX_TOKENS = 1500
 _MSK = ZoneInfo("Europe/Moscow")
+# Not offered to the model: the server routes web_search here when no search API key is set.
+BROWSER_SEARCH = "browser_search"
 _BROWSER_DOM = {"browser_open", "browser_read", "browser_click", "browser_type", "browser_press"}
 
 
@@ -128,6 +131,7 @@ def execute_task(
     control = control or NoControl()
     offered = [name for name in (client_tools or []) if name in client_tool_names()]
     tools = tools_for(offered)
+    browser_search = BROWSER_SEARCH in (client_tools or []) and search_provider() == "wikipedia"
 
     prompt = with_memory(task.request_text, relevant(session, user, task.request_text))
     classified = metered_complete(
@@ -164,7 +168,19 @@ def execute_task(
             session, user, task.id, client, route.alias, msgs, max_tokens=ANSWER_MAX_TOKENS, tools=round_tools
         )
 
+    def ask_client(call_id: str, name: str, real_args: dict, safe_args: dict) -> ClientResult:
+        publish({"type": "client_action", "call_id": call_id, "tool": name, "args": real_args, "safe_args": safe_args})
+        return control.wait_result(call_id)
+
     def call_tool(call_id: str, name: str, args: dict) -> ToolResult:
+        if name == "web_search" and browser_search:
+            # No search API key: search like a person in the user's own browser (ya.ru).
+            result = ask_client(call_id, BROWSER_SEARCH, args, args)
+            if not result.error:
+                return ToolResult(result.content)
+            if result.error == "stopped_by_user":
+                return ToolResult("Ошибка: stopped_by_user", result.error)
+            log.info("browser search failed (%s), falling back to the server search", result.error)
         if name in SERVER_TOOL_NAMES:
             text, error = call_server_tool(name, args)
             return ToolResult(text, error)
@@ -174,8 +190,7 @@ def execute_task(
             real_args = _resolve_secrets(session, user, name, args, state["url"])
         except SecretError as exc:
             return ToolResult(f"Ошибка: {exc.code}", exc.code)
-        publish({"type": "client_action", "call_id": call_id, "tool": name, "args": real_args, "safe_args": args})
-        result: ClientResult = control.wait_result(call_id)
+        result = ask_client(call_id, name, real_args, args)
         data: dict = {}
         if result.screenshot:
             data["screenshot"] = result.screenshot
