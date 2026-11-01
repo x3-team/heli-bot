@@ -117,6 +117,10 @@ if [ "$CLOUD_ON" = 1 ]; then
     else
       log "cloud browser: Chromium has every library it needs"
     fi
+    # Start Chromium once, the way the API will, and print why if it does not start.
+    (cd "$APP_DIR/server" && CLOUD_BROWSER_ENABLED=1 CLOUD_BROWSER_LIBS="$LIB_ROOT" VAULT_MASTER_KEY= \
+      timeout 90 python -c 'from app import cloud_browser as c; ok = c.probe(c.pool()); print("[heli-deploy] cloud browser probe:", "OK" if ok else c.last_error())' \
+      || log "cloud browser probe could not run")
   else
     log "cloud browser: Chromium binary not found under $PLAYWRIGHT_BROWSERS_PATH"
   fi

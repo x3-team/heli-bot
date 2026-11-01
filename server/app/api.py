@@ -935,7 +935,15 @@ def _cloud_on() -> None:
 @router.get("/cloud-browser")
 def cloud_browser_status(user: User = Depends(get_current_user)) -> dict:
     if not cloud_browser.ready():
-        return {"enabled": False, "running": False, "version": 0, "url": "", "title": "", "saved_logins": False}
+        return {
+            "enabled": False,
+            "running": False,
+            "version": 0,
+            "url": "",
+            "title": "",
+            "saved_logins": False,
+            "error": cloud_browser.last_error(),
+        }
     return {"enabled": True, **cloud_browser.pool().status(user.id)}
 
 

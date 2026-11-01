@@ -587,7 +587,9 @@ class CloudBrowser:
                 future.set_exception(exc)
             except BaseException as exc:  # noqa: BLE001
                 log.info("cloud browser call failed: %s", type(exc).__name__)
-                future.set_exception(CloudError("browser_failed"))
+                failed = CloudError("browser_failed")
+                failed.__cause__ = exc
+                future.set_exception(failed)
             self._reap()
 
     def _page(self, user_id: uuid.UUID) -> Page:
@@ -661,7 +663,11 @@ class CloudBrowser:
 
 def ready() -> bool:
     """On, installed, and Chromium started at least once on this host."""
-    return _ready and available()
+    if _ready:
+        return available()
+    if available() and time.monotonic() - _last_probe > 60:
+        return _try_register()
+    return False
 
 
 def available() -> bool:
@@ -676,6 +682,8 @@ def available() -> bool:
 
 _pool: CloudBrowser | None = None
 _ready = False
+_probe_error = ""
+_last_probe = 0.0
 _pool_lock = threading.Lock()
 
 
@@ -734,6 +742,7 @@ def execute(session, user, task_id, name: str, args: dict):
 
 def probe(browser: CloudBrowser) -> bool:
     """Start Chromium once and close it: missing system libraries show up here, not mid-task."""
+    global _probe_error
 
     def job() -> bool:
         new_page, shutdown = browser.launcher()
@@ -741,29 +750,40 @@ def probe(browser: CloudBrowser) -> bool:
         return True
 
     try:
-        return bool(browser._submit(job).result(timeout=CALL_TIMEOUT_S))
+        browser._submit(job).result(timeout=CALL_TIMEOUT_S)
+        _probe_error = ""
+        return True
     except Exception as exc:  # noqa: BLE001
-        log.warning("cloud browser off: Chromium did not start (%s: %s)", type(exc).__name__, str(exc)[:500])
+        cause = exc.__cause__ or exc
+        _probe_error = f"{type(cause).__name__}: {str(cause)[:400]}"
+        log.warning("cloud browser off: Chromium did not start (%s)", _probe_error)
         return False
 
 
 def register(background: bool = False) -> bool:
     """Called at startup. Without Playwright, with the flag off or if Chromium cannot start,
-    the agent has no browser tools (or the app's local browser when that is switched on)."""
+    the agent has no browser tools (or the app's local browser when that is switched on).
+    A failed start is retried at most once a minute when the panel asks for the status."""
     if not available():
         return False
+    if background:
+        threading.Thread(target=_try_register, name="cloud-browser-probe", daemon=True).start()
+        return True
+    return _try_register()
+
+
+def _try_register() -> bool:
+    global _ready, _last_probe
     from app.agent.executors import register_executor
 
-    def go() -> bool:
-        global _ready
-        if not probe(pool()):
-            return False
-        register_executor((*TOOL_NAMES, SEARCH_TOOL), execute)
-        _ready = True
-        log.info("cloud browser on: max %s sessions", pool().max_sessions)
-        return True
+    _last_probe = time.monotonic()
+    if not probe(pool()):
+        return False
+    register_executor((*TOOL_NAMES, SEARCH_TOOL), execute)
+    _ready = True
+    log.info("cloud browser on: max %s sessions", pool().max_sessions)
+    return True
 
-    if background:
-        threading.Thread(target=go, name="cloud-browser-probe", daemon=True).start()
-        return True
-    return go()
+
+def last_error() -> str:
+    return _probe_error
