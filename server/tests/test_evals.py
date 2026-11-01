@@ -161,3 +161,12 @@ def test_baseline_loop_with_scripted_model(monkeypatch) -> None:
     assert result.cost_rub > 0 and len(seen) == 2
     assert seen[0]["tools"] is TOOLS
     assert seen[1]["messages"][-1]["role"] == "tool"
+
+
+def test_confirmation_reply_matches_prod_loop() -> None:
+    from app.agent.loop import ToolResult, approved
+
+    yes = World.build(confirm="approve").call("ask_confirmation", {"action": "mail_send", "details": ""})
+    no = World.build(confirm="reject").call("ask_confirmation", {"action": "mail_send", "details": ""})
+    assert approved(ToolResult(yes["content"])) and yes["approved"] is True
+    assert not approved(ToolResult(no["content"])) and no["approved"] is False

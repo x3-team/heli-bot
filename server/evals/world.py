@@ -401,8 +401,9 @@ class World:
     def _t_ask_confirmation(self, action: str, details: str = "") -> dict:
         if self.confirm == "approve":
             self._approved.add(action)
-            return {"approved": True}
-        return {"approved": False, "comment": "Пользователь отказал. Не выполняй это действие."}
+            # content — то, что видит модель; прод-цикл читает одобрение по префиксу "approved".
+            return {"content": "approved", "approved": True}
+        return {"content": "rejected: пользователь отказал, не выполняй это действие", "approved": False}
 
     def _t_ask_user(self, question: str) -> dict:
         if not self.user_answers:
