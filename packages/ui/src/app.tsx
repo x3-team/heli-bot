@@ -37,6 +37,7 @@ import {
 import { resolveApiBase } from "./apiBase";
 import { trialLabel } from "./authSession";
 import { clampPercent, confirmationNeeded, limitTone } from "./behavior";
+import { ComputerConfirmCard } from "./computerCard";
 import { networkErrorMessage } from "./errors";
 import {
   captureScreenshotBase64,
@@ -977,6 +978,7 @@ function Chat({
           </article>
         ) : null}
         {notice ? <p className="muted">{notice}</p> : null}
+        <ComputerConfirmCard />
         {stopped ? (
           <article className="card danger">
             <h2>Лимит исчерпан</h2>

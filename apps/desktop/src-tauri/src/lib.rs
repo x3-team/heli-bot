@@ -23,6 +23,9 @@ pub fn run() {
             computer_screenshot,
             computer_click,
             computer_type,
+            computer_shot,
+            computer_decide,
+            computer_act,
             browser_launch,
             browser_page_ws,
             log_agent_step,
@@ -77,6 +80,62 @@ fn computer_click(x: i32, y: i32) -> Result<(), String> {
 #[tauri::command]
 fn computer_type(text: String) -> Result<(), String> {
     local_agent::computer::type_text(&text)
+}
+
+#[tauri::command]
+fn computer_shot() -> Result<local_agent::computer::Shot, String> {
+    if AGENT_STOPPED.load(Ordering::SeqCst) {
+        return Err("stopped".into());
+    }
+    local_agent::computer::screenshot_for_model()
+}
+
+fn computer_policy(confirm_writes: bool) -> local_agent::Policy {
+    local_agent::Policy {
+        confirm_writes,
+        stopped: AGENT_STOPPED.load(Ordering::SeqCst),
+        ..local_agent::Policy::default()
+    }
+}
+
+fn decision_name(decision: local_agent::Decision) -> &'static str {
+    match decision {
+        local_agent::Decision::Allow => "allow",
+        local_agent::Decision::Confirm => "confirm",
+        local_agent::Decision::Deny => "deny",
+    }
+}
+
+#[tauri::command]
+fn computer_decide(action: local_agent::actions::ComputerAction, flagged: bool, confirm_writes: bool) -> String {
+    let policy = computer_policy(confirm_writes);
+    decision_name(local_agent::actions::decide_action(&policy, &action, flagged)).to_string()
+}
+
+/// Runs one pointer/keyboard action. An action that needs the user's OK runs only
+/// with `approved`, which the UI sets after the confirmation card.
+#[tauri::command]
+async fn computer_act(
+    action: local_agent::actions::ComputerAction,
+    flagged: bool,
+    confirm_writes: bool,
+    approved: bool,
+) -> Result<(), String> {
+    let policy = computer_policy(confirm_writes);
+    match local_agent::actions::decide_action(&policy, &action, flagged) {
+        local_agent::Decision::Deny if policy.stopped => return Err("stopped".into()),
+        local_agent::Decision::Deny => return Err("denied".into()),
+        local_agent::Decision::Confirm if !approved => return Err("needs_confirmation".into()),
+        _ => {}
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        if AGENT_STOPPED.load(Ordering::SeqCst) {
+            return Err("stopped".to_string());
+        }
+        local_agent::computer::perform(&action)
+    })
+    .await
+    .map_err(|err| err.to_string())?
 }
 
 #[tauri::command]
