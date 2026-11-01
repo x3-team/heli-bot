@@ -73,6 +73,7 @@ export function CloudScreen({
   tick,
   busy,
   onStatus,
+  onInput,
   placeholder,
 }: {
   apiBase: string;
@@ -82,6 +83,8 @@ export function CloudScreen({
   /** A task is running: refresh more often. */
   busy: boolean;
   onStatus?: (status: CloudStatus) => void;
+  /** After each click or key of the user: a click may have downloaded a file. */
+  onInput?: () => void;
   /** Shown until the first frame: the mascot. */
   placeholder?: ReactNode;
 }) {
@@ -135,6 +138,7 @@ export function CloudScreen({
     try {
       apply(await sendCloudInput(apiBase, token, input));
       await refreshImage();
+      onInput?.();
     } catch (err) {
       setNote(err instanceof Error ? err.message : "Браузер на сервере сейчас недоступен.");
     }

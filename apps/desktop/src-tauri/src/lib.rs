@@ -5,6 +5,7 @@ use serde::Serialize;
 static AGENT_STOPPED: AtomicBool = AtomicBool::new(false);
 static LAUNCHED: std::sync::Mutex<Option<(String, u16)>> = std::sync::Mutex::new(None);
 
+mod files;
 mod local_browser;
 
 #[derive(Serialize)]
@@ -29,6 +30,9 @@ pub fn run() {
             browser_launch,
             browser_page_ws,
             log_agent_step,
+            files::file_save,
+            files::file_open,
+            files::file_reveal,
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Heli bot");

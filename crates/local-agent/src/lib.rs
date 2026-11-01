@@ -108,6 +108,7 @@ pub fn decide(policy: &Policy, action: &Action) -> Decision {
 }
 
 pub mod actions;
+pub mod files;
 pub mod scale;
 
 #[cfg(feature = "os")]
