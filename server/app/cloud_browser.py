@@ -408,6 +408,12 @@ def playwright_launcher():
     from playwright.sync_api import sync_playwright
 
     settings = get_settings()
+    env = chromium_env(settings.cloud_browser_libs)
+    if env.get("LD_LIBRARY_PATH"):
+        # Playwright's driver checks host libraries with its own environment before launching:
+        # it has to see the unpacked ones too.
+        os.environ["LD_LIBRARY_PATH"] = env["LD_LIBRARY_PATH"]
+        os.environ.setdefault("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")
     pw = sync_playwright().start()
     options: dict = {
         "headless": True,
@@ -415,7 +421,7 @@ def playwright_launcher():
     }
     if settings.cloud_browser_executable:
         options["executable_path"] = settings.cloud_browser_executable
-    options["env"] = chromium_env(settings.cloud_browser_libs)
+    options["env"] = env
     try:
         browser = pw.chromium.launch(**options)
     except Exception:
