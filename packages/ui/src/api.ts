@@ -53,6 +53,17 @@ export async function requestCode(base: string, email: string, inviteCode?: stri
   if (!response.ok) throw new ApiError(await readError(response), response.status);
 }
 
+/** Token for the shared test account when the server runs without sign-up; null when that is off. */
+export async function openAccess(base: string): Promise<AuthResult | null> {
+  try {
+    const response = await send(base, "/v1/auth/open", { method: "POST" });
+    if (!response.ok) return null;
+    return parseAuthResponse((await response.json()) as { access_token: string; trial_active?: boolean });
+  } catch {
+    return null;
+  }
+}
+
 export async function registerAccount(
   base: string,
   email: string,

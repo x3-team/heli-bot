@@ -116,3 +116,19 @@ def test_passwords_not_logged_in_auth_flow(caplog, client) -> None:
     assert secret not in caplog.text
     digest = hash_secret(secret)
     assert digest not in caplog.text
+
+
+def test_open_access_is_off_by_default(client) -> None:
+    assert client.post("/v1/auth/open").status_code == 404
+
+
+def test_open_access_reuses_one_account(client, monkeypatch) -> None:
+    monkeypatch.setenv("HELI_OPEN_ACCESS", "1")
+    first = client.post("/v1/auth/open")
+    assert first.status_code == 200
+    assert first.json()["trial_active"] is True
+    second = client.post("/v1/auth/open")
+    me1 = client.get("/v1/me", headers={"Authorization": f"Bearer {first.json()['access_token']}"}).json()
+    me2 = client.get("/v1/me", headers={"Authorization": f"Bearer {second.json()['access_token']}"}).json()
+    assert me1["id"] == me2["id"]
+    assert me1["consent_pdn"] is True

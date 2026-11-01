@@ -17,6 +17,7 @@ from app.auth import (
     issue_recovery_code,
     issue_token,
     login_with_password,
+    open_access_user,
     read_user_id,
     register_user,
     reset_password,
@@ -224,6 +225,19 @@ def register(body: RegisterBody, session: Session = Depends(get_db)) -> dict:
 def login_password(body: PasswordLoginBody, session: Session = Depends(get_db)) -> dict:
     try:
         user = login_with_password(session, body.email, body.password)
+        token = issue_token(user.id)
+    except AuthError as exc:
+        _fail(exc)
+    return {"access_token": token, "token_type": "bearer", "trial_active": trial_active(user)}
+
+
+@router.post("/auth/open")
+def open_access(session: Session = Depends(get_db)) -> dict:
+    settings = get_settings()
+    if not settings.open_access:
+        raise HTTPException(status_code=404, detail="open_access_disabled")
+    try:
+        user = open_access_user(session, settings.open_access_email)
         token = issue_token(user.id)
     except AuthError as exc:
         _fail(exc)

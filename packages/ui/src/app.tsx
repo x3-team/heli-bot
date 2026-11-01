@@ -7,6 +7,7 @@ import {
   loadBrowser,
   loadCredentials,
   loadMe,
+  openAccess,
   loadMemory,
   loadSchedules,
   loadUsage,
@@ -71,6 +72,21 @@ export function Shell({ apiBase: apiBaseProp }: { apiBase?: string }) {
   );
   const [token, setToken] = useState<string | null>(() => window.sessionStorage.getItem("heli-token"));
   const [authTrialActive, setAuthTrialActive] = useState(false);
+  // While the server runs without sign-up, skip the sign-in screen entirely.
+  const [probingOpen, setProbingOpen] = useState(() => !window.sessionStorage.getItem("heli-token"));
+
+  useEffect(() => {
+    if (token || !probingOpen) return;
+    let cancelled = false;
+    void openAccess(apiBase).then((auth) => {
+      if (cancelled) return;
+      if (auth) completeAuth(auth);
+      setProbingOpen(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [apiBase, token, probingOpen]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -81,6 +97,10 @@ export function Shell({ apiBase: apiBaseProp }: { apiBase?: string }) {
     window.sessionStorage.setItem("heli-token", auth.accessToken);
     setAuthTrialActive(auth.trialActive);
     setToken(auth.accessToken);
+  }
+
+  if (!token && probingOpen) {
+    return <main className="signin" />;
   }
 
   if (!token) {
@@ -103,6 +123,7 @@ export function Shell({ apiBase: apiBaseProp }: { apiBase?: string }) {
         window.sessionStorage.removeItem("heli-token");
         setAuthTrialActive(false);
         setToken(null);
+        setProbingOpen(true);
       }}
     />
   );

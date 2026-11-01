@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 import jwt
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -238,6 +239,34 @@ def verify_login_code(session: Session, email: str, code: str) -> User:
         if invite is not None and invite.uses < invite.max_uses:
             invite.uses += 1
     session.flush()
+    return user
+
+
+def open_access_user(session: Session, email: str) -> User:
+    """The shared account used while sign-up is switched off for testing."""
+    normalized = _normalize_email(email)
+    user = session.scalar(select(User).where(User.email == normalized))
+    if user is not None:
+        return user
+    now = datetime.now(timezone.utc)
+    user = User(
+        email=normalized,
+        consent_pdn=True,
+        consent_training=False,
+        is_admin=False,
+        monthly_limit_rub=get_settings().default_monthly_limit_rub,
+        trial_ends_at=now + TRIAL,
+        created_at=now,
+    )
+    try:
+        # Two first requests can race (React StrictMode runs effects twice).
+        with session.begin_nested():
+            session.add(user)
+    except IntegrityError:
+        existing = session.scalar(select(User).where(User.email == normalized))
+        if existing is None:
+            raise
+        return existing
     return user
 
 
