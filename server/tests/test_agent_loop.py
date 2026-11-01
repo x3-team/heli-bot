@@ -379,3 +379,25 @@ def test_browser_search_falls_back_to_server_search_on_captcha(client, session, 
     )
     assert "ru.wikipedia.org" in script.requests[2]["messages"][-1]["content"]
     assert events[-1]["type"] == "done"
+
+
+def test_cloud_executor_runs_browser_tools_on_the_server(client, session, monkeypatch) -> None:
+    from app.agent import executors
+
+    ran = []
+
+    def cloud(db, user, task_id, name, args):
+        ran.append((name, args))
+        return ClientResult("Адрес: https://example.amocrm.ru/leads\nСделки: 3")
+
+    executors.register_executor({"browser_open", "browser_read"}, cloud)
+    try:
+        script = _BrowserScript()
+        events = _run_with_client(
+            client, session, monkeypatch, "Сколько сделок?", script, [], {"content": "не должен вызываться"}
+        )
+    finally:
+        executors.unregister_executor({"browser_open", "browser_read"})
+    assert ran == [("browser_open", {"url": "https://example.amocrm.ru/leads"})]
+    assert not any(e["type"] == "client_action" for e in events)
+    assert events[-1]["reply"] == "Сделок 3"

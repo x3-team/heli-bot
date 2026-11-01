@@ -36,11 +36,26 @@ function tauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
+/**
+ * Fallback only: in v0.1 the agent's browser is the cloud computer, run by the server.
+ * The local Chrome/Edge path is on when VITE_HELI_LOCAL_BROWSER=1 at build time
+ * or localStorage "heli.localBrowser" = "on" on this device.
+ */
+export function localBrowserEnabled(): boolean {
+  const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
+  if (env?.VITE_HELI_LOCAL_BROWSER === "1") return true;
+  try {
+    return window.localStorage.getItem("heli.localBrowser") === "on";
+  } catch {
+    return false;
+  }
+}
+
 /** Tools this app can run: the server offers only these to the model. */
 export function availableClientTools(): string[] {
   const tools = ["ask_confirmation", ...extraHandlers.keys()];
   // browser_search is not shown to the model: the server sends web_search here when it has no search API key.
-  if (tauri()) tools.push(...BROWSER_TOOLS, "browser_search");
+  if (tauri() && localBrowserEnabled()) tools.push(...BROWSER_TOOLS, "browser_search");
   return tools;
 }
 

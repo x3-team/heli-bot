@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
+from app.agent.executors import executor_for, server_executed
 from app.agent.control import ClientResult, Control, NoControl
 from app.agent.loop import CONFIRM_TOOL, Budget, Outcome, ToolResult, approved, run_agent
 from app.agent.tools import SERVER_TOOL_NAMES, client_tool_names, tools_for
@@ -129,9 +130,12 @@ def execute_task(
 ) -> Turn:
     publish = publish or (lambda event: None)
     control = control or NoControl()
-    offered = [name for name in (client_tools or []) if name in client_tool_names()]
+    # The cloud computer (server executor) wins over the app for the same tool.
+    on_server = server_executed()
+    declared = set(client_tools or []) | on_server
+    offered = [name for name in client_tool_names() if name in declared]
     tools = tools_for(offered)
-    browser_search = BROWSER_SEARCH in (client_tools or []) and search_provider() == "wikipedia"
+    browser_search = BROWSER_SEARCH in declared and search_provider() == "wikipedia"
 
     prompt = with_memory(task.request_text, relevant(session, user, task.request_text))
     classified = metered_complete(
@@ -169,6 +173,14 @@ def execute_task(
         )
 
     def ask_client(call_id: str, name: str, real_args: dict, safe_args: dict) -> ClientResult:
+        executor = executor_for(name)
+        if executor is not None:
+            control.checkpoint()
+            try:
+                return executor(session, user, task.id, name, real_args)
+            except Exception:  # noqa: BLE001
+                log.exception("server executor failed tool=%s", name)
+                return ClientResult("", "executor_failed")
         publish({"type": "client_action", "call_id": call_id, "tool": name, "args": real_args, "safe_args": safe_args})
         return control.wait_result(call_id)
 
