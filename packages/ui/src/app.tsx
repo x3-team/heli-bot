@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import {
   ApiError,
+  type AuthResult,
   deleteCredential,
   deleteMemory,
   loadBrowser,
@@ -68,20 +69,24 @@ export function Shell({ apiBase: apiBaseProp }: { apiBase?: string }) {
     window.localStorage.getItem("heli-theme") === "dark" ? "dark" : "light",
   );
   const [token, setToken] = useState<string | null>(() => window.sessionStorage.getItem("heli-token"));
+  const [authTrialActive, setAuthTrialActive] = useState(false);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     window.localStorage.setItem("heli-theme", theme);
   }, [theme]);
 
+  function completeAuth(auth: AuthResult) {
+    window.sessionStorage.setItem("heli-token", auth.accessToken);
+    setAuthTrialActive(auth.trialActive);
+    setToken(auth.accessToken);
+  }
+
   if (!token) {
     return (
       <SignIn
         apiBase={apiBase}
-        onToken={(value) => {
-          window.sessionStorage.setItem("heli-token", value);
-          setToken(value);
-        }}
+        onAuth={completeAuth}
       />
     );
   }
@@ -90,10 +95,12 @@ export function Shell({ apiBase: apiBaseProp }: { apiBase?: string }) {
     <Workspace
       apiBase={apiBase}
       token={token}
+      initialTrialActive={authTrialActive}
       theme={theme}
       onTheme={setTheme}
       onSignOut={() => {
         window.sessionStorage.removeItem("heli-token");
+        setAuthTrialActive(false);
         setToken(null);
       }}
     />
@@ -102,7 +109,7 @@ export function Shell({ apiBase: apiBaseProp }: { apiBase?: string }) {
 
 type AuthScreen = "register" | "signin" | "recover";
 
-function SignIn({ apiBase, onToken }: { apiBase: string; onToken: (token: string) => void }) {
+function SignIn({ apiBase, onAuth }: { apiBase: string; onAuth: (auth: AuthResult) => void }) {
   const [screen, setScreen] = useState<AuthScreen>("signin");
   const [useCode, setUseCode] = useState(false);
   const [email, setEmail] = useState("");
@@ -139,24 +146,28 @@ function SignIn({ apiBase, onToken }: { apiBase: string; onToken: (token: string
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    setBusy(true);
     setError("");
+    if (screen === "register" && !pdn) {
+      setError("Нужно согласие на обработку данных.");
+      return;
+    }
+    if (screen === "signin" && useCode && sent && !pdn) {
+      setError("Нужно согласие на обработку данных.");
+      return;
+    }
+    setBusy(true);
     try {
       if (screen === "register") {
-        if (!pdn) {
-          setError("Нужно согласие на обработку данных.");
-          return;
-        }
-        onToken(await registerAccount(apiBase, email, password, pdn, training));
+        onAuth(await registerAccount(apiBase, email.trim(), password, pdn, training));
         return;
       }
       if (screen === "recover") {
         if (!sent) {
-          await recoverRequest(apiBase, email);
+          await recoverRequest(apiBase, email.trim());
           setSent(true);
           return;
         }
-        onToken(await recoverReset(apiBase, email, code, password));
+        onAuth(await recoverReset(apiBase, email.trim(), code, password));
         return;
       }
       if (useCode) {
@@ -164,14 +175,10 @@ function SignIn({ apiBase, onToken }: { apiBase: string; onToken: (token: string
           await askCode();
           return;
         }
-        if (!pdn) {
-          setError("Нужно согласие на обработку данных.");
-          return;
-        }
-        onToken(await verifyAndConsent(apiBase, email, code, pdn, training));
+        onAuth(await verifyAndConsent(apiBase, email.trim(), code, pdn, training));
         return;
       }
-      onToken(await loginPassword(apiBase, email, password));
+      onAuth(await loginPassword(apiBase, email.trim(), password));
     } catch (err) {
       if (err instanceof ApiError) setError(err.message);
       else if (err instanceof TypeError) setError(networkErrorMessage());
@@ -308,21 +315,23 @@ async function verifyAndConsent(
   code: string,
   pdn: boolean,
   training: boolean,
-): Promise<string> {
+): Promise<AuthResult> {
   const access = await verifyCode(apiBase, email, code);
-  await saveConsents(apiBase, access, pdn, training);
+  await saveConsents(apiBase, access.accessToken, pdn, training);
   return access;
 }
 
 function Workspace({
   apiBase,
   token,
+  initialTrialActive,
   theme,
   onTheme,
   onSignOut,
 }: {
   apiBase: string;
   token: string;
+  initialTrialActive?: boolean;
   theme: Theme;
   onTheme: (theme: Theme) => void;
   onSignOut: () => void;
@@ -338,7 +347,7 @@ function Workspace({
     monthPercent: 0,
     blocked: false,
     warning: false,
-    trialActive: false,
+    trialActive: initialTrialActive ?? false,
   });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -351,10 +360,23 @@ function Workspace({
   const stopped = usage.blocked || limitTone(usage.weekPercent) === "stop" || limitTone(usage.monthPercent) === "stop";
 
   useEffect(() => {
-    void loadUsage(apiBase, token).then(setUsage).catch(() => undefined);
+    void loadUsage(apiBase, token)
+      .then(setUsage)
+      .catch((err) => {
+        if (err instanceof ApiError) {
+          setError(err.message);
+          if (err.message.includes("войти снова")) {
+            onSignOut();
+          }
+        }
+      });
     void loadMe(apiBase, token)
       .then((me) => setConsents({ pdn: me.consentPdn, training: me.consentTraining }))
-      .catch(() => undefined);
+      .catch((err) => {
+        if (err instanceof ApiError && err.message.includes("войти снова")) {
+          onSignOut();
+        }
+      });
   }, [apiBase, token]);
 
   useEffect(() => {
@@ -459,6 +481,9 @@ function Workspace({
           <img src={avatar} alt="" />
           Heli bot
         </div>
+        {usage.trialActive ? (
+          <p className="muted trial-badge">Пробная неделя</p>
+        ) : null}
         <button type="button" data-emphasis="primary" onClick={newThread}>
           Новая задача
         </button>
