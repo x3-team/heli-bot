@@ -788,7 +788,7 @@ function Chat({
         <div className="hero-mascot">
           <Mascot state="waiting" size={72} />
         </div>
-        <h1>Чем займёмся?</h1>
+        <h1>Привет! Чем займёмся?</h1>
         {composer}
         <div className="ideas">
           {IDEAS.map((idea) => (
@@ -832,7 +832,7 @@ function Chat({
             <span className="bubble-avatar" aria-hidden="true">
               <Mascot state="thinking" size={28} />
             </span>
-            <div className="muted">{mascot === "working" ? "Работаю на компьютере агента…" : "Думаю…"}</div>
+            <div className="muted">{mascot === "working" ? "Лечу по задаче на компьютере агента…" : "Прогреваю винт…"}</div>
           </div>
         ) : null}
         {pending ? (
