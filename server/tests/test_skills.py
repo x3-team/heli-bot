@@ -151,3 +151,34 @@ def test_secret_of_another_user_is_refused(session, monkeypatch) -> None:
             session, other, "browser_type", {"text": placeholder(row.id)}, "https://romashka.bitrix24.ru/"
         )
     assert exc.value.code == "secret_not_found"
+
+
+def test_moysklad_read_is_get_only_and_compact() -> None:
+    import httpx
+
+    from app.agent import moysklad
+
+    path, params = moysklad.build_request({"resource": "stock", "below_minimum": True, "limit": 500})
+    assert path == "report/stock/all" and params == {"limit": 50, "filter": "stockMode=underMinimum"}
+    path, params = moysklad.build_request({"resource": "supply", "id": "0b1c2d3e-0000-4000-8000-000000000001"})
+    assert path.endswith("/0b1c2d3e-0000-4000-8000-000000000001") and "positions" in params["expand"]
+    for bad in ({"resource": "webhook"}, {"resource": "product", "id": "../../x"}):
+        try:
+            moysklad.build_request(bad)
+            raise AssertionError("must refuse")
+        except moysklad.MsError:
+            pass
+
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"meta": {"size": 1}, "rows": [
+            {"meta": {"href": "x"}, "id": "1", "name": "Перчатки", "article": "GL-M-100", "stock": 3,
+             "salePrice": 12550, "folder": {"name": "Склад"}}]})
+
+    data = moysklad.fetch("entity/product", {"filter": "article=GL-M-100"}, "Basic x", httpx.MockTransport(handler))
+    text = moysklad.format_result(data)
+    assert seen[0].method == "GET" and seen[0].url.host == "api.moysklad.ru"
+    assert '"article": "GL-M-100"' in text and '"salePrice": 125.5' in text and "href" not in text
+    assert moysklad.auth_header("token", "abc") == "Bearer abc"
