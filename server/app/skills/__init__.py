@@ -19,7 +19,7 @@ from app.skills.login import (
     placeholder,
     resolve_secret_args,
 )
-from app.skills.playbooks import GENERAL_RULES, PLAYBOOKS, Playbook, playbook
+from app.skills.playbooks import GENERAL_RULES, PLAYBOOKS, REGISTRATION_GUIDE, Playbook, playbook
 
 __all__ = [
     "PLAYBOOKS",
@@ -56,9 +56,15 @@ def detect(request_text: str = "", url: str | None = None) -> list[Playbook]:
     return found
 
 
+_REGISTRATION = re.compile(r"(?<![\w])(регистр\w*|зарегистр\w*|sign\s?up|создай\w* (аккаунт|учётн\w*|учетн\w*))", re.IGNORECASE)
+
+
 def guide_for(request_text: str = "", url: str | None = None) -> str | None:
     books = detect(request_text, url)
-    if not books:
+    signup = bool(_REGISTRATION.search(request_text or ""))
+    if not books and not signup:
         return None
     parts = [f"## {book.name}\n{book.guide}" for book in books]
+    if signup:
+        parts.append(REGISTRATION_GUIDE)
     return "\n\n".join([*parts, GENERAL_RULES])

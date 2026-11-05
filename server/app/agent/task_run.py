@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import logging
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -13,9 +14,10 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
+from app.aliases import PUBLIC_MODEL_ALIASES
 from app.agent.executors import executor_for, server_executed
 from app.agent.control import ClientResult, Control, NoControl
-from app.agent.loop import CONFIRM_TOOL, Budget, Outcome, ToolResult, approved, run_agent
+from app.agent.loop import CONFIRM_TOOL, Budget, Outcome, ToolResult, approved, has_image, run_agent
 from app.agent.tools import SERVER_TOOL_NAMES, client_tool_names, tools_for
 from app.llm.client import HeliClient
 from app.llm.router import Router, classification_messages, parse_classification
@@ -64,6 +66,8 @@ SYSTEM = (
     "Числа пиши цифрами и показывай расчёт: например, «на складе 12, нужно 20, не хватает 8». "
     "В итоговом ответе прямо приведи найденные данные: цифры, суммы, даты, реквизиты, названия, "
     "и откуда они. Не отвечай «готово» или «нашёл» без самих данных. Если что-то не удалось, так и скажи. "
+    "Не пиши, что сохранил или заполнил, пока не проверил: после сохранения перечитай запись и сверь каждое "
+    "поле с задачей; в ответе только подтверждённое на экране. "
     "Не останавливайся на полпути: если задача просит создать, записать или отправить — сделай это "
     "инструментами, а не предлагай пользователю. Не задавай уточняющих вопросов, пока не попробовал "
     "найти данные сам (поиск, почта, CRM, чаты); если запрос не дал результата, переформулируй его. "
@@ -132,6 +136,32 @@ def today_text(today: str | None = None) -> str:
     return f"{day:%d.%m.%Y} ({day.isoformat()}, {_WEEKDAYS[day.weekday()]})"
 
 
+# Model rounds per run by the classifier's complexity: forms in 1С / МойСклад need more than 15.
+STEPS_BY_COMPLEXITY = {1: 15, 2: 30, 3: 40}
+
+
+def steps_for(complexity: int) -> int:
+    raw = os.environ.get("HELI_MAX_STEPS", "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    return STEPS_BY_COMPLEXITY.get(complexity, 30)
+
+
+def run_max_rub() -> Decimal | None:
+    """Hard ceiling for one run in rubles (HELI_RUN_MAX_RUB, default 30; 0 = none). Auto-pause comes earlier."""
+    raw = os.environ.get("HELI_RUN_MAX_RUB", "30").strip()
+    try:
+        value = Decimal(raw)
+    except Exception:  # noqa: BLE001
+        return Decimal("30")
+    return value if value > 0 else None
+
+
+def vision_alias() -> str:
+    alias = os.environ.get("HELI_VISION_ALIAS", "").strip() or "heli-vision"
+    return alias if alias in PUBLIC_MODEL_ALIASES else "heli-vision"
+
+
 def system_prompt(tools: list[dict], guide: str | None = None, today: str | None = None) -> str:
     names = {tool["function"]["name"] for tool in tools}
     text = SYSTEM.format(today=today_text(today))
@@ -139,6 +169,10 @@ def system_prompt(tools: list[dict], guide: str | None = None, today: str | None
         text += CLOUD_HINT if "browser_open" in server_executed() else BROWSER_HINT
     if CONFIRM_TOOL in names:
         text += CONFIRM_HINT
+    if "save_credential" in names:
+        from app.agent.credentials import CREDENTIALS_HINT
+
+        text += CREDENTIALS_HINT
     if "save_file" in names:
         from app.files import FILES_HINT
 
@@ -221,7 +255,7 @@ def execute_task(
     publish: Publish | None = None,
     estimate_rub: Decimal | None = None,
     autopause: bool = True,
-    max_steps: int = 15,
+    max_steps: int | None = None,
 ) -> Turn:
     publish = publish or (lambda event: None)
     control = control or NoControl()
@@ -263,6 +297,8 @@ def execute_task(
     session.commit()
     publish({"type": "step", "kind": "classify", "position": step.position, "text": task_type})
 
+    if max_steps is None:
+        max_steps = steps_for(complexity)
     ratio = remaining_ratio(snapshot(session, user))
     route = Router(client).route(phase="execute", complexity=complexity, quota_remaining=ratio)
     state = {"url": None}
@@ -273,10 +309,12 @@ def execute_task(
     ]
 
     def complete(msgs: list[dict], round_tools: list[dict] | None):
-        if state["url"]:
+        if state["url"] and msgs and msgs[0].get("role") == "system":
             msgs[0] = {"role": "system", "content": system_prompt(tools, _guide(task.request_text, state["url"]))}
+        # A screenshot in this round: a model that sees pictures reads it (1С and other canvas-like pages).
+        alias = vision_alias() if has_image(msgs) else route.alias
         return metered_complete(
-            session, user, task.id, client, route.alias, msgs, max_tokens=ANSWER_MAX_TOKENS, tools=round_tools
+            session, user, task.id, client, alias, msgs, max_tokens=ANSWER_MAX_TOKENS, tools=round_tools
         )
 
     def ask_client(call_id: str, name: str, real_args: dict, safe_args: dict) -> ClientResult:
@@ -393,6 +431,7 @@ def execute_task(
         complete=complete,
         budget=Budget(
             max_steps=max_steps,
+            max_rub=run_max_rub(),
             estimate_rub=estimate_rub if estimate_rub is not None else estimate_turn_reserve(task.request_text),
             autopause=autopause,
         ),
