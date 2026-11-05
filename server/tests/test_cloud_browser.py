@@ -534,3 +534,61 @@ def test_api_live_screen_and_user_input(client, browser, monkeypatch):
         assert client.get("/v1/cloud-browser").status_code == 401
     finally:
         cb.set_pool(None)
+
+
+ONEC = """<!doctype html><html><head><title>Бухгалтерия предприятия / 1С:Предприятие</title>
+<style>.press,.themeCell,.gridLine{cursor:pointer;padding:4px}</style></head><body>
+<div id="themesCell"><div id="themesCell_theme_0" class="themeCell" onmousedown="document.title='Раздел:Банк'">Банк и касса</div>
+<div id="themesCell_theme_1" class="themeCell">Продажи</div></div>
+<div class="window"><div class="openedItem">Путеводитель по демо-базе</div>
+<div class="openedClose" onclick="this.parentElement.remove()">×</div></div>
+<div class="grid"><div class="gridHead"><div class="gridBoxText">Наименование</div><div class="gridBoxText">ИНН</div></div>
+<div class="gridBody"><div class="gridLine"><div class="gridBoxText">ООО Ромашка</div><div class="gridBoxText">7701234567</div></div>
+<div class="gridLine"><div class="gridBoxText">ИП Иванов</div><div class="gridBoxText">500100732259</div></div></div></div>
+<div class="press" id="form0_Провести" style="position:absolute;left:600px;top:500px;width:120px;height:30px">Провести и закрыть</div>
+<input class="editInput" id="form0_Дата_i0" value="05.11.2026"><div id="form0_Дата#title_text">Дата</div>
+</body></html>"""
+
+
+@pytest.mark.skipif(_chromium() is None, reason="Playwright Chromium not installed")
+def test_real_chromium_sees_1c_web_client(tmp_path, monkeypatch):
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        browser_ = pw.chromium.launch(executable_path=_chromium())
+        page = browser_.new_page(viewport=cb.VIEWPORT)
+        page.set_content(ONEC)
+        p = cb.Page(page.context, page)
+        assert p.close_start_windows() == ["Путеводитель по демо-базе"]
+        text = p.read()
+        assert "«Банк и касса»" in text and "«Продажи»" in text
+        assert "ООО Ромашка | 7701234567" in text and "Таблица" in text
+        assert "Дата: 05.11.2026" in text
+        assert "Это 1С" in text
+        assert "Путеводитель" not in text
+        p.click(None, "Банк и касса")
+        assert page.title() == "Раздел:Банк"
+        with pytest.raises(cb.CloudError) as refused:
+            p.click_at(650, 515, confirmed=False)
+        assert refused.value.code.startswith("needs_confirmation:Провести")
+        assert "Нажал в точке" in p.click_at(650, 515, confirmed=True)
+        browser_.close()
+
+
+def test_same_1c_base_and_links():
+    assert cb.onec_link("https://h/b/ru_RU/#e1cib/list/Справочник.Контрагенты")
+    assert cb.same_base("https://h/b/ru_RU/#e1cib/a", "https://h/b/ru_RU/#e1cib/list/b")
+    assert not cb.same_base("https://h/b/ru_RU/", "https://h/c/ru_RU/#e1cib/x")
+
+
+def test_cookie_import_formats():
+    c = cb.normalize_cookie({"name": "BITRIX_SM_LOGIN", "value": "v", "domain": ".x.bitrix24.ru",
+                             "expirationDate": 1893456000, "sameSite": "no_restriction", "secure": True})
+    assert c["expires"] == 1893456000 and c["sameSite"] == "None" and c["path"] == "/"
+    assert cb.normalize_cookie({"name": "a"}) is None
+
+
+def test_imported_cookies_join_the_saved_profile(browser, tmp_path):
+    user = uuid.uuid4()
+    taken = browser.import_cookies(user, [{"name": "sid", "value": "1", "domain": "x.bitrix24.ru"}])
+    assert taken == 1 and browser.saved_sites(user) == ["x.bitrix24.ru"]

@@ -860,8 +860,14 @@ def run(
     except QuotaError as exc:
         _fail(exc)
     except HeliError as exc:
+        session.rollback()
+        runs._close_task(session, task.id, "fail", None)
         status = 503 if exc.code == "missing_api_key" else 502
         raise HTTPException(status_code=status, detail=exc.code) from None
+    # A JSON run is over here: give the task its outcome so it reaches the trajectories too
+    # (the SSE path does the same in app.agent.runs). A later rating overrides it.
+    session.commit()
+    runs._close_task(session, task.id, "aborted" if turn.stopped else "success", turn.text)
     return {
         "alias": turn.alias,
         "reply": turn.text,
@@ -879,6 +885,9 @@ def get_run_session_factory():
 
 def _sse(agent_run: "runs.AgentRun", after: int) -> StreamingResponse:
     def body():
+        # First bytes right away: proxies and clients that wait for the body before the first step
+        # (classification takes a few seconds) dropped the connection at the start of a run.
+        yield "retry: 3000\n: open\n\n"
         for event in agent_run.stream(after):
             if event is None:
                 yield ": ping\n\n"
@@ -1060,6 +1069,36 @@ def report_incident(
     return {"id": str(row.id)}
 
 
+@router.get("/admin/trajectories/status")
+def trajectories_status(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    """Why the export may be empty: tasks without an outcome, no training consent, no hash pepper."""
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="admin_required")
+    from sqlalchemy import func, select
+
+    from app.config import get_settings as _settings
+    from app.models import Task as _Task
+    from app.models import Trajectory as _Trajectory
+
+    count = lambda q: int(session.scalar(q) or 0)  # noqa: E731
+    return {
+        "tasks": count(select(func.count()).select_from(_Task)),
+        "tasks_with_outcome": count(select(func.count()).select_from(_Task).where(_Task.outcome.is_not(None))),
+        "tasks_of_consenting_users": count(
+            select(func.count()).select_from(_Task).join(User, User.id == _Task.user_id).where(User.consent_training.is_(True))
+        ),
+        "trajectories": count(select(func.count()).select_from(_Trajectory)),
+        "my_consent_training": bool(user.consent_training),
+        "hash_pepper_set": bool(_settings().trajectory_hash_pepper),
+        "hint": "Траектория пишется, когда у задачи есть итог, у пользователя consent_training=true и задан "
+        "TRAJECTORY_HASH_PEPPER. Включить согласие: PUT /v1/me/consents {\"consent_training\": true} "
+        "(старые завершённые задачи допишутся сразу).",
+    }
+
+
 @router.get("/admin/trajectories.jsonl")
 def export_trajectories(
     kind: str = "raw",
@@ -1160,6 +1199,22 @@ def cloud_browser_input(body: CloudInputBody, user: User = Depends(get_current_u
     if result.error:
         raise HTTPException(status_code=_CLOUD_STATUS.get(result.error, 502), detail=result.error)
     return cloud_browser.pool().status(user.id)
+
+
+class CloudCookiesBody(BaseModel):
+    cookies: list[dict] = Field(min_length=1, max_length=500)
+
+
+@router.post("/cloud-browser/cookies")
+def cloud_browser_cookies(body: CloudCookiesBody, user: User = Depends(get_current_user)) -> dict:
+    """Bring a sign-in from the user's own browser (exported cookies) into the cloud browser's saved
+    sign-ins, so tasks start signed in (Битрикс24 asks a captcha on every new sign-in from the server)."""
+    _cloud_on()
+    try:
+        taken = cloud_browser.pool().import_cookies(user.id, body.cookies)
+    except cloud_browser.CloudError as exc:
+        raise HTTPException(status_code=503 if exc.code == "no_vault_key" else 400, detail=exc.code) from None
+    return {"imported": taken, **cloud_browser.pool().status(user.id)}
 
 
 @router.post("/cloud-browser/stop")

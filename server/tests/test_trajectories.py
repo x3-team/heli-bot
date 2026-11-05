@@ -266,6 +266,8 @@ def test_login_and_export_roundtrip(client, session) -> None:
     assert "heli-fast" in raw.text
     failed = client.get("/v1/admin/trajectories.jsonl?kind=sft&success_only=true", headers=headers)
     assert failed.status_code == 200
+    status = client.get("/v1/admin/trajectories/status", headers=headers).json()
+    assert status["trajectories"] >= 1 and status["tasks_with_outcome"] >= 1 and "hint" in status
 
 
 def test_log_filter_hides_credential(caplog, monkeypatch) -> None:

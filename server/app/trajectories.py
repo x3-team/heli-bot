@@ -188,7 +188,7 @@ def auto_finish(
         refresh_document(session, task)
     except TrajectoryError as exc:
         # A missing hash pepper must not break the run; the outcome is still kept.
-        log.warning("trajectory not written task=%s code=%s", task.id, exc.code)
+        log.error("trajectory not written task=%s code=%s (dataset loses this task)", task.id, exc.code)
     log.info("task auto-finished id=%s outcome=%s", task.id, outcome)
     return task
 
@@ -259,6 +259,8 @@ def refresh_document(session: Session, task: Task) -> Trajectory | None:
     )
     feedback_row = session.scalar(select(TaskFeedback).where(TaskFeedback.task_id == task.id))
     if user is None or not user.consent_training:
+        if user is not None and task.outcome is not None:
+            log.info("trajectory skipped task=%s: no training consent", task.id)
         existing = session.scalar(select(Trajectory).where(Trajectory.task_id == task.id))
         if existing is not None:
             session.delete(existing)
