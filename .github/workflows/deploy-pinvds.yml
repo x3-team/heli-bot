@@ -1,0 +1,91 @@
+name: deploy-pinvds
+
+# Heli bot API on pinvds (bot-api.getheli.ru, /opt/heli-bot). Manual only.
+#   mode=diff    compare the running copy with this commit, change nothing (run it first:
+#                the copy on the host was made by hand, not from git)
+#   mode=deploy  tests, then back up, sync server/, pip, alembic, restart heli-bot-api,
+#                health check; rolls back by itself if the API does not come up
+# getheli.ru (/opt/heli), nginx and certificates on the same host are never touched.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "diff = only show differences, deploy = install"
+        type: choice
+        options: [diff, deploy]
+        default: diff
+  pull_request:
+    paths:
+      - "infra/deploy/pinvds/**"
+      - ".github/workflows/deploy-pinvds.yml"
+
+concurrency:
+  group: heli-pinvds-deploy
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the host script
+        run: bash -n infra/deploy/pinvds/deploy.sh
+
+  server-tests:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'deploy'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install server
+        run: python -m pip install -e "./server[dev]"
+      - name: Test
+        env:
+          HELI_API_KEY: ${{ secrets.HELI_API_KEY }}
+        run: python -m pytest -q server/tests
+
+  pinvds:
+    if: github.event_name == 'workflow_dispatch' && !failure() && !cancelled()
+    needs: [validate, server-tests]
+    runs-on: ubuntu-latest
+    environment: pinvds
+    env:
+      MODE: ${{ inputs.mode }}
+      SSH_HOST: ${{ secrets.PINVDS_SSH_HOST }}
+      SSH_USER: ${{ secrets.PINVDS_SSH_USER }}
+      SSH_PORT: ${{ secrets.PINVDS_SSH_PORT || '22' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pack the release
+        run: |
+          set -eu
+          echo "${GITHUB_SHA} ${GITHUB_REF_NAME} $(date -u +%Y-%m-%dT%H:%M:%SZ)" > server/REVISION
+          tar -czf heli-bot-server.tgz --exclude='__pycache__' --exclude='*.egg-info' --exclude='.pytest_cache' server
+          ls -l heli-bot-server.tgz
+
+      - name: SSH key and pinned host key
+        env:
+          SSH_KEY: ${{ secrets.PINVDS_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.PINVDS_SSH_KNOWN_HOSTS }}
+        run: |
+          set -eu
+          test -n "$SSH_HOST" && test -n "$SSH_USER" && test -n "$SSH_KEY" && test -n "$KNOWN_HOSTS" \
+            || { echo "Missing PINVDS_SSH_HOST / PINVDS_SSH_USER / PINVDS_SSH_KEY / PINVDS_SSH_KNOWN_HOSTS secrets"; exit 1; }
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/pinvds && chmod 600 ~/.ssh/pinvds
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts
+          printf 'Host pinvds\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/pinvds\n  StrictHostKeyChecking yes\n  BatchMode yes\n' \
+            "$SSH_HOST" "$SSH_USER" "$SSH_PORT" > ~/.ssh/config
+
+      - name: Copy release and script
+        run: |
+          set -eu
+          scp -q heli-bot-server.tgz infra/deploy/pinvds/deploy.sh pinvds:/tmp/
+          ssh pinvds 'chmod +x /tmp/deploy.sh'
+
+      - name: ${{ inputs.mode }}
+        run: ssh pinvds "bash /tmp/deploy.sh '$MODE' /tmp/heli-bot-server.tgz; rc=\$?; rm -f /tmp/heli-bot-server.tgz /tmp/deploy.sh; exit \$rc"
