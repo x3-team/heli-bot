@@ -4,7 +4,7 @@
   сценарии и моки, ключ не нужен, гоняется в pytest.
 * ``noop`` — сразу сдаётся. Должен проваливать всё: проверка, что тесты не
   засчитывают пустой ответ.
-* ``baseline`` — простой цикл tool calling через шлюз getheli. Нужен, пока нет
+* ``baseline`` — простой цикл tool calling через провайдера алиаса (шлюз getheli или РФ). Нужен, пока нет
   прод-цикла, и как нижняя планка для сравнения.
 * ``auto`` — прод-цикл ``app.agent.evals:run``, если он уже в репо, иначе baseline.
 * ``module:func`` — любой агент с контрактом ``run(task, tools, call_tool, budget)``,
@@ -50,14 +50,13 @@ def noop_agent(task: str, tools: list[dict], call_tool: Callable[[str, dict], An
 
 def baseline_agent(task: str, tools: list[dict], call_tool: Callable[[str, dict], Any], budget: dict,
                    history: list[dict] | None = None) -> dict:
-    from openai import OpenAI
-
-    from app.llm.catalog import upstream
+    from app.llm.catalog import resolve
+    from app.llm.client import sdk_for
     from app.llm.prices import cost_rub
 
     alias = os.environ.get("HELI_EVAL_ALIAS", "heli-fast")
-    client = OpenAI(api_key=os.environ["HELI_API_KEY"],
-                    base_url=os.environ.get("HELI_BASE_URL", "https://getheli.ru/v1"), max_retries=1)
+    provider, model = resolve(alias)
+    client = sdk_for(provider, max_retries=1)
     messages: list[dict] = [{"role": "system", "content": SYSTEM}]
     messages += [{"role": h["role"], "content": h["text"]} for h in history or []]
     messages.append({"role": "user", "content": task})
@@ -66,7 +65,7 @@ def baseline_agent(task: str, tools: list[dict], call_tool: Callable[[str, dict]
     for turn in range(int(budget["max_steps"]) + 1):
         if spent >= max_rub:
             return {"final_answer": "", "steps": turn, "cost_rub": spent, "stopped": "budget"}
-        response = client.chat.completions.create(model=upstream(alias), messages=messages, tools=tools,
+        response = client.chat.completions.create(model=model, messages=messages, tools=tools,
                                                   temperature=0, max_tokens=800)
         usage = response.usage
         spent += cost_rub(alias, int(getattr(usage, "prompt_tokens", 0) or 0),

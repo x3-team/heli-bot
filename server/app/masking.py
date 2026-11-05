@@ -8,9 +8,10 @@ export or an API payload.
 from __future__ import annotations
 
 import logging
-import os
 import re
 from typing import Any
+
+from app.llm.catalog import secret_values
 
 SECRET_KEYS = {
     "password",
@@ -53,21 +54,28 @@ _CARD = re.compile(r"(?<!\d)(?:\d[ \-]?){13,19}(?!\d)")
 _BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]+=*")
 _TEXT_LIMIT = 200_000
 
+def _strip_secrets(text: str, secrets: list[str]) -> str:
+    for secret in secrets:
+        if secret in text:
+            text = text.replace(secret, "[redacted]")
+    return text
+
+
 _redact_filter_installed = False
 _log_factory = logging.getLogRecordFactory()
 
 
 def _redacting_factory(*args, **kwargs):
     record = _log_factory(*args, **kwargs)
-    secret = os.environ.get("HELI_API_KEY") or ""
-    if not secret:
+    secrets = secret_values()
+    if not secrets:
         return record
     try:
         message = record.getMessage()
     except Exception:
         return record
-    if secret in message:
-        record.msg = message.replace(secret, "[redacted]")
+    if any(secret in message for secret in secrets):
+        record.msg = _strip_secrets(message, secrets)
         record.args = None
     return record
 
@@ -109,10 +117,7 @@ def redact_secrets_text(text: str) -> str:
     """Drop credentials only. Personal data stays until the training copy is built."""
     if not text:
         return text
-    secret = os.environ.get("HELI_API_KEY") or ""
-    masked = text
-    if secret and secret in masked:
-        masked = masked.replace(secret, "[redacted]")
+    masked = _strip_secrets(text, secret_values())
     return _BEARER.sub("Bearer [redacted]", masked)
 
 
@@ -135,10 +140,7 @@ def redact_secrets(value: Any) -> Any:
 def mask_text(text: str) -> str:
     if not text:
         return text
-    secret = os.environ.get("HELI_API_KEY") or ""
-    masked = text
-    if secret and secret in masked:
-        masked = masked.replace(secret, "[redacted]")
+    masked = _strip_secrets(text, secret_values())
     masked = _BEARER.sub("Bearer [redacted]", masked)
     masked = _EMAIL.sub("[email]", masked)
     masked = _PHONE.sub("[phone]", masked)
@@ -172,15 +174,15 @@ def mask_value(value: Any) -> Any:
 
 class RedactLogFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        secret = os.environ.get("HELI_API_KEY") or ""
-        if not secret:
+        secrets = secret_values()
+        if not secrets:
             return True
         try:
             message = record.getMessage()
         except Exception:
             return True
-        if secret in message:
-            record.msg = message.replace(secret, "[redacted]")
+        if any(secret in message for secret in secrets):
+            record.msg = _strip_secrets(message, secrets)
             record.args = ()
         return True
 

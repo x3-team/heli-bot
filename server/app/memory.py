@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 import uuid
 from datetime import datetime, timezone
 
@@ -12,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.llm.catalog import configured
 from app.llm.prices import cost_rub
 from app.masking import redact_secrets_text
 from app.models import MemoryFact, User
@@ -80,7 +80,7 @@ def with_memory(text: str, facts: list[str]) -> str:
 
 
 def embed_or_skip(text: str) -> list[float] | None:
-    if get_settings().app_env == "test" or not os.environ.get("HELI_API_KEY", "").strip():
+    if get_settings().app_env == "test" or not configured("heli-embed"):
         return None
     try:
         from app.llm.client import HeliClient, HeliError
@@ -99,7 +99,8 @@ def _public(row: MemoryFact) -> dict:
 
 
 def _rank(query: str, query_vec: list[float] | None, row: MemoryFact) -> float:
-    if query_vec and isinstance(row.embedding, list) and row.embedding:
+    # A vector from another embedding model (after a provider switch) has another size: use words.
+    if query_vec and isinstance(row.embedding, list) and len(row.embedding) == len(query_vec):
         return _cosine(query_vec, [float(value) for value in row.embedding])
     return _overlap(query, row.text)
 

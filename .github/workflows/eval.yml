@@ -11,6 +11,12 @@ on:
       alias:
         description: "Модель для baseline: heli-fast, heli-smart, ..."
         default: heli-fast
+      models:
+        description: "Набор моделей: gateway (зарубежные через getheli) или ru (Cloud.ru, без VPN)"
+        default: gateway
+      upstream:
+        description: "Своя модель для алиаса, например cloudru:openai/gpt-oss-120b или yandex:gpt://{folder}/yandexgpt/latest"
+        default: ""
       only:
         description: "id сценариев или категории через запятую (пусто = все)"
         default: ""
@@ -39,12 +45,22 @@ jobs:
         working-directory: server
         env:
           HELI_API_KEY: ${{ secrets.HELI_API_KEY }}
+          CLOUDRU_API_KEY: ${{ secrets.CLOUDRU_API_KEY }}
+          YANDEX_API_KEY: ${{ secrets.YANDEX_API_KEY }}
+          YANDEX_FOLDER_ID: ${{ secrets.YANDEX_FOLDER_ID }}
+          HELI_MODELS: ${{ inputs.models || 'gateway' }}
           HELI_EVAL_ALIAS: ${{ inputs.alias || 'heli-fast' }}
+          EVAL_UPSTREAM: ${{ inputs.upstream }}
           # Ночью только отчёт: красный job без изменений в коде никому не нужен.
           GATE: ${{ github.event_name == 'schedule' && '0' || inputs.gate }}
         run: |
-          if [ -z "$HELI_API_KEY" ]; then
-            echo "HELI_API_KEY не задан, живой прогон пропущен" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$EVAL_UPSTREAM" ]; then
+            # Подменяем модель выбранного алиаса: heli-fast-alt -> HELI_UPSTREAM_FAST_ALT.
+            var="HELI_UPSTREAM_$(echo "${HELI_EVAL_ALIAS#heli-}" | tr 'a-z-' 'A-Z_')"
+            export "$var=$EVAL_UPSTREAM"
+          fi
+          if ! python -c "import sys; from app.llm.catalog import configured; sys.exit(0 if configured('$HELI_EVAL_ALIAS') else 1)"; then
+            echo "Нет ключа провайдера для $HELI_EVAL_ALIAS ($HELI_MODELS), живой прогон пропущен" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           set +e

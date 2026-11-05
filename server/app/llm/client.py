@@ -1,4 +1,4 @@
-"""getheli chat client. The key is read from HELI_API_KEY and never logged."""
+"""Model client. Provider keys (HELI_API_KEY, CLOUDRU_API_KEY, YANDEX_API_KEY) are never logged."""
 
 from __future__ import annotations
 
@@ -7,9 +7,10 @@ import os
 from dataclasses import dataclass, field
 from decimal import Decimal
 
+import openai
 from openai import OpenAI
 
-from app.llm.catalog import CatalogError, upstream
+from app.llm.catalog import CatalogError, Provider, provider_key, resolve
 from app.llm.prices import cost_rub
 
 log = logging.getLogger(__name__)
@@ -59,17 +60,46 @@ class Completion:
         )
 
 
+def sdk_for(provider: Provider, max_retries: int = 0) -> OpenAI:
+    key = provider_key(provider)
+    if not key:
+        raise HeliError("missing_api_key")
+    base_url = os.environ.get(provider.url_env, "") or provider.default_url
+    headers = {}
+    if provider.name == "yandex" and os.environ.get("YANDEX_FOLDER_ID"):
+        headers["OpenAI-Project"] = os.environ["YANDEX_FOLDER_ID"]
+    return openai.OpenAI(api_key=key, base_url=base_url, max_retries=max_retries, default_headers=headers or None)
+
+
 class HeliClient:
-    def __init__(self, client: OpenAI) -> None:
+    """One SDK per provider. A client passed in directly (tests) serves every provider."""
+
+    def __init__(self, client: OpenAI | None = None) -> None:
         self._client = client
+        self._sdks: dict[str, OpenAI] = {}
 
     @classmethod
     def from_env(cls) -> HeliClient:
-        key = os.environ.get("HELI_API_KEY", "")
-        if not key:
-            raise HeliError("missing_api_key")
-        base_url = os.environ.get("HELI_BASE_URL", "https://getheli.ru/v1")
-        return cls(OpenAI(api_key=key, base_url=base_url, max_retries=0))
+        client = cls()
+        try:
+            client._sdk(resolve("heli-fast")[0])
+        except CatalogError as exc:
+            raise HeliError(exc.code) from None
+        return client
+
+    def _sdk(self, provider: Provider) -> OpenAI:
+        if self._client is not None:
+            return self._client
+        if provider.name not in self._sdks:
+            self._sdks[provider.name] = sdk_for(provider)
+        return self._sdks[provider.name]
+
+    def _route(self, alias: str) -> tuple[OpenAI, str]:
+        try:
+            provider, model = resolve(alias)
+        except CatalogError as exc:
+            raise HeliError(exc.code) from None
+        return self._sdk(provider), model
 
     def complete(
         self,
@@ -78,15 +108,12 @@ class HeliClient:
         max_tokens: int = 256,
         tools: list[dict] | None = None,
     ) -> Completion:
-        try:
-            model = upstream(alias)
-        except CatalogError as exc:
-            raise HeliError(exc.code) from None
+        sdk, model = self._route(alias)
         kwargs: dict = {}
         if tools:
             kwargs["tools"] = tools
         try:
-            response = self._client.chat.completions.create(
+            response = sdk.chat.completions.create(
                 model=model,
                 messages=messages,
                 max_tokens=max_tokens,
@@ -134,12 +161,9 @@ class HeliClient:
         )
 
     def embed(self, text: str) -> list[float]:
+        sdk, model = self._route("heli-embed")
         try:
-            model = upstream("heli-embed")
-        except CatalogError as exc:
-            raise HeliError(exc.code) from None
-        try:
-            response = self._client.embeddings.create(model=model, input=text)
+            response = sdk.embeddings.create(model=model, input=text)
         except Exception:
             log.info("embedding request failed")
             raise HeliError("request_failed") from None

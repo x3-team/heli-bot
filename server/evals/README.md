@@ -38,11 +38,24 @@ HELI_API_KEY=... python -m evals --agent baseline --out ../eval-report
 HELI_API_KEY=... python -m evals --agent auto --only cross,inn-07 --gate 0.7
 ```
 
+Модели из РФ (Cloud.ru, без VPN, данные остаются в РФ) — тот же прогон с `HELI_MODELS=ru`.
+Любую модель можно подставить в алиас: `HELI_UPSTREAM_FAST=cloudru:<id>` или
+`yandex:gpt://{folder}/yandexgpt/latest` (нужны `YANDEX_API_KEY` и `YANDEX_FOLDER_ID`). Цена в отчёте
+считается по прайсу алиаса, поэтому при подмене модели ₽ — ориентир, а не точная сумма.
+
+```bash
+HELI_MODELS=ru CLOUDRU_API_KEY=... python -m evals --agent auto --out ../eval-report-ru
+HELI_MODELS=ru CLOUDRU_API_KEY=... HELI_EVAL_ALIAS=heli-smart python -m evals --agent baseline
+```
+
+В Actions → eval: поля `models` (`gateway` / `ru`) и `upstream`; секреты `CLOUDRU_API_KEY`,
+`YANDEX_API_KEY`, `YANDEX_FOLDER_ID`.
+
 `--agent`:
 
 * `golden` — проигрывает эталонную траекторию сценария. Гоняется в pytest и проверяет сами сценарии.
 * `noop` — ничего не делает; тесты следят, что он проваливает всё.
-* `baseline` — простой цикл tool calling через шлюз getheli (`HELI_EVAL_ALIAS`, по умолчанию `heli-fast`).
+* `baseline` — простой цикл tool calling на модели алиаса `HELI_EVAL_ALIAS` (по умолчанию `heli-fast`).
 * `auto` — прод-цикл `app.agent.evals:run`, когда он появится, иначе `baseline`.
 * `module:func` — любой агент с тем же контрактом.
 
