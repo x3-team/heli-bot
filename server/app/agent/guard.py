@@ -17,7 +17,7 @@ _RISKY_NAME = re.compile(
 )
 # Buttons in the user's browser that do the same.
 _RISKY_LABEL = re.compile(
-    r"отправ|оплат|заплат|удал|опубликов|перевест|перевод|списат|подписат|подтверд|выставить сч|send|pay|delete|remove|publish|submit",
+    r"отправ|оплат|заплат|удал|опубликов|провест|перевест|перевод|списат|подписат|подтверд|выставить сч|send|pay|delete|remove|publish|submit",
     re.I,
 )
 _ELEMENT = re.compile(r"^\[(\d+)\]\s+(.*)$")

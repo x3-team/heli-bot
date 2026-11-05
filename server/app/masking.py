@@ -52,6 +52,16 @@ _SNILS = re.compile(r"(?i)(снилс)\s*[:№#]?\s*\d{3}[\s\-]?\d{3}[\s\-]?\d{3
 _CARD = re.compile(r"(?<!\d)(?:\d[ \-]?){13,19}(?!\d)")
 _BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]+=*")
 _TEXT_LIMIT = 200_000
+# «Пароль: Abc123!», «**пароль** — `x9!k`», «password=...»: the value after the word goes.
+_PASSWORD = re.compile(
+    r"(?i)(?<![\w])(пароль|паролем|пароля|password|passwd|pwd)"
+    r"((?:\*\*|__)?\s*(?:[:=]|—|–|-{1,2}|\s(?:это|is)\s)\s*(?:\*\*|__)?\s*)"
+    r"([`'\"«]?)(?!<CREDENTIAL)(?!•)([^\s`'\"»<]{4,})([`'\"»]?)"
+)
+_PASSWORD_QUOTED = re.compile(
+    r"(?i)(?<![\w])(пароль|паролем|пароля|password)(\s+)([`«\"'])(?!<CREDENTIAL)([^`»\"'\s]{4,})([`»\"'])"
+)
+PASSWORD_MASK = "••••••••"
 
 _redact_filter_installed = False
 _log_factory = logging.getLogRecordFactory()
@@ -105,6 +115,14 @@ def _mask_upstream(text: str) -> str:
     return masked
 
 
+def mask_passwords(text: str) -> str:
+    """Hide a password written out in text (an answer, a note, a typed value): keep the word, drop the value."""
+    if not text or not isinstance(text, str):
+        return text
+    swap = lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}{PASSWORD_MASK}{m.group(5)}"  # noqa: E731
+    return _PASSWORD_QUOTED.sub(swap, _PASSWORD.sub(swap, text))
+
+
 def redact_secrets_text(text: str) -> str:
     """Drop credentials only. Personal data stays until the training copy is built."""
     if not text:
@@ -113,7 +131,7 @@ def redact_secrets_text(text: str) -> str:
     masked = text
     if secret and secret in masked:
         masked = masked.replace(secret, "[redacted]")
-    return _BEARER.sub("Bearer [redacted]", masked)
+    return mask_passwords(_BEARER.sub("Bearer [redacted]", masked))
 
 
 def redact_secrets(value: Any) -> Any:
@@ -139,7 +157,7 @@ def mask_text(text: str) -> str:
     masked = text
     if secret and secret in masked:
         masked = masked.replace(secret, "[redacted]")
-    masked = _BEARER.sub("Bearer [redacted]", masked)
+    masked = mask_passwords(_BEARER.sub("Bearer [redacted]", masked))
     masked = _EMAIL.sub("[email]", masked)
     masked = _PHONE.sub("[phone]", masked)
     masked = _INN.sub(r"\1 [inn]", masked)

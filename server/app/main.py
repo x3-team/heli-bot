@@ -2,6 +2,8 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.agent.credentials import register as register_credentials
+from app.agent.moysklad import register as register_moysklad
 from app.api import router
 from app.browser import install_reaper
 from app.cloud_browser import register as register_cloud_browser
@@ -29,6 +31,8 @@ def create_app() -> FastAPI:
     app.include_router(router)
     install_reaper()
     register_files()
+    register_credentials()
+    register_moysklad()
     register_cloud_browser(background=True)
     return app
 

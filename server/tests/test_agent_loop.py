@@ -495,8 +495,8 @@ def test_browser_click_on_send_button_is_gated() -> None:
 
 def test_tool_call_budget_forces_an_answer() -> None:
     complete = _scripted(
-        _completion(calls=[("amocrm_list_deals", {}), ("amocrm_list_deals", {})]),
-        _completion(calls=[("amocrm_list_deals", {})]),
+        _completion(calls=[("amocrm_list_deals", {"page": 1}), ("amocrm_list_deals", {"page": 2})]),
+        _completion(calls=[("amocrm_list_deals", {"page": 3})]),
         _completion("Итог: 3 сделки"),
     )
     called = []
@@ -591,3 +591,114 @@ def test_eval_adapter_passes_whole_mock_result() -> None:
         {"max_steps": 5}, client=HeliClient(sdk),
     )
     assert "Ромашка" in seen["tool_msg"] and "Ковалёв" in seen["tool_msg"]
+
+
+# --- run v1 fixes: finish on the step limit, cycles, passwords, screenshots -----------------
+
+from app.agent.loop import has_image, strip_markup  # noqa: E402
+
+DSML = '<｜DSML｜tool_calls><｜DSML｜invoke name="browser_open"><｜DSML｜parameter name="url">https://x</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>'
+BROWSER_TOOLS = [
+    {"type": "function", "function": {"name": n, "parameters": {}}}
+    for n in ("browser_open", "browser_read", "browser_click", "browser_type", "browser_screenshot")
+]
+
+
+def test_strip_markup_drops_dsml() -> None:
+    assert strip_markup("Итог: не вышло.\n" + DSML) == "Итог: не вышло."
+    assert strip_markup(DSML) == ""
+    assert strip_markup("обычный ответ") == "обычный ответ"
+
+
+def test_step_limit_ends_with_a_summary_without_tools() -> None:
+    steps = [_completion(calls=[("browser_read", {"n": i})]) for i in range(2)]
+    complete = _scripted(*steps, _completion("Сделал два шага, форму не нашёл.\n" + DSML))
+    out = run_agent(
+        [{"role": "system", "content": "s"}, {"role": "user", "content": "задача"}],
+        tools=BROWSER_TOOLS,
+        call_tool=lambda c, n, a: ToolResult(f"страница {a}"),
+        complete=complete,
+        budget=Budget(max_steps=3),
+    )
+    assert out.stopped == "max_steps"
+    assert out.final_answer == "Сделал два шага, форму не нашёл."
+    last_messages, last_tools = complete.seen[-1]
+    assert last_tools is None
+    assert all(m["role"] in ("system", "user") for m in last_messages)
+    assert "Лимит действий" in last_messages[-1]["content"] and "browser_read" in last_messages[-1]["content"]
+
+
+def test_markup_only_answer_is_retried_then_summarized() -> None:
+    complete = _scripted(_completion(DSML), _completion(DSML), _completion("Не получилось открыть 1С."))
+    out = run_agent([{"role": "user", "content": "x"}], tools=BROWSER_TOOLS, call_tool=lambda *a: ToolResult(""),
+                    complete=complete, budget=Budget())
+    assert out.final_answer == "Не получилось открыть 1С."
+    assert "<｜DSML" not in out.final_answer
+
+
+def test_same_browser_call_with_same_result_is_stopped() -> None:
+    same = ("browser_open", {"url": "https://base/ru_RU/#e1cib/list/Справочник.Контрагенты"})
+    complete = _scripted(*[_completion(calls=[same]) for _ in range(4)], _completion("Честно: не открылось."))
+    called = []
+    out = run_agent(
+        [{"role": "user", "content": "x"}], tools=BROWSER_TOOLS,
+        call_tool=lambda c, n, a: called.append(n) or ToolResult("Поиск Ctrl+Shift+F\nСправка"),
+        complete=complete, budget=Budget(),
+    )
+    assert len(called) == 2  # the third and fourth identical opens are refused
+    assert "второй раз дал тот же результат" in complete.seen[2][0][-1]["content"]
+    assert out.stopped == "loop" and out.final_answer == "Честно: не открылось."
+
+
+def test_read_again_after_a_change_is_allowed() -> None:
+    pages = iter(["загрузка", "загрузка", "таблица готова"])
+    complete = _scripted(*[_completion(calls=[("browser_read", {})]) for _ in range(2)],
+                         _completion(calls=[("browser_click", {"text": "Ещё"})]),
+                         _completion(calls=[("browser_read", {})]), _completion("Готово"))
+    called = []
+
+    def call(c, n, a):
+        called.append(n)
+        return ToolResult(next(pages) if n == "browser_read" else "ок")
+
+    out = run_agent([{"role": "user", "content": "x"}], tools=BROWSER_TOOLS, call_tool=call, complete=complete,
+                    budget=Budget())
+    assert called == ["browser_read", "browser_read", "browser_click", "browser_read"]
+    assert out.final_answer == "Готово"
+
+
+def test_passwords_are_masked_in_answer_and_trajectory_args() -> None:
+    complete = _scripted(
+        _completion(calls=[("browser_read", {})]),
+        _completion(calls=[("browser_type", {"ref": 2, "text": "S3cret!pass"})]),
+        _completion("Готово. Логин a@b.ru, пароль: S3cret!pass"),
+    )
+    events = []
+    real = []
+
+    def call(c, n, a):
+        real.append(a)
+        return ToolResult("Элементы:\n[1] поле «Email»\n[2] поле пароля «Пароль»" if n == "browser_read" else "Текст введён.")
+
+    out = run_agent([{"role": "user", "content": "x"}], tools=BROWSER_TOOLS, call_tool=call, complete=complete,
+                    budget=Budget(), on_event=events.append)
+    assert real[1]["text"] == "S3cret!pass"  # the page still gets the real value
+    shown = [e for e in events if e.get("tool") == "browser_type"]
+    assert shown and all(e["args"]["text"] == "<CREDENTIAL>" for e in shown)
+    assert "S3cret" not in out.final_answer
+    assert "S3cret" not in json.dumps([e for e in events if e.get("kind") == "answer"], ensure_ascii=False, default=str)
+
+
+def test_screenshot_goes_to_the_model_once() -> None:
+    complete = _scripted(
+        _completion(calls=[("browser_screenshot", {})]),
+        _completion(calls=[("browser_click", {"x": 100, "y": 200, "text": "Банк и касса"})]),
+        _completion("Открыл раздел"),
+    )
+    out = run_agent(
+        [{"role": "user", "content": "x"}], tools=BROWSER_TOOLS,
+        call_tool=lambda c, n, a: ToolResult("Снимок сделан.", data={"screenshot": b"\xff\xd8jpeg"} if n == "browser_screenshot" else {}),
+        complete=complete, budget=Budget(),
+    )
+    assert out.final_answer == "Открыл раздел"
+    assert has_image(complete.seen[1][0]) and not has_image(complete.seen[2][0])

@@ -50,6 +50,12 @@ EVICT_IDLE_S = 60
 BUSY_WAIT_S = 5 * 60
 BUSY_NOTICE = "Все облачные браузеры сейчас заняты. Задача в очереди, начну, как только освободится место."
 CALL_TIMEOUT_S = 60
+# A worker stuck in one page this long is replaced by a new one.
+RESTART_AFTER_S = 150
+TIMEOUT_TEXT = (
+    "Ошибка облачного браузера: tool_timeout — страница не ответила за минуту. Не повторяй то же действие: "
+    "сделай browser_screenshot, открой раздел иначе или закончи и скажи, что не получилось."
+)
 # The agent waits this long for the user to pass a captcha on the live screen.
 CAPTCHA_WAIT_S = 10 * 60
 CAPTCHA_POLL_S = 2.0
@@ -97,18 +103,22 @@ class Result:
 
 # Same snapshot as packages/ui/src/cdp.ts, so the model reads pages the same way everywhere.
 SNAPSHOT = r"""() => {
-  const MAX_TEXT = 6000, MAX_ELEMENTS = 150;
+  const MAX_TEXT = 6000, MAX_ELEMENTS = 150, MAX_ROWS = 40, BUDGET_MS = 2500;
+  const t0 = performance.now();
+  const late = () => performance.now() - t0 > BUDGET_MS;
   const visible = (el) => {
     const r = el.getBoundingClientRect();
     if (r.width < 2 || r.height < 2) return false;
+    if (r.bottom < 0 || r.right < 0 || r.top > innerHeight * 3) return false;
     const s = getComputedStyle(el);
     return s.visibility !== "hidden" && s.display !== "none" && s.opacity !== "0";
   };
+  const clean = (t) => (t || "").trim().replace(/\s+/g, " ");
   const label = (el) => {
     const secret = (el.getAttribute("type") || "").toLowerCase() === "password";
     const t = (el.getAttribute("aria-label") || el.innerText || (secret ? "" : el.value) || el.getAttribute("placeholder")
-      || el.getAttribute("title") || el.getAttribute("name") || el.getAttribute("alt") || "").trim();
-    return t.replace(/\s+/g, " ").slice(0, 80);
+      || el.getAttribute("title") || el.getAttribute("name") || el.getAttribute("alt") || "");
+    return clean(t).slice(0, 80);
   };
   const kind = (el) => {
     const tag = el.tagName.toLowerCase();
@@ -123,36 +133,148 @@ SNAPSHOT = r"""() => {
       if (type === "password") return "поле пароля";
       return "поле";
     }
-    return el.getAttribute("role") || tag;
+    return el.getAttribute("role") || "элемент";
   };
   document.querySelectorAll("[data-heli-ref]").forEach((el) => el.removeAttribute("data-heli-ref"));
-  const nodes = document.querySelectorAll(
-    "a[href], button, input:not([type=hidden]), textarea, select, [role=button], [role=link], [role=tab], [role=menuitem], [contenteditable=true]"
-  );
+  // 1С:Предприятие web client draws its UI with divs: sections, commands, grid cells.
+  const onec = /#e1cib|\/ru_RU\//i.test(location.href) || /1С:Предприятие|1C:Enterprise/i.test(document.title)
+    || !!document.querySelector("#themesCell, .themesCell, [id^=themesCell], #funcPanel, .ecsCommandBar");
   const elements = [];
-  for (const el of nodes) {
-    if (elements.length >= MAX_ELEMENTS) break;
-    if (!visible(el)) continue;
+  const taken = new Set();
+  const add = (el, k) => {
+    if (elements.length >= MAX_ELEMENTS || taken.has(el) || !visible(el)) return;
+    const name = label(el);
+    if (k !== "поле" && k !== "поле пароля" && !name) return;
+    for (let p = el.parentElement; p; p = p.parentElement) if (taken.has(p) && label(p) === name) return;
     const ref = elements.length + 1;
+    taken.add(el);
     el.setAttribute("data-heli-ref", String(ref));
-    elements.push({ ref, kind: kind(el), label: label(el) });
+    elements.push({ ref, kind: k || kind(el), label: name });
+  };
+  const nodes = document.querySelectorAll(
+    "a[href], button, input:not([type=hidden]), textarea, select, [role=button], [role=link], [role=tab], [role=menuitem], [role=treeitem], [role=gridcell], [contenteditable=true]"
+  );
+  for (const el of nodes) { if (late()) break; add(el); }
+  const rows = [];
+  if (onec) {
+    const ONEC = [
+      "[id^=themesCell_theme_]", ".themeCell", ".themeTd", ".funcItem", ".functionItem", ".functionTitle",
+      ".press", ".pressButton", ".frameButton", ".hpLink", ".hyperlink", ".submenuText", ".cmdText",
+      ".openedItem", ".tabTitle", ".navigationItem", "[id$=_title_text]", "[id^=form][id*=Button]",
+      "[id^=cmd_]", ".gridBoxTitle", ".gridHead .gridBoxText"
+    ].join(",");
+    for (const el of document.querySelectorAll(ONEC)) {
+      if (late() || elements.length >= MAX_ELEMENTS) break;
+      add(el, el.matches(".openedItem, .tabTitle") ? "вкладка" : el.matches(".gridBoxTitle, .gridHead .gridBoxText") ? "колонка" : "кнопка");
+    }
+    // Grid rows: text of each line, cells joined with |; the row itself can be clicked by ref.
+    for (const line of document.querySelectorAll(".gridLine, .gridBody tr, [role=row]")) {
+      if (late() || rows.length >= MAX_ROWS) break;
+      if (!visible(line)) continue;
+      const cells = [...line.querySelectorAll(".gridBoxText, .gridBox, td, [role=gridcell]")]
+        .map((c) => clean(c.innerText || c.value)).filter(Boolean);
+      const text = (cells.length ? [...new Set(cells)].join(" | ") : clean(line.innerText)).slice(0, 300);
+      if (!text) continue;
+      const before = elements.length;
+      add(line, "строка");
+      const ref = elements.length > before ? elements[elements.length - 1].ref : null;
+      rows.push((ref ? "[" + ref + "] " : "") + text);
+    }
+  }
+  // Anything else drawn as clickable (cursor: pointer) with a short caption: div-based UIs.
+  if (elements.length < 40 || onec) {
+    const all = document.body ? document.body.getElementsByTagName("*") : [];
+    for (let i = 0; i < all.length && i < 6000; i++) {
+      if (late() || elements.length >= MAX_ELEMENTS) break;
+      const el = all[i];
+      if (taken.has(el) || el.children.length > 3) continue;
+      const own = clean(el.innerText);
+      if (!own || own.length > 60) continue;
+      if (getComputedStyle(el).cursor !== "pointer") continue;
+      if (el.parentElement && taken.has(el.parentElement)) continue;
+      add(el, "кнопка");
+    }
+  }
+  // Values in inputs are not part of innerText: 1С forms are mostly inputs.
+  const fields = [];
+  if (onec) {
+    for (const el of document.querySelectorAll("input.editInput, input[type=text], textarea")) {
+      if (late() || fields.length >= 40) break;
+      if (!visible(el) || !el.value) continue;
+      const title = el.id ? document.getElementById(el.id.replace(/_i0$/, "#title_text")) : null;
+      const name = clean((title && title.innerText) || el.getAttribute("title") || el.getAttribute("aria-label") || el.id || "");
+      fields.push((name ? name + ": " : "") + clean(el.value).slice(0, 120));
+    }
   }
   const text = (document.body ? document.body.innerText : "").replace(/\n{3,}/g, "\n\n").slice(0, MAX_TEXT);
-  return JSON.stringify({ url: location.href, title: document.title, text, elements });
+  return JSON.stringify({ url: location.href, title: document.title, text, elements, rows, fields, onec, partial: late() });
 }"""
 
 FIND = r"""([ref, text]) => {
   let el = ref != null ? document.querySelector('[data-heli-ref="' + ref + '"]') : null;
+  const name = (e) => (e.innerText || e.value || e.getAttribute("aria-label") || e.getAttribute("title") || "").trim().replace(/\s+/g, " ").toLowerCase();
+  const shown = (e) => { const r = e.getBoundingClientRect(); return r.width > 1 && r.height > 1 && getComputedStyle(e).visibility !== "hidden"; };
   if (!el && text) {
-    const want = text.trim().toLowerCase();
-    const all = [...document.querySelectorAll("[data-heli-ref], a, button, [role=button], input[type=submit], label")];
-    const name = (e) => (e.innerText || e.value || e.getAttribute("aria-label") || "").trim().toLowerCase();
+    const want = text.trim().replace(/\s+/g, " ").toLowerCase();
+    const all = [...document.querySelectorAll("[data-heli-ref], a, button, [role=button], input[type=submit], label")].filter(shown);
     el = all.find((e) => name(e) === want) || all.find((e) => name(e).includes(want));
+    if (!el) {
+      // Div-based UIs (1С): the smallest visible element whose text is exactly that, then one that contains it.
+      const t0 = performance.now();
+      let exact = null, part = null;
+      const nodes = document.body ? document.body.getElementsByTagName("*") : [];
+      for (let i = 0; i < nodes.length && i < 15000 && performance.now() - t0 < 2000; i++) {
+        const e = nodes[i];
+        if (["SCRIPT", "STYLE", "HTML", "BODY"].includes(e.tagName)) continue;
+        const n = name(e);
+        if (!n || n.length > want.length + 40) continue;
+        if (n === want) { if (shown(e) && (!exact || exact.contains(e))) exact = e; }
+        else if (!part && n.includes(want) && shown(e)) part = e;
+        else if (part && part.contains(e) && n.includes(want) && shown(e)) part = e;
+      }
+      el = exact || part;
+    }
   }
   if (!el) return null;
   el.scrollIntoView({ block: "center", inline: "center" });
   const r = el.getBoundingClientRect();
   return [r.left + r.width / 2, r.top + r.height / 2];
+}"""
+
+ONEC_PAGE = r"""() => /1С:Предприятие|1C:Enterprise/i.test(document.title)
+  || !!document.querySelector("#themesCell, .themesCell, [id^=themesCell], #funcPanel, .ecsCommandBar")"""
+
+# Start-up windows of 1С (Путеводитель, Информация, Монитор ИТС) cover the work area: close them.
+ONEC_CLOSE_START = r"""() => {
+  const TITLES = [/^путеводитель/i, /^информация$/i, /^информация для/i, /монитор.*итс/i, /^начало работы/i, /^что нового/i, /^новости$/i];
+  const CLOSE = ".openedClose, [id$=_close], [id$=Close], .frameClose, .closeButton, .close, [title='Закрыть'], [title^='Закрыть']";
+  const fire = (el) => ["mousedown", "mouseup", "click"].forEach((t) =>
+    el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })));
+  const closed = [];
+  const t0 = performance.now();
+  const nodes = document.body ? document.body.getElementsByTagName("*") : [];
+  for (let i = 0; i < nodes.length && i < 20000 && performance.now() - t0 < 2000; i++) {
+    const el = nodes[i];
+    if (el.children.length > 2) continue;
+    const text = (el.innerText || "").trim();
+    if (!text || text.length > 60 || text.includes("\n") || !TITLES.some((re) => re.test(text))) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) continue;
+    let box = el, button = null;
+    for (let up = 0; box && up < 6 && !button; up++, box = box.parentElement) button = box.querySelector(CLOSE);
+    if (button && !closed.includes(text)) { fire(button); closed.push(text); }
+  }
+  return closed;
+}"""
+
+# What is under a point: the label the guard checks before a click by coordinates.
+AT_POINT = r"""([x, y]) => {
+  let el = document.elementFromPoint(x, y);
+  for (let i = 0; el && i < 4; i++, el = el.parentElement) {
+    const t = (el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("title") || "").trim().replace(/\s+/g, " ");
+    if (t) return t.slice(0, 80);
+  }
+  return "";
 }"""
 
 CAPTCHA = r"""() => /showcaptcha|checkcaptcha|captcha/i.test(location.pathname)
@@ -179,15 +301,29 @@ SERP = r"""() => {
 }"""
 
 
+ONEC_HINT = (
+    "(Это 1С. Если нужного раздела, кнопки или строки нет в списке ниже, сделай browser_screenshot "
+    "и нажми browser_click по координатам x, y с картинки.)"
+)
+
+
 def format_snapshot(snap: dict) -> str:
     lines = [f"Адрес: {snap.get('url', '')}", f"Заголовок: {snap.get('title', '')}", ""]
     lines.append((snap.get("text") or "").strip() or "(текста нет)")
+    if snap.get("fields"):
+        lines += ["", "Поля формы:", *snap["fields"]]
+    if snap.get("rows"):
+        lines += ["", "Таблица (строки, ячейки через |):", *snap["rows"]]
     elements = snap.get("elements") or []
     if elements:
         lines += ["", "Элементы:"]
         for el in elements:
             label = f" «{el['label']}»" if el.get("label") else ""
             lines.append(f"[{el['ref']}] {el['kind']}{label}")
+    if snap.get("partial"):
+        lines += ["", "(Страница большая: прочитана не целиком.)"]
+    if snap.get("onec"):
+        lines += ["", ONEC_HINT]
     return "\n".join(lines)
 
 
@@ -352,11 +488,68 @@ class Page:
 
     def open(self, url: str) -> str:
         self.opened_file = False
-        self.goto(url)
-        if self.opened_file:
-            # The tab still shows the previous page; reading it would make the model think the link failed.
-            return "По этому адресу файл, а не страница: браузер его скачал. Вкладка осталась на прежней странице."
-        return self.read()
+        notes: list[str] = []
+        if onec_link(url) and same_base(self.page.url, url) and self.is_onec():
+            # 1С is open: changing only the #e1cib hash does not open the form. «Перейти по ссылке» does.
+            if self.onec_go(url):
+                notes.append("Открыл навигационную ссылку 1С через «Перейти по ссылке» (Shift+F11).")
+            else:
+                # Fallback: load the base again with the link, so 1С reads it on start.
+                try:
+                    self.page.goto("about:blank", timeout=5_000)
+                except Exception:  # noqa: BLE001
+                    pass
+                self.goto(url)
+                notes.append("Перезагрузил базу 1С с навигационной ссылкой.")
+        else:
+            self.goto(url)
+            if self.opened_file:
+                # The tab still shows the previous page; reading it would make the model think the link failed.
+                return "По этому адресу файл, а не страница: браузер его скачал. Вкладка осталась на прежней странице."
+        if self.is_onec():
+            self.settle(1500)
+            closed = self.close_start_windows()
+            if closed:
+                notes.append("Закрыл стартовые окна 1С: " + ", ".join(f"«{t}»" for t in closed) + ".")
+        return ("\n".join(notes) + "\n\n" if notes else "") + self.read()
+
+    def is_onec(self) -> bool:
+        try:
+            return onec_link(self.page.url) or bool(self.page.evaluate(ONEC_PAGE))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def onec_go(self, url: str) -> bool:
+        """Shift+F11 «Перейти по ссылке», type the e1cib link, Enter. False: the dialog did not show up."""
+        link = url[url.lower().index("e1cib/"):]
+        try:
+            self.page.keyboard.press("Shift+F11")
+            self.page.wait_for_timeout(900)
+            focused = self.page.evaluate(
+                "() => { const e = document.activeElement; return e && (e.tagName === 'INPUT' || e.tagName === 'TEXTAREA') ? (e.value || '') + '|ok' : ''; }"
+            )
+            if not focused:
+                return False
+            self.page.keyboard.press("Control+A")
+            self.page.keyboard.insert_text(link)
+            self.page.keyboard.press("Enter")
+            self.settle(2500)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    def close_start_windows(self) -> list[str]:
+        closed: list[str] = []
+        for _ in range(2):
+            try:
+                found = self.page.evaluate(ONEC_CLOSE_START) or []
+            except Exception:  # noqa: BLE001
+                break
+            if not found:
+                break
+            closed += [t for t in found if t not in closed]
+            self.settle(700)
+        return closed
 
     def click(self, ref: int | None, text: str | None) -> str:
         point = self.page.evaluate(FIND, [ref, text])
@@ -365,6 +558,18 @@ class Page:
         self.page.mouse.click(point[0], point[1])
         self.settle(1200)
         return self.read()
+
+    def click_at(self, x: float, y: float, confirmed: bool) -> str:
+        """A click by coordinates from the screenshot. The loop's guard cannot see what is there, so the
+        browser checks: a button that sends, pays or deletes needs the confirmed click by its text."""
+        if not (0 <= x <= VIEWPORT["width"] and 0 <= y <= VIEWPORT["height"]):
+            raise CloudError("bad_point")
+        under = str(self.page.evaluate(AT_POINT, [x, y]) or "")
+        if not confirmed and risky_label(under):
+            raise CloudError("needs_confirmation:" + under[:60])
+        self.page.mouse.click(x, y)
+        self.settle(1200)
+        return (f"Нажал в точке ({int(x)}, {int(y)})" + (f" на «{under}»" if under else "") + ".\n\n") + self.read()
 
     def type(self, ref: int | None, text: str, submit: bool) -> str:
         if ref is not None:
@@ -527,6 +732,9 @@ def run_tool(page: Page, tool: str, args: dict) -> str:
         return page.read()
     if tool == "browser_click":
         text = args.get("text") if isinstance(args.get("text"), str) else None
+        x, y = args.get("x"), args.get("y")
+        if isinstance(x, (int, float)) and isinstance(y, (int, float)) and not isinstance(x, bool):
+            return page.click_at(float(x), float(y), args.get("_confirmed") is True)
         if ref is None and not text:
             raise CloudError("element_not_found")
         return page.click(ref, text)
@@ -535,7 +743,7 @@ def run_tool(page: Page, tool: str, args: dict) -> str:
     if tool == "browser_press":
         return page.press(str(args.get("key") or "Enter"))
     if tool == "browser_screenshot":
-        return "Снимок сделан."
+        return f"Снимок экрана {VIEWPORT['width']}×{VIEWPORT['height']} сделан и приложен ниже. Адрес: {page.location()[0]}"
     if tool == UPLOAD_TOOL:
         payload = args.get("_payload")
         if not isinstance(payload, dict):
@@ -543,6 +751,61 @@ def run_tool(page: Page, tool: str, args: dict) -> str:
         text = args.get("text") if isinstance(args.get("text"), str) else None
         return page.upload(payload, ref, text)
     raise CloudError("unknown_tool")
+
+
+_SAME_SITE = {"strict": "Strict", "lax": "Lax", "none": "None", "no_restriction": "None", "unspecified": "Lax"}
+
+
+def normalize_cookie(raw: dict) -> dict | None:
+    """A cookie in Playwright's shape from the usual export formats (Playwright, Cookie-Editor, EditThisCookie)."""
+    if not isinstance(raw, dict):
+        return None
+    name, value, domain = raw.get("name"), raw.get("value"), raw.get("domain")
+    if not isinstance(name, str) or not name or not isinstance(value, str) or not isinstance(domain, str) or not domain:
+        return None
+    expires = raw.get("expires", raw.get("expirationDate", -1))
+    try:
+        expires = float(expires) if expires not in (None, "") and not raw.get("session") else -1
+    except (TypeError, ValueError):
+        expires = -1
+    same = _SAME_SITE.get(str(raw.get("sameSite") or "lax").lower(), "Lax")
+    secure = bool(raw.get("secure"))
+    if same == "None" and not secure:
+        same = "Lax"
+    return {
+        "name": name[:256],
+        "value": value[:8192],
+        "domain": domain.strip()[:256],
+        "path": str(raw.get("path") or "/")[:512],
+        "expires": expires,
+        "httpOnly": bool(raw.get("httpOnly")),
+        "secure": secure,
+        "sameSite": same,
+    }
+
+
+def onec_link(url: str) -> bool:
+    return "e1cib/" in (url or "").lower()
+
+
+def same_base(current: str, target: str) -> bool:
+    """Same 1С base: scheme, host and path up to /ru_RU/ (or the whole path without the #hash)."""
+    a, b = urlsplit(current or ""), urlsplit(target or "")
+    if (a.scheme, a.netloc.lower()) != (b.scheme, b.netloc.lower()) or not a.netloc:
+        return False
+
+    def base(path: str) -> str:
+        low = path.lower()
+        cut = low.find("/ru_ru/")
+        return low[: cut + 7] if cut >= 0 else low.rstrip("/")
+
+    return base(a.path) == base(b.path)
+
+
+def risky_label(label: str) -> bool:
+    from app.agent.guard import _RISKY_LABEL
+
+    return bool(label) and bool(_RISKY_LABEL.search(label))
 
 
 def chromium_env(lib_root: str) -> dict:
@@ -642,6 +905,8 @@ class CloudBrowser:
         self._watched: dict[uuid.UUID, float] = {}
         self._ya_captcha: dict[uuid.UUID, float] = {}
         self._last_reap = 0.0
+        self._busy_since = 0.0
+        self._orphans: dict = {}
         if self.store is None:
             self.store = ProfileStore()
 
@@ -718,8 +983,44 @@ class CloudBrowser:
             "url": item.url if item else "",
             "title": item.title if item else "",
             "saved_logins": self.store.exists(user_id),
+            "saved_sites": self.saved_sites(user_id),
+            "logins_kept": _key() is not None,
             "idle_minutes": IDLE_S // 60,
         }
+
+    def saved_sites(self, user_id: uuid.UUID) -> list[str]:
+        """Sites with saved cookies (names only, no values): shows that a sign-in survives between tasks."""
+        state = self.store.load(user_id) or {}
+        sites = {str(c.get("domain") or "").lstrip(".").lower() for c in state.get("cookies") or []}
+        return sorted(s for s in sites if s)[:100]
+
+    def import_cookies(self, user_id: uuid.UUID, cookies: list[dict]) -> int:
+        """Add a sign-in made in the user's own browser (cookies exported from it) to the saved profile.
+        The next task starts already signed in. Returns how many cookies were taken."""
+        if _key() is None:
+            raise CloudError("no_vault_key")
+        clean = [c for c in (normalize_cookie(raw) for raw in cookies) if c]
+        if not clean:
+            raise CloudError("bad_cookies")
+
+        def job() -> int:
+            page = self.sessions.get(user_id)
+            if page is not None:
+                page.context.add_cookies(clean)
+                self._save(user_id, page)
+                return len(clean)
+            state = self.store.load(user_id) or {"cookies": [], "origins": []}
+            keep = {(c.get("name"), c.get("domain"), c.get("path")): c for c in state.get("cookies") or []}
+            for cookie in clean:
+                keep[(cookie["name"], cookie["domain"], cookie["path"])] = cookie
+            state["cookies"] = list(keep.values())
+            self.store.save(user_id, state)
+            return len(clean)
+
+        try:
+            return int(self._submit(job).result(timeout=CALL_TIMEOUT_S))
+        except FutureTimeout:
+            raise CloudError("tool_timeout") from None
 
     def frame(self, user_id: uuid.UUID) -> bytes | None:
         item = self.frames.get(user_id)
@@ -739,28 +1040,87 @@ class CloudBrowser:
             future = self._submit(lambda: self._do(user_id, action, save, task_id))
             return future.result(timeout=CALL_TIMEOUT_S)
         except CloudError as exc:
+            if exc.code.startswith("needs_confirmation:"):
+                under = exc.code.split(":", 1)[1]
+                return Result(
+                    f"Ошибка: в этой точке «{under}». Это действие нужно подтвердить: нажми через "
+                    f"browser_click с text «{under}», тогда пользователя спросят.",
+                    "needs_confirmation",
+                    self.frame(user_id),
+                )
             return Result(f"Ошибка облачного браузера: {exc.code}", exc.code, self.frame(user_id))
         except FutureTimeout:
-            return Result("Ошибка облачного браузера: timeout", "timeout")
+            self._maybe_restart()
+            return Result(TIMEOUT_TEXT, "tool_timeout", self.frame(user_id))
 
     def _submit(self, job: Callable) -> Future:
         future: Future = Future()
         with self._lock:
+            if self._busy_since and time.monotonic() - self._busy_since > CALL_TIMEOUT_S:
+                # The worker is stuck in a page (a script that never returns): don't queue behind it.
+                self._maybe_restart_locked()
+                if self._busy_since and time.monotonic() - self._busy_since > CALL_TIMEOUT_S:
+                    future.set_exception(CloudError("tool_timeout"))
+                    return future
             if self._thread is None or not self._thread.is_alive():
-                self._thread = threading.Thread(target=self._work, name="cloud-browser", daemon=True)
+                self._thread = threading.Thread(target=self._work, args=(self._jobs,), name="cloud-browser", daemon=True)
                 self._thread.start()
-        self._jobs.put((job, future))
+            self._jobs.put((job, future))
         return future
 
-    def _work(self) -> None:
+    def _maybe_restart(self) -> None:
+        with self._lock:
+            self._maybe_restart_locked()
+
+    def _maybe_restart_locked(self) -> None:
+        """Stuck longer than RESTART_AFTER_S: leave that worker and its browsers behind (it closes them
+        when the page lets go) and start a clean one. Sign-ins were saved after the last good call."""
+        if not self._busy_since or time.monotonic() - self._busy_since < RESTART_AFTER_S:
+            return
+        log.warning("cloud browser worker stuck for %.0f s, starting a new one", time.monotonic() - self._busy_since)
+        old = self._thread
+        self._orphans[old] = (dict(self.sessions), self._shutdown)
+        self.sessions = {}
+        self._new_page = None
+        self._shutdown = None
+        self._busy_since = 0.0
+        stale_jobs = self._jobs
+        self._jobs = queue.Queue()
         while True:
             try:
-                job, future = self._jobs.get(timeout=PUMP_S if self.sessions else REAP_EVERY_S)
+                _, pending = stale_jobs.get_nowait()
             except queue.Empty:
-                self._idle()
+                break
+            if pending.set_running_or_notify_cancel():
+                pending.set_exception(CloudError("tool_timeout"))
+        self._thread = None
+
+    def _retire(self) -> None:
+        """This worker was replaced while stuck: close what it owned and end."""
+        pages, shutdown = self._orphans.pop(threading.current_thread(), ({}, None))
+        for page in pages.values():
+            page.close()
+        if shutdown is not None:
+            try:
+                shutdown()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _work(self, jobs: queue.Queue | None = None) -> None:
+        jobs = jobs or self._jobs
+        while True:
+            if threading.current_thread() in self._orphans:
+                self._retire()
+                return
+            try:
+                job, future = jobs.get(timeout=PUMP_S if self.sessions else REAP_EVERY_S)
+            except queue.Empty:
+                if threading.current_thread() is self._thread:
+                    self._idle()
                 continue
             if not future.set_running_or_notify_cancel():
                 continue
+            self._busy_since = time.monotonic()
             try:
                 future.set_result(job())
             except CloudError as exc:
@@ -770,7 +1130,11 @@ class CloudBrowser:
                 failed = CloudError("browser_failed")
                 failed.__cause__ = exc
                 future.set_exception(failed)
-            self._reap_now()
+            finally:
+                if threading.current_thread() is self._thread:
+                    self._busy_since = 0.0
+            if threading.current_thread() is self._thread:
+                self._reap_now()
 
     def _idle(self) -> None:
         """No job: let pages load what they asked for, refresh watched screens, close idle ones."""
