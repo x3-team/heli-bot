@@ -32,7 +32,7 @@ concurrency:
 
 jobs:
   eval:
-    runs-on: [self-hosted, beget-light]
+    runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
