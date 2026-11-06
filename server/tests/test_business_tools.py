@@ -563,7 +563,10 @@ def test_needs_study_only_for_unknown_services() -> None:
     assert not needs_study("Подключи API Сфера.Кассы", 2, "гайд", [])
     assert not needs_study("Подключи API Сфера.Кассы", 2, None, ["заметка"])
     assert not needs_study("Привет, как дела?", 2, None, [])
-    assert not needs_study("Подключи API Сфера.Кассы", 1, None, [])
+    # «Посмотри API сервиса X» is studied whatever the classifier's complexity; a general topic needs ≥2.
+    assert needs_study("Подключи API Сфера.Кассы", 1, None, [])
+    assert needs_study("Посмотри API курьерской службы «Ласточка»", 0, None, [])
+    assert not needs_study("Какой тариф у вас лучше?", 1, None, [])
 
 
 def test_search_puts_official_docs_first(monkeypatch) -> None:
