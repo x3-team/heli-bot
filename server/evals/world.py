@@ -101,6 +101,12 @@ TOOLS += [copy.deepcopy(_bx.TOOL), copy.deepcopy(_bx.WRITE_TOOL)]
 
 TOOL_NAMES = {t["function"]["name"] for t in TOOLS}
 
+# Незнакомые сервисы («освой инструмент»): http_request и база знаний с прод-схемами и прод-политикой.
+from evals import services as _svc  # noqa: E402
+
+TOOLS += [copy.deepcopy(t) for t in _svc.TOOLS if t["function"]["name"] not in TOOL_NAMES]
+TOOL_NAMES = {t["function"]["name"] for t in TOOLS}
+
 
 @dataclass
 class Call:
@@ -161,7 +167,7 @@ class ToolError(Exception):
 
 
 @dataclass
-class World:
+class World(_svc.ServiceTools):
     state: dict
     confirm: str = "approve"  # ответ на ask_confirmation: approve | reject
     user_answers: list[str] = field(default_factory=list)

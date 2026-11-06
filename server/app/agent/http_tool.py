@@ -291,6 +291,13 @@ def send(req: Prepared, transport: httpx.BaseTransport | None = None) -> httpx.R
         )
 
 
+# A refused key is not an answer: the model must not turn it into numbers.
+AUTH_NOTE = (
+    "\n\n[Heli] Авторизация не прошла: это не данные сервиса. Не выдумывай ответ и цифры — скажи "
+    "пользователю, что ключ не подошёл, просрочен или не даёт доступа, и попроси обновить его в «Доступах»."
+)
+
+
 def format_response(response: httpx.Response, mode: str, secrets: list[str]) -> str:
     shown = [f"{k}: {response.headers[k]}" for k in _SHOWN_HEADERS if k in response.headers]
     text = response.text if response.request.method != "HEAD" else ""
@@ -303,6 +310,8 @@ def format_response(response: httpx.Response, mode: str, secrets: list[str]) -> 
     head = f"HTTP {response.status_code} ({'песочница' if mode == 'sandbox' else 'чтение'})"
     if shown:
         head += "\n" + "\n".join(shown)
+    if response.status_code in (401, 403):
+        text = AUTH_NOTE.strip() + "\n\n" + text  # first, so a long body cut at RESULT_CHARS keeps it
     out = redact(f"{head}\n\n{text}", secrets)
     return out if len(out) <= RESULT_CHARS else out[:RESULT_CHARS] + "\n…[ответ обрезан]"
 

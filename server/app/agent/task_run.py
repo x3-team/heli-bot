@@ -314,9 +314,26 @@ _STUDY_TOPIC = re.compile(
 )
 
 
+# «Посмотри API такого-то сервиса»: a question about a tool itself always needs its docs, whatever the complexity.
+_TOOL_TOPIC = re.compile(
+    r"(?<![\w])(?:api|апи|sdk|rest|вебхук\w*|webhook\w*|эндпоинт\w*|endpoint\w*|документаци\w*|"
+    r"песочниц\w*|sandbox|интеграц\w*|токен\w*)(?![\w])",
+    re.I,
+)
+
+
 def needs_study(request: str, complexity: int, guide: str | None, notes: list[str]) -> bool:
-    """«Изучи предмет»: an unfamiliar service or topic (no playbook, nothing in the knowledge base)."""
-    return complexity >= 2 and not guide and not notes and bool(_STUDY_TOPIC.search(request or ""))
+    """«Изучи предмет»: an unfamiliar service or topic (no playbook, nothing in the knowledge base).
+
+    A request about an API, its docs, sandbox or tokens studies at any complexity: the classifier calls
+    «посмотри API сервиса X» simple, and the facts about X are exactly what the model would otherwise guess.
+    """
+    if guide or notes:
+        return False
+    text = request or ""
+    if _TOOL_TOPIC.search(text):
+        return True
+    return complexity >= 2 and bool(_STUDY_TOPIC.search(text))
 
 
 class SecretError(Exception):

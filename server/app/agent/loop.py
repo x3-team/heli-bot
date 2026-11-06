@@ -146,22 +146,40 @@ UNSAVED_NOTE = (
     "Если сохранять не нужно по задаче, так и напиши."
 )
 # «Изучи предмет»: in an unfamiliar service the first action or the answer waits for a look at the
-# knowledge base or the official help. Once per run, so a topic that needs no study costs one round.
+# official help or a knowledge note. An empty knowledge_search is not a look: the answer then waits for
+# web_search / open_url. The loop asks twice at most; an answer given without any look is marked unverified.
 STUDY_TOOLS = {"knowledge_search", "web_search", "open_url", "fetch_page"}
 ACT_TOOLS = {
     "http_request", "direct_api", "browser_click", "browser_type", "browser_press", "mail_send",
     "save_credential", "save_file", "use_computer",
 }
+STUDY_MAX_NUDGES = 2
 STUDY_GATE = (
-    "Не выполнено: сначала изучи предмет. Сервис или тема незнакомые и в базе знаний их нет: вызови "
-    "knowledge_search, затем найди официальную справку или документацию API (web_search, open_url), выпиши "
-    "ключевые правила и ограничения со ссылкой на источник — и только потом действуй."
+    "Не выполнено: сначала освой инструмент. Сервис или тема незнакомые и в базе знаний их нет: "
+    "knowledge_search, затем официальная справка или документация API (web_search, open_url). Выпиши "
+    "авторизацию, лимиты и что у сервиса песочница, со ссылкой на источник — и только потом действуй."
 )
 STUDY_NOTE = (
     "Прежде чем отвечать, изучи предмет: тема незнакомая и в базе знаний её нет. Вызови knowledge_search, "
     "найди официальную справку или документацию (web_search, open_url) и сверь с ней ответ; в ответе сошлись "
     "на источник. Если вопрос не про сервис и не про факты, которые могли измениться, ответь как есть."
 )
+UNVERIFIED_NOTE = (
+    "⚠️ Не сверено с официальной документацией: я не нашёл и не открыл источник, проверьте факты ниже.\n\n"
+)
+_EMPTY_KNOWLEDGE = ("ничего нет", '"notes": []')
+
+
+def studied_by(name: str, result: ToolResult) -> bool:
+    """Whether this successful call is a look at the subject. A knowledge base with nothing on it is not."""
+    if name not in STUDY_TOOLS:
+        return False
+    if name == "knowledge_search":
+        head = result.content[:300].lower()
+        return not any(marker in head for marker in _EMPTY_KNOWLEDGE)
+    return True
+
+
 # Looking does not change the page; an action in between makes looking again worthwhile.
 _LOOK_TOOLS = ("browser_read", "browser_screenshot")
 # Tools that load the same thing again whatever the page shows: same args = same call.
@@ -340,7 +358,7 @@ def run_agent(
     typed_unsaved = False  # typed into a form on a _FORM_HOSTS page after the last save
     unsaved_nudged = False
     studied = not budget.study_first
-    study_nudged = False
+    study_nudges = 0
 
     def safe_args(name: str, args: dict) -> dict:
         """Arguments as they go to the step stream and the trajectory: no passwords, no internals."""
@@ -459,8 +477,8 @@ def run_agent(
                     messages.append({"role": "user", "content": BROKEN_NOTE})
                 continue
             if not completion.tool_calls:
-                if not studied and not study_nudged:
-                    study_nudged = True
+                if not studied and study_nudges < STUDY_MAX_NUDGES:
+                    study_nudges += 1
                     messages.append({"role": "assistant", "content": text or "…"})
                     messages.append({"role": "user", "content": STUDY_NOTE})
                     emit({"type": "step", "kind": "study_nudge"})
@@ -478,6 +496,10 @@ def run_agent(
                     messages.append({"role": "user", "content": VERIFY_NOTE})
                     emit({"type": "step", "kind": "verify_nudge", "tool": VERIFY_TOOL})
                     continue
+                if not studied and text:
+                    # Asked twice and still no look at a source: the user sees that the facts are unchecked.
+                    emit({"type": "step", "kind": "study_unverified"})
+                    text = UNVERIFIED_NOTE + text
                 out.final_answer = text
                 break
             completion.text = text
@@ -529,8 +551,8 @@ def run_agent(
                             seen.clear()
                     messages.append({"role": "tool", "tool_call_id": call.id, "content": REPEAT_BLOCKED + note})
                     continue
-                if not studied and not study_nudged and call.name in ACT_TOOLS:
-                    study_nudged = True
+                if not studied and study_nudges < STUDY_MAX_NUDGES and call.name in ACT_TOOLS:
+                    study_nudges += 1
                     emit({"type": "step", "kind": "study_gate", "tool": call.name})
                     messages.append({"role": "tool", "tool_call_id": call.id, "content": STUDY_GATE})
                     continue
@@ -591,7 +613,7 @@ def run_agent(
                             seen.pop(other)
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": content})
                 if not result.error:
-                    if call.name in STUDY_TOOLS:
+                    if studied_by(call.name, result):
                         studied = True
                     if call.name == "browser_open" and isinstance(args.get("url"), str):
                         last_url = args["url"]

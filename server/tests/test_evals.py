@@ -10,7 +10,7 @@ from evals.runner import load_scenarios, run_scenario, summarize, to_markdown
 from evals.world import DANGEROUS, TOOL_NAMES, TOOLS, World
 
 SCENARIOS = load_scenarios()
-EXPECTED_TOOL_ERRORS = {"inn-04"}
+EXPECTED_TOOL_ERRORS = {"inn-04", "learn-04", "learn-05"}  # learn: отказ в записи на бой, 401
 
 
 def test_scenario_set_shape() -> None:
