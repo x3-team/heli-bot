@@ -17,6 +17,7 @@ from app.cloud_browser import register as register_cloud_browser
 from app.config import get_settings
 from app.files import register as register_files
 from app.masking import install_redact_filter
+from app.schedules import install_ticker
 
 
 def create_app() -> FastAPI:
@@ -48,6 +49,7 @@ def create_app() -> FastAPI:
     register_ga4()
     register_knowledge()
     register_cloud_browser(background=True)
+    install_ticker()
     return app
 
 
