@@ -70,6 +70,26 @@ def make_password(length: int = 16) -> str:
             return body + secrets.choice("!#%*")
 
 
+def _bitrix_rest_note(session, user, site: str) -> str:
+    """A Битрикс24 portal with a webhook in «Доступах»: REST first, the sign-in (often a captcha) only if REST cannot."""
+    from app.agent import bitrix
+    from app.skills.hosts import host_matches
+
+    if not any(host_matches(site, suffix) for suffix in ("bitrix24.ru", "bitrix24.com", "bitrix24.by", "bitrix24.kz")):
+        return ""
+    try:
+        cred = bitrix.webhook_for(session, user, site)
+    except Exception:  # noqa: BLE001
+        return ""
+    if cred is None:
+        return ""
+    tools = "bitrix24_read и bitrix24_write" if bitrix.is_sandbox(cred["site"]) else "bitrix24_read (на экране — только изменения)"
+    return (
+        f"Для {cred['site']} в «Доступах» есть вебхук: делай задачу через {tools}, без входа на экране — "
+        "вход в облачный Битрикс24 с сервера обычно просит капчу. Входи на экране, только если REST не подходит.\n"
+    )
+
+
 def execute(session, user, task_id, name: str, args: dict) -> ClientResult:
     """app.agent.executors contract."""
     from app.skills.hosts import host_of
@@ -80,11 +100,12 @@ def execute(session, user, task_id, name: str, args: dict) -> ClientResult:
     if not site:
         return ClientResult("Ошибка: укажи адрес сайта", "bad_args")
     if name == "find_credential":
+        rest = _bitrix_rest_note(session, user, site)
         found = credential_for(session, user, url=f"https://{site}")
         if found is None:
-            return ClientResult(f"Сохранённого доступа для {site} нет.")
+            return ClientResult(rest or f"Сохранённого доступа для {site} нет.")
         return ClientResult(
-            f"Доступ для {found['site']}: логин {found['username']}, пароль {placeholder(found['id'])} "
+            rest + f"Доступ для {found['site']}: логин {found['username']}, пароль {placeholder(found['id'])} "
             "(вводи плейсхолдер через browser_type в поле пароля)."
         )
     if name == "save_credential":

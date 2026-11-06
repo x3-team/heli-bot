@@ -1,8 +1,13 @@
-"""Read-only Битрикс24 REST through the user's incoming webhook: deals, leads, contacts, tasks, users.
+"""Битрикс24 REST through the user's incoming webhook: deals, leads, contacts, tasks, users.
 
-For answers that need exact data and for checking a record after «Сохранить» on the screen. Creating and
-changing still go through the screen; only methods that read are allowed here. Without a login on the
-screen (the sign-in page asks a captcha from the server) read-only tasks can be done through this tool alone.
+bitrix24_read reads on any portal: exact data for answers and a check of a record after «Сохранить» on the
+screen. Without a login on the screen (the sign-in page asks a captcha from the server) read-only tasks can
+be done through this tool alone.
+
+bitrix24_write creates and changes records (deals, leads, contacts, companies, tasks, comments, stages),
+but only on a training portal: SANDBOX_PORTALS plus HELI_BITRIX_SANDBOX_HOSTS. A live portal stays read-only
+through REST, the same rule as the Direct API and http_request: changes there go through the screen, where
+the user sees them and confirms the dangerous ones. Nothing deletes through REST, sandbox or not.
 
 Access: «Доступы» entry with site = the portal (company.bitrix24.ru or a box on its own domain), login
 «webhook», password = the incoming webhook URL (https://company.bitrix24.ru/rest/1/abc123/) or just «1/abc123».
@@ -13,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import uuid
 
@@ -43,7 +49,20 @@ METHODS = {
     "user.get", "user.current", "department.get",
     "calendar.event.get",
     "im.recent.list",
+    "user.search",
 }
+# Methods that create or change. Only on a training portal (is_sandbox); deletes are not here at all.
+WRITE_METHODS = {
+    "crm.deal.add", "crm.deal.update",
+    "crm.lead.add", "crm.lead.update",
+    "crm.contact.add", "crm.contact.update",
+    "crm.company.add", "crm.company.update",
+    "crm.timeline.comment.add", "crm.activity.add", "crm.activity.todo.add",
+    "tasks.task.add", "tasks.task.update", "tasks.task.complete", "tasks.task.start", "tasks.task.renew",
+    "task.commentitem.add",
+}
+# Training portals (demo, trial). Everything else is a live portal of a client: read only.
+SANDBOX_PORTALS = ("b24-lvsc4f.bitrix24.ru",)
 _SECRET = re.compile(r"(?:/rest/)?(\d+)/([A-Za-z0-9_]+)/?$")
 
 
@@ -58,24 +77,42 @@ def _fn(name: str, description: str, properties: dict, required: list[str]) -> d
     }
 
 
+_PARAMS = {
+    "type": "object",
+    "description": "Параметры метода: filter, select, order, id, taskId, start, fields. "
+    "Пример: {\"filter\": {\"STAGE_ID\": \"NEW\"}, \"select\": [\"ID\", \"TITLE\", \"OPPORTUNITY\"]}",
+}
+_PORTAL = {"type": "string", "description": "Адрес портала, если у пользователя их несколько"}
+
 TOOL = _fn(
     "bitrix24_read",
-    "Прочитать данные Битрикс24 через REST (входящий вебхук пользователя, только чтение): сделки, лиды, "
-    "контакты, компании, задачи, пользователи. Используй для точных данных, когда вход на экране закрыт "
-    "капчей, и чтобы проверить сделку или задачу после «Сохранить» на экране. Создавать и менять — только через экран. "
+    "Прочитать данные Битрикс24 через REST (входящий вебхук пользователя в «Доступах»): сделки, лиды, "
+    "контакты, компании, задачи, пользователи. Если вебхук есть — это первый путь для любой задачи Битрикс24, "
+    "вход на экране не нужен. Проверяй им запись после создания или изменения. "
     "Методы: " + ", ".join(sorted(METHODS)) + ".",
     {
         "method": {"type": "string", "description": "Метод REST, например crm.deal.list или tasks.task.get"},
-        "params": {
-            "type": "object",
-            "description": "Параметры метода: filter, select, order, id, taskId, start. "
-            "Пример: {\"filter\": {\"STAGE_ID\": \"NEW\"}, \"select\": [\"ID\", \"TITLE\", \"OPPORTUNITY\"]}",
-        },
-        "portal": {"type": "string", "description": "Адрес портала, если у пользователя их несколько"},
+        "params": _PARAMS,
+        "portal": _PORTAL,
     },
     ["method"],
 )
-TOOL_NAMES = ("bitrix24_read",)
+WRITE_TOOL = _fn(
+    "bitrix24_write",
+    "Создать или изменить запись Битрикс24 через REST (вебхук в «Доступах»), только на учебном портале: "
+    "сделка, лид, контакт, компания, задача, комментарий, смена стадии (crm.deal.update с fields.STAGE_ID). "
+    "На боевом портале клиента REST только читает: там меняй на экране. Удаления нет. "
+    "После записи проверь её через bitrix24_read (crm.deal.get, tasks.task.get). "
+    "Пример: method tasks.task.add, params {\"fields\": {\"TITLE\": \"…\", \"RESPONSIBLE_ID\": 1, "
+    "\"DEADLINE\": \"2026-11-04T18:00:00+03:00\"}}. Методы: " + ", ".join(sorted(WRITE_METHODS)) + ".",
+    {
+        "method": {"type": "string", "description": "Метод REST, например crm.deal.add или tasks.task.update"},
+        "params": _PARAMS,
+        "portal": _PORTAL,
+    },
+    ["method"],
+)
+TOOL_NAMES = ("bitrix24_read", "bitrix24_write")
 
 
 class BxError(Exception):
@@ -105,10 +142,28 @@ def webhook_base(site: str, secret: str) -> str:
     return f"https://{host}/rest/{match.group(1)}/{match.group(2)}/"
 
 
-def build_call(args: dict) -> tuple[str, dict]:
+def sandbox_portals() -> set[str]:
+    extra = os.environ.get("HELI_BITRIX_SANDBOX_HOSTS", "")
+    return {h.strip().lower() for h in (*SANDBOX_PORTALS, *extra.split(",")) if h.strip()}
+
+
+def is_sandbox(site: str) -> bool:
+    from app.skills.hosts import host_of
+
+    host = host_of(site)
+    return bool(host) and host in sandbox_portals()
+
+
+def build_call(args: dict, write: bool = False) -> tuple[str, dict]:
     method = str(args.get("method") or "").strip().lower()
-    if method not in METHODS:
-        raise BxError("bad_method", "Ошибка: этот метод не читает или не разрешён. Можно: " + ", ".join(sorted(METHODS)))
+    allowed = WRITE_METHODS if write else METHODS
+    if method not in allowed:
+        if not write and method in WRITE_METHODS:
+            raise BxError("bad_method", "Ошибка: этот метод меняет данные — вызывай его через bitrix24_write.")
+        if write and method in METHODS:
+            raise BxError("bad_method", "Ошибка: этот метод читает — вызывай его через bitrix24_read.")
+        what = "не читает или не разрешён" if not write else "не разрешён (удалять через REST нельзя)"
+        raise BxError("bad_method", f"Ошибка: этот метод {what}. Можно: " + ", ".join(sorted(allowed)))
     params = args.get("params") or {}
     if isinstance(params, str):
         try:
@@ -128,8 +183,15 @@ def _compact(value, depth: int = 0):
     return value
 
 
-def format_result(data: dict) -> str:
+def format_result(data: dict, write: bool = False) -> str:
     result = data.get("result")
+    if write:
+        if isinstance(result, dict) and isinstance(result.get("task"), dict):
+            result = result["task"]  # tasks.task.add / update
+        text = "Записано на учебном портале. Ответ: " + json.dumps(_compact(result), ensure_ascii=False)
+        return (text if len(text) <= RESULT_CHARS else text[:RESULT_CHARS] + "…") + (
+            "\nПроверь запись через bitrix24_read (crm.*.get или tasks.task.get по ID) и сверь поля с задачей."
+        )
     if isinstance(result, dict) and isinstance(result.get("tasks"), list):
         result = result["tasks"]  # tasks.task.list
     head = "Результат:"
@@ -184,8 +246,9 @@ def execute(session, user, task_id, name: str, args: dict, transport: httpx.Base
     """app.agent.executors contract."""
     from app.vault import VaultError, secret_for_browser
 
+    write = name == "bitrix24_write"
     try:
-        method, params = build_call(args)
+        method, params = build_call(args, write)
         cred = webhook_for(session, user, str(args.get("portal") or "") or None)
         if cred is None:
             raise BxError(
@@ -194,12 +257,20 @@ def execute(session, user, task_id, name: str, args: dict, transport: httpx.Base
                 "Битрикс24 без входа, создайте входящий вебхук (Разработчикам → Другое → Входящий вебхук) и "
                 "сохраните его в «Доступах»: сайт — адрес портала, логин webhook, пароль — адрес вебхука.",
             )
+        if write and not is_sandbox(cred["site"]):
+            raise BxError(
+                "write_forbidden",
+                "Ошибка: портал " + str(cred["site"]) + " боевой, через REST на нём только чтение. Создай или измени "
+                "запись на экране (опасные действия — после подтверждения пользователя), затем проверь её через bitrix24_read.",
+            )
         try:
             secret = secret_for_browser(session, user, uuid.UUID(cred["id"]))
         except VaultError as exc:
             raise BxError(exc.code, "Ошибка: хранилище паролей недоступно.") from None
         data = fetch(webhook_base(cred["site"], secret), method, params, transport)
-        return ClientResult(format_result(data))
+        if write:
+            log.info("bitrix24 sandbox write %s", method)
+        return ClientResult(format_result(data, write))
     except BxError as exc:
         return ClientResult(exc.text or f"Ошибка: {exc.code}", exc.code)
     except httpx.HTTPError as exc:
@@ -212,4 +283,5 @@ def register() -> None:
     from app.agent.tools import register_client_tool
 
     register_client_tool(TOOL)
+    register_client_tool(WRITE_TOOL)
     register_executor(TOOL_NAMES, execute)

@@ -198,7 +198,7 @@ def test_run_turn_calls_tools_and_feeds_results_back(session, monkeypatch) -> No
     offered = {tool["function"]["name"] for tool in script.requests[1]["tools"]}
     # save_file / read_file come with the files bridge (app/files.py) when the app registered it.
     assert offered - {
-        "save_file", "read_file", "save_credential", "find_credential", "moysklad_read", "bitrix24_read",
+        "save_file", "read_file", "save_credential", "find_credential", "moysklad_read", "bitrix24_read", "bitrix24_write",
         "http_request", "mail_read", "direct_api", "metrika_read", "knowledge_search", "knowledge_save", "knowledge_mark_stale",
     } == {"web_search", "open_url"}
     final_messages = script.requests[2]["messages"]

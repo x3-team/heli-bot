@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from app.agent import bitrix as _bx
+
 BASE_WORLD_PATH = Path(__file__).with_name("base_world.json")
 
 # Действия, которые меняют что-то за пределами Heli или тратят деньги.
@@ -22,7 +24,6 @@ DANGEROUS = {
     "telegram_send",
     "onec_create_invoice",
     "amocrm_delete_deal",
-    "bitrix24_delete_task",
 }
 
 
@@ -67,19 +68,6 @@ TOOLS: list[dict] = [
           _s(deal_id=_num("ID сделки"), text=_str("Текст"))),
     _tool("amocrm_delete_deal", "Удалить сделку. Необратимо.",
           _s(deal_id=_num("ID сделки"))),
-    _tool("bitrix24_find_users", "Найти сотрудника в Битрикс24.",
-          _s(query=_str("Имя, фамилия или отдел"))),
-    _tool("bitrix24_list_tasks", "Список задач Битрикс24.",
-          _s(responsible=_str("Ответственный", True), status=_str("open или done", True))),
-    _tool("bitrix24_create_task", "Поставить задачу в Битрикс24.",
-          _s(title=_str("Название"), responsible=_str("Ответственный (ФИО)"),
-             deadline=_str("Срок, YYYY-MM-DD", True), description=_str("Описание", True))),
-    _tool("bitrix24_complete_task", "Закрыть задачу Битрикс24.",
-          _s(task_id=_num("ID задачи"))),
-    _tool("bitrix24_add_comment", "Комментарий к задаче Битрикс24.",
-          _s(task_id=_num("ID задачи"), text=_str("Текст"))),
-    _tool("bitrix24_delete_task", "Удалить задачу Битрикс24. Необратимо.",
-          _s(task_id=_num("ID задачи"))),
     _tool("onec_stock", "Остатки товаров в 1С по складам.",
           _s(query=_str("Название или артикул"), warehouse=_str("Склад", True))),
     _tool("onec_find_counterparty", "Найти контрагента в 1С по ИНН или названию.",
@@ -106,6 +94,10 @@ TOOLS: list[dict] = [
     _tool("ask_user", "Задать пользователю уточняющий вопрос, если без ответа задачу не решить.",
           _s(question=_str("Вопрос"))),
 ]
+
+# Битрикс24 — те же инструменты и те же списки методов, что в проде (app.agent.bitrix): REST через вебхук.
+# Портал мира учебный, поэтому bitrix24_write разрешён; удалений нет и здесь.
+TOOLS += [copy.deepcopy(_bx.TOOL), copy.deepcopy(_bx.WRITE_TOOL)]
 
 TOOL_NAMES = {t["function"]["name"] for t in TOOLS}
 
@@ -294,35 +286,29 @@ class World:
         self._amo()["deals"].remove(deal)
         return {"ok": True}
 
-    # --- Битрикс24 --------------------------------------------------------
+    # --- Битрикс24 (REST как у вебхука) ------------------------------------
     def _b24(self) -> dict:
         return self.state["bitrix24"]
 
-    def _user(self, name: str) -> str:
-        found = [u for u in self._b24()["users"] if _match(name, u["name"])]
-        if len(found) != 1:
-            raise ToolError("user_not_found" if not found else "user_ambiguous")
-        return found[0]["name"]
+    def _b24_users(self) -> list[dict]:
+        return [{"ID": str(u.get("id", i + 1)), **u} for i, u in enumerate(self._b24()["users"])]
 
-    def _t_bitrix24_find_users(self, query: str) -> dict:
-        return {"users": [u for u in self._b24()["users"] if _match(query, u["name"], u["department"], u["position"])]}
+    def _b24_user_name(self, user_id: Any) -> str:
+        for u in self._b24_users():
+            if u["ID"] == _digits(user_id):
+                return u["name"]
+        raise ToolError("user_not_found")
 
-    def _t_bitrix24_list_tasks(self, responsible: str = "", status: str = "") -> dict:
-        tasks = self._b24()["tasks"]
-        if responsible:
-            who = self._user(responsible)
-            tasks = [t for t in tasks if t["responsible"] == who]
-        if status:
-            tasks = [t for t in tasks if t["status"] == status]
-        return {"tasks": tasks}
+    def _b24_user_id(self, name: str) -> str:
+        for u in self._b24_users():
+            if u["name"] == name:
+                return u["ID"]
+        return ""
 
-    def _t_bitrix24_create_task(self, title: str, responsible: str, deadline: str = "", description: str = "") -> dict:
-        b24 = self._b24()
-        task = {"id": b24["next_id"], "title": title, "responsible": self._user(responsible),
-                "deadline": deadline, "description": description, "status": "open", "comments": []}
-        b24["next_id"] += 1
-        b24["tasks"].append(task)
-        return task
+    def _b24_task_out(self, task: dict) -> dict:
+        return {"id": str(task["id"]), "title": task["title"], "responsibleId": self._b24_user_id(task["responsible"]),
+                "responsibleName": task["responsible"], "deadline": task["deadline"], "description": task["description"],
+                "status": "5" if task["status"] == "done" else "2", "comments": task["comments"]}
 
     def _task(self, task_id: Any) -> dict:
         for task in self._b24()["tasks"]:
@@ -330,18 +316,83 @@ class World:
                 return task
         raise ToolError("task_not_found")
 
-    def _t_bitrix24_complete_task(self, task_id: Any) -> dict:
-        task = self._task(task_id)
-        task["status"] = "done"
-        return task
+    @staticmethod
+    def _b24_params(params: Any) -> dict:
+        if isinstance(params, str):
+            try:
+                params = json.loads(params)
+            except ValueError:
+                params = {}
+        return params if isinstance(params, dict) else {}
 
-    def _t_bitrix24_add_comment(self, task_id: Any, text: str) -> dict:
-        self._task(task_id)["comments"].append(text)
-        return {"ok": True}
+    def _t_bitrix24_read(self, method: str, params: Any = None, portal: str = "") -> dict:
+        method = str(method or "").strip().lower()
+        if method not in _bx.METHODS:
+            raise ToolError("bad_method")
+        params = self._b24_params(params)
+        flt = {str(k).upper(): v for k, v in (params.get("filter") or params.get("FILTER") or {}).items()}
+        if method in ("user.get", "user.search"):
+            find = str(params.get("FIND") or flt.get("FIND") or "")
+            words = " ".join(str(flt.get(k) or "") for k in ("NAME", "LAST_NAME", "%LAST_NAME", "%NAME", "WORK_POSITION", "UF_DEPARTMENT_NAME"))
+            query = (find + " " + words).strip()
+            users = [u for u in self._b24_users() if not query or _match(query, u["name"], u["department"], u["position"])]
+            if flt.get("ID"):
+                users = [u for u in users if u["ID"] == _digits(flt["ID"])]
+            return {"result": [{"ID": u["ID"], "NAME": u["name"], "WORK_POSITION": u["position"], "UF_DEPARTMENT_NAME": u["department"]} for u in users]}
+        if method == "tasks.task.list":
+            tasks = list(self._b24()["tasks"])
+            who = flt.get("RESPONSIBLE_ID")
+            if who:
+                ids = {_digits(w) for w in (who if isinstance(who, list) else [who])}
+                tasks = [t for t in tasks if self._b24_user_id(t["responsible"]) in ids]
+            status = flt.get("STATUS") or flt.get("REAL_STATUS") or flt.get("!STATUS")
+            if status:
+                want_done = _digits(status) == "5"
+                if "!STATUS" in flt:
+                    want_done = not want_done
+                tasks = [t for t in tasks if (t["status"] == "done") == want_done]
+            return {"result": {"tasks": [self._b24_task_out(t) for t in tasks]}, "total": len(tasks)}
+        if method == "tasks.task.get":
+            return {"result": {"task": self._b24_task_out(self._task(params.get("taskId") or params.get("id")))}}
+        raise ToolError("not_in_world")
 
-    def _t_bitrix24_delete_task(self, task_id: Any) -> dict:
-        self._b24()["tasks"].remove(self._task(task_id))
-        return {"ok": True}
+    def _t_bitrix24_write(self, method: str, params: Any = None, portal: str = "") -> dict:
+        method = str(method or "").strip().lower()
+        if method not in _bx.WRITE_METHODS:
+            raise ToolError("bad_method")
+        params = self._b24_params(params)
+        fields = {str(k).upper(): v for k, v in (params.get("fields") or params.get("FIELDS") or {}).items()}
+        b24 = self._b24()
+        if method == "tasks.task.add":
+            if not fields.get("TITLE") or not fields.get("RESPONSIBLE_ID"):
+                raise ToolError("TITLE и RESPONSIBLE_ID обязательны")
+            task = {"id": b24["next_id"], "title": str(fields["TITLE"]), "responsible": self._b24_user_name(fields["RESPONSIBLE_ID"]),
+                    "deadline": str(fields.get("DEADLINE") or "")[:10], "description": str(fields.get("DESCRIPTION") or ""),
+                    "status": "open", "comments": []}
+            b24["next_id"] += 1
+            b24["tasks"].append(task)
+            return {"result": {"task": self._b24_task_out(task)}}
+        if method == "tasks.task.complete":
+            task = self._task(params.get("taskId") or params.get("id"))
+            task["status"] = "done"
+            return {"result": {"task": self._b24_task_out(task)}}
+        if method == "task.commentitem.add":
+            task = self._task(params.get("TASKID") or params.get("taskId") or params.get("0"))
+            text = (params.get("FIELDS") or params.get("fields") or {}).get("POST_MESSAGE") or ""
+            if not text:
+                raise ToolError("POST_MESSAGE обязателен")
+            task["comments"].append(str(text))
+            return {"result": len(task["comments"])}
+        if method == "tasks.task.update":
+            task = self._task(params.get("taskId") or params.get("id"))
+            if "TITLE" in fields:
+                task["title"] = str(fields["TITLE"])
+            if "DEADLINE" in fields:
+                task["deadline"] = str(fields["DEADLINE"])[:10]
+            if "RESPONSIBLE_ID" in fields:
+                task["responsible"] = self._b24_user_name(fields["RESPONSIBLE_ID"])
+            return {"result": {"task": self._b24_task_out(task)}}
+        raise ToolError("not_in_world")
 
     # --- 1С ---------------------------------------------------------------
     def _t_onec_stock(self, query: str, warehouse: str = "") -> dict:
