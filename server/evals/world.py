@@ -454,12 +454,24 @@ class World:
         return {"ok": True}
 
     # --- Почта Яндекс 360 -------------------------------------------------
+    def _no_mailbox(self) -> dict | None:
+        """The answer of the prod mail tool when «Доступы» has no mailbox (a result to relay, not a crash)."""
+        if self.state["mail"].get("connected", True):
+            return None
+        return {"error": "no_credential", "text": (
+            "Нет почтового ящика в «Доступах». Сайт — IMAP-сервер (imap.yandex.ru), логин — адрес, "
+            "пароль — пароль приложения. Пароль в чате не проси.")}
+
     def _t_mail_search(self, query: str, folder: str = "") -> dict:
+        if missing := self._no_mailbox():
+            return missing
         box = [m for m in self.state["mail"]["messages"] if not folder or m["folder"] == folder]
         rows = _ranked(query, box, lambda m: (m["from"], m["to"], m["subject"], m["body"], m["date"]))
         return {"messages": [{k: m[k] for k in ("id", "folder", "from", "to", "subject", "date")} for m in rows]}
 
     def _t_mail_read(self, message_id: str) -> dict:
+        if missing := self._no_mailbox():
+            return missing
         for m in self.state["mail"]["messages"]:
             if m["id"] == str(message_id):
                 return m

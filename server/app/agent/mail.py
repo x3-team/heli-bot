@@ -13,6 +13,13 @@ Access: «Доступы» entry with login = the full address and password = an
 - the mail server of an own domain written as mail.company.ru: IMAP on that host, SMTP smtp.company.ru.
 Only an entry whose login has «@» is a mailbox: Директ tokens (login token) and Битрикс24 webhooks
 (login webhook) saved for the same sites are never picked.
+
+mailbox argument (choose_mailbox): none — the first mailbox; an address — exactly that login, never another
+one; a site or host (imap.example.com, mail.yandex.ru) — the mailbox saved for it; anything else with one
+mailbox saved — that mailbox. no_credential only when «Доступы» has no mailbox at all.
+
+Search: Cyrillic values go as IMAP literals after SEARCH CHARSET UTF-8. A server that refuses it gets a
+local, case-insensitive filter over the newest letters fetched with BODY.PEEK (the folder stays EXAMINE).
 """
 
 from __future__ import annotations
@@ -21,6 +28,7 @@ import base64
 import email
 import email.header
 import email.policy
+import email.utils
 import imaplib
 import logging
 import os
@@ -38,6 +46,10 @@ TIMEOUT_S = 30
 LIST_LIMIT = 30
 BODY_CHARS = 6000
 ATTACHMENT_TEXT_CHARS = 8000
+# Local search when the server refuses CHARSET UTF-8: how many newest letters are looked through.
+LOCAL_SCAN_HEADERS = 300
+LOCAL_SCAN_BODIES = 100
+FETCH_BATCH = 50
 
 # Mail service -> (IMAP host, SMTP host).
 SERVICES = {
@@ -117,7 +129,7 @@ READ_TOOL = _fn(
         "since": {"type": "string"},
         "unseen": {"type": "boolean"},
         "limit": {"type": "integer"},
-        "mailbox": {"type": "string", "description": "Адрес ящика, если их несколько в «Доступах»"},
+        "mailbox": {"type": "string", "description": "Адрес ящика из «Доступов», если их несколько; без него — первый"},
     },
     ["action"],
 )
@@ -135,9 +147,10 @@ SEND_TOOL = _fn(
 TOOL_NAMES = ("mail_read",)
 # Added to the system prompt when the run has a mail tool.
 MAIL_HINT = (
-    " Почта: письма только читай, они остаются непрочитанными — не помечай, не перемещай, не удаляй. "
-    "Ответ на письмо — сначала черновик в ответе пользователю (кому, тема, текст). mail_send — только если "
-    "пользователь прямо просит отправить, и только после ask_confirmation с адресатом, темой и текстом."
+    " Почта: только читай, письма остаются непрочитанными — не помечай, не перемещай, не удаляй. Ответ — "
+    "сначала черновик (кому, тема, текст); mail_send — только по прямой просьбе и после ask_confirmation. "
+    "Пароль, токен или секрет в чат не проси. Нет доступа — направь в «Доступы» (сайт — IMAP-сервер, "
+    "логин — адрес, пароль — пароль приложения) и остановись."
 )
 
 
@@ -146,6 +159,17 @@ class MailError(Exception):
         super().__init__(code)
         self.code = code
         self.text = text or f"Ошибка: {code}"
+
+
+class SearchRefused(Exception):
+    """The server did not take SEARCH CHARSET UTF-8: search locally instead."""
+
+
+def _uids(data) -> list[str]:
+    if not data:
+        return []
+    raw = data[0] or b""
+    return (raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)).split()
 
 
 class ReadOnlyImap:
@@ -174,15 +198,52 @@ class ReadOnlyImap:
             raise MailError("bad_folder", f"Ошибка: папки «{folder}» нет. Посмотри action=folders.")
 
     def search(self, criteria: list[str]) -> list[str]:
+        """UID SEARCH with ASCII criteria only (list, SINCE, UNSEEN, Latin words)."""
         self._check(*criteria)
-        if _needs_utf8(criteria):
-            # imaplib encodes str arguments as ASCII: Cyrillic («Счёт») must go as UTF-8 bytes.
-            typ, data = self.conn.uid("SEARCH", "CHARSET", "UTF-8", *[str(c).encode("utf-8") for c in criteria])
-        else:
-            typ, data = self.conn.uid("SEARCH", *criteria)
+        typ, data = self.conn.uid("SEARCH", *criteria)
         if typ != "OK":
             raise MailError("search_failed", "Ошибка: почтовый сервер не принял поиск.")
-        return (data[0] or b"").decode().split() if data else []
+        return _uids(data)
+
+    def search_utf8(self, criteria: list[str], key: str, value: str) -> list[str]:
+        """UID SEARCH CHARSET UTF-8 <criteria> <key> {n}<value>: the non-ASCII value goes as an IMAP literal.
+
+        RFC 3501 allows 8-bit text only in a literal, and imaplib sends one literal per command, after the last
+        argument. Raises SearchRefused when the server does not take it (NO/BAD, BADCHARSET, a protocol error).
+        """
+        self._check(*criteria, key)
+        self.conn.literal = value.encode("utf-8")
+        try:
+            typ, data = self.conn.uid("SEARCH", "CHARSET", "UTF-8", *criteria, key)
+        except imaplib.IMAP4.abort:
+            raise  # the connection is gone: nothing to fall back on
+        except (imaplib.IMAP4.error, UnicodeError, ValueError) as exc:
+            raise SearchRefused(type(exc).__name__) from None
+        finally:
+            self.conn.literal = None
+        if typ != "OK":
+            raise SearchRefused(typ)
+        return _uids(data)
+
+    def fetch_many(self, uids: list[str], part: str) -> list[tuple[str, set[str], bytes]]:
+        """(uid, flags, data) for every uid, in batches. FLAGS are only read: nothing is set."""
+        self._check(part)
+        if "BODY[" in part.upper() and "PEEK" not in part.upper():
+            raise MailError("write_forbidden", "Ошибка: письма читаются только через BODY.PEEK.")
+        out = []
+        for start in range(0, len(uids), FETCH_BATCH):
+            chunk = uids[start:start + FETCH_BATCH]
+            typ, data = self.conn.uid("FETCH", ",".join(chunk), part)
+            if typ != "OK":
+                raise MailError("fetch_failed", "Ошибка: письма не прочитались.")
+            for item in data or []:
+                if isinstance(item, tuple) and len(item) >= 2:
+                    head = item[0].decode(errors="replace") if isinstance(item[0], bytes) else str(item[0])
+                    uid = re.search(r"UID (\d+)", head)
+                    flags = re.search(r"FLAGS \(([^)]*)\)", head)
+                    if uid:
+                        out.append((uid.group(1), set((flags.group(1) if flags else "").split()), bytes(item[1])))
+        return out
 
     def fetch(self, uid: str, part: str) -> list:
         if "PEEK" not in part.upper() and "BODY[" in part.upper():
@@ -251,19 +312,109 @@ def _imap_date(value: str) -> str:
     raise MailError("bad_date", "Ошибка: since в виде ДД.ММ.ГГГГ или ГГГГ-ММ-ДД.")
 
 
-def search_criteria(args: dict) -> list[str]:
-    criteria: list[str] = []
+def search_terms(args: dict) -> list[tuple[str, str | None]]:
+    """[("FROM", "Котова"), ("SINCE", "05-Nov-2026"), ("UNSEEN", None)] from the tool arguments."""
+    terms: list[tuple[str, str | None]] = []
     for key, word in (("from", "FROM"), ("subject", "SUBJECT"), ("text", "TEXT")):
         value = str(args.get(key) or "").strip()
         if value:
             if not _SAFE_TEXT.match(value):
                 raise MailError("bad_args", "Ошибка: в строке поиска кавычки или перевод строки.")
-            criteria += [word, f'"{value}"']
+            terms.append((word, value))
     if args.get("since"):
-        criteria += ["SINCE", _imap_date(str(args["since"]))]
+        terms.append(("SINCE", _imap_date(str(args["since"]))))
     if args.get("unseen"):
-        criteria.append("UNSEEN")
-    return criteria or ["ALL"]
+        terms.append(("UNSEEN", None))
+    return terms
+
+
+def _ascii(value: str | None) -> bool:
+    return value is None or all(ord(c) < 128 for c in value)
+
+
+def _words(terms: list[tuple[str, str | None]]) -> list[str]:
+    out: list[str] = []
+    for key, value in terms:
+        out.append(key)
+        if value is not None:
+            out.append(value if key == "SINCE" else f'"{value}"')
+    return out
+
+
+def search_criteria(args: dict) -> list[str]:
+    """ASCII form of the search (non-ASCII values are sent as literals by server_search)."""
+    return _words(search_terms(args)) or ["ALL"]
+
+
+def server_search(imap: ReadOnlyImap, terms: list[tuple[str, str | None]]) -> list[str]:
+    """Search on the server. Cyrillic values go one literal per command, the results are intersected."""
+    plain = [t for t in terms if _ascii(t[1])]
+    wide = [t for t in terms if not _ascii(t[1])]
+    base = _words(plain)
+    if not wide:
+        return imap.search(base or ["ALL"])
+    found: set[str] | None = None
+    for key, value in wide:
+        uids = set(imap.search_utf8(base, key, value or ""))
+        found = uids if found is None else found & uids
+        if not found:
+            return []
+    return sorted(found or (), key=int)
+
+
+def _fold(text: str) -> str:
+    return (text or "").casefold().replace("ё", "е")
+
+
+def _letter_date(msg):
+    try:
+        value = email.utils.parsedate_to_datetime(_decode(msg.get("Date")))
+    except (TypeError, ValueError, IndexError):
+        return None
+    return value.date() if value else None
+
+
+def local_search(imap: ReadOnlyImap, terms: list[tuple[str, str | None]]) -> tuple[list[str], dict[str, str], str]:
+    """Search without the server's SEARCH CHARSET: EXAMINE is already done, letters come via BODY.PEEK.
+
+    Looks through the newest LOCAL_SCAN_HEADERS letters (headers) or LOCAL_SCAN_BODIES (when text is asked),
+    case-insensitive. Returns (uids oldest first, header lines by uid, a note on how far it looked).
+    """
+    from datetime import datetime
+
+    every = imap.search(["ALL"])
+    want_text = any(key == "TEXT" for key, _ in terms)
+    scan = LOCAL_SCAN_BODIES if want_text else LOCAL_SCAN_HEADERS
+    window = every[-scan:]
+    part = "(UID FLAGS BODY.PEEK[])" if want_text else "(UID FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])"
+    found: list[str] = []
+    lines: dict[str, str] = {}
+    for uid, flags, raw in imap.fetch_many(window, part):
+        msg = email.message_from_bytes(raw, policy=email.policy.default)
+        sender, subject = _fold(_decode(msg.get("From"))), _fold(_decode(msg.get("Subject")))
+        ok = True
+        for key, value in terms:
+            need = _fold(value or "")
+            if key == "FROM":
+                ok = need in sender
+            elif key == "SUBJECT":
+                ok = need in subject
+            elif key == "TEXT":
+                body = _fold(_body_text(msg)) if hasattr(msg, "get_body") else ""
+                ok = need in f"{sender}\n{subject}\n{body}"
+            elif key == "SINCE":
+                day = _letter_date(msg)
+                ok = day is None or day >= datetime.strptime(value or "", "%d-%b-%Y").date()
+            elif key == "UNSEEN":
+                ok = "\\Seen" not in flags
+            if not ok:
+                break
+        if ok:
+            found.append(uid)
+            lines[uid] = _headers_line(uid, msg)
+    found.sort(key=int)
+    note = f" Поиск по последним {len(window)} письмам папки." if len(every) > len(window) else ""
+    return found, lines, note
 
 
 def _decode(value) -> str:
@@ -314,16 +465,27 @@ def run_read(imap: ReadOnlyImap, args: dict, save_file=None) -> str:
     except (TypeError, ValueError):
         limit = 15
     if action in {"list", "search"}:
-        uids = imap.search(["ALL"] if action == "list" else search_criteria(args))
+        lines: dict[str, str] = {}
+        note = ""
+        if action == "list":
+            uids = imap.search(["ALL"])
+        else:
+            terms = search_terms(args)
+            try:
+                uids = server_search(imap, terms)
+            except SearchRefused as exc:
+                log.info("imap search charset refused (%s): local search", exc)
+                uids, lines, note = local_search(imap, terms)
         if not uids:
-            return "Писем не найдено."
+            return "Писем не найдено." + note
         picked = uids[-limit:][::-1]
-        lines = []
+        out = []
         for uid in picked:
-            data = imap.fetch(uid, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
-            msg = email.message_from_bytes(_raw(data), policy=email.policy.default)
-            lines.append(_headers_line(uid, msg))
-        return f"Найдено {len(uids)}, показано {len(picked)} (новые сверху):\n" + "\n".join(lines)
+            if uid not in lines:
+                data = imap.fetch(uid, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
+                lines[uid] = _headers_line(uid, email.message_from_bytes(_raw(data), policy=email.policy.default))
+            out.append(lines[uid])
+        return f"Найдено {len(uids)}, показано {len(picked)} (новые сверху):{note}\n" + "\n".join(out)
     uid = str(args.get("uid") or "").strip()
     if not _UID.match(uid):
         raise MailError("bad_uid", "Ошибка: укажи uid письма из list или search.")
@@ -396,20 +558,66 @@ def _domain_hint(rows: list[dict]) -> str:
     return ""
 
 
-def mailbox_for(session, user, mailbox: str | None = None) -> tuple[dict, tuple[str, str]] | None:
-    from app.vault import list_credentials
-
-    found = None
-    for row in list_credentials(session, user):
+def _mailboxes(rows: list[dict]) -> list[tuple[dict, tuple[str, str]]]:
+    out = []
+    for row in rows:
         if "@" not in row["username"]:
             continue  # API tokens (login token) and webhooks (login webhook) are not mailboxes
         hosts = hosts_for(row["site"])
-        if hosts is None:
-            continue
-        if mailbox and row["username"].strip().lower() != mailbox.strip().lower():
-            continue
-        found = found or (row, hosts)
-    return found
+        if hosts is not None:
+            out.append((row, hosts))
+    return out
+
+
+def choose_mailbox(rows: list[dict], mailbox: str | None = None) -> tuple[tuple[dict, tuple[str, str]] | None, str | None]:
+    """((row, hosts), None) for the mailbox to use, or (None, error code).
+
+    - no value: the first mailbox in «Доступы»;
+    - an address: exactly that login, never someone else's box (mailbox_not_found);
+    - a site or host (imap.example.com, mail.yandex.ru, yandex): the mailbox saved for that site;
+    - anything else with a single mailbox saved: that mailbox (it is the default anyway);
+    - several mailboxes and the value not recognised: mailbox_ambiguous (ask which address, never a password).
+    """
+    from app.skills.hosts import host_of
+
+    boxes = _mailboxes(rows)
+    if not boxes:
+        return None, "no_credential"
+    value = (mailbox or "").strip().lower()
+    if not value:
+        return boxes[0], None
+    by_login = [b for b in boxes if b[0]["username"].strip().lower() == value]
+    if by_login:
+        return by_login[0], None
+    if "@" in value and "/" not in value:
+        return None, "mailbox_not_found"
+    host = host_of(value)
+    imap = (hosts_for(value) or ("",))[0]
+    by_site = [
+        b for b in boxes
+        if (host and host_of(b[0]["site"]) == host) or (imap and b[1][0] == imap)
+        or (host and b[0]["username"].strip().lower().rsplit("@", 1)[-1] == host)
+    ]
+    if len(by_site) == 1:
+        return by_site[0], None
+    if len(boxes) == 1:
+        return boxes[0], None
+    return None, "mailbox_ambiguous"
+
+
+def mailbox_for(session, user, mailbox: str | None = None) -> tuple[dict, tuple[str, str]] | None:
+    from app.vault import list_credentials
+
+    return choose_mailbox(list_credentials(session, user), mailbox)[0]
+
+
+def _which_mailbox(rows: list[dict], mailbox: str, code: str) -> str:
+    addresses = ", ".join(row["username"] for row, _ in _mailboxes(rows))
+    head = (f"Ящика «{mailbox}» нет в «Доступах»." if code == "mailbox_not_found"
+            else f"Не понял, какой ящик значит «{mailbox}».")
+    return (f"{head} Сохранены ящики: {addresses}. Вызови mail_read с mailbox — одним из этих адресов, "
+            "или спроси пользователя, какой из них нужен. Пароль не проси: нового ящика нет — пусть добавит "
+            "его в «Доступы».")
 
 
 def connect(host: str, username: str, password: str):
@@ -433,11 +641,15 @@ def execute(session, user, task_id, name: str, args: dict, connector=connect) ->
     """app.agent.executors contract."""
     from app.vault import VaultError, secret_for_browser
 
-    found = mailbox_for(session, user, str(args.get("mailbox") or "") or None)
-    if found is None:
-        from app.vault import list_credentials
+    from app.vault import list_credentials
 
-        return ClientResult(NO_MAILBOX + _domain_hint(list_credentials(session, user)), "no_credential")
+    rows = list_credentials(session, user)
+    wanted = str(args.get("mailbox") or "").strip()
+    found, code = choose_mailbox(rows, wanted or None)
+    if found is None:
+        if code == "no_credential":
+            return ClientResult(NO_MAILBOX + _domain_hint(rows), "no_credential")
+        return ClientResult(_which_mailbox(rows, wanted, code), code)
     row, (imap_host, smtp_host) = found
     try:
         secret = secret_for_browser(session, user, uuid.UUID(row["id"]))
@@ -467,6 +679,9 @@ def execute(session, user, task_id, name: str, args: dict, connector=connect) ->
         log.info("imap failed: %s", type(exc).__name__)
         text = str(exc).replace(secret, "<CREDENTIAL>")[:200]
         return ClientResult(f"Ошибка почты: {text or 'сервер не ответил'}. Проверьте пароль приложения и включённый IMAP.", "mail_unavailable")
+    except Exception as exc:  # noqa: BLE001 - a mail quirk is a tool error the model can handle, not a crash
+        log.warning("mail_read failed: %s", type(exc).__name__)
+        return ClientResult("Ошибка почты: сервер ответил непонятно. Попробуй action=list или повтори позже.", "mail_failed")
     finally:
         if conn is not None:
             try:

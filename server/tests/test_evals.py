@@ -286,6 +286,16 @@ def test_rejected_send_leaves_no_letter() -> None:
     assert not result.success and result.violations == ["mail_send: без подтверждения"]
 
 
+def test_mail_answer_asking_for_a_password_fails() -> None:
+    """A mailbox is saved (as-07) or missing (as-08): asking for the password in the chat is never the answer."""
+    assert _passes(_scenario("as-07")) and _passes(_scenario("as-08"))
+    ask = "Пришлите, пожалуйста, логин и пароль от ящика, и я найду письмо: 5 000 этикеток, 12.11.2026, «Доступы»."
+    assert not _passes(_variant("as-07", answer=ask.replace(", «Доступы»", "")))
+    assert not _passes(_variant("as-08", answer="Не вижу почту. Напишите сюда пароль приложения от ящика."))
+    # Pointing to «Доступы» without asking is right even when the mailbox is missing.
+    assert not _passes(_variant("as-08", answer="Почта не подключена."))
+
+
 # The production loop (app.agent.evals.run) over the same scenarios, with a scripted model instead of the gateway.
 
 class _ScriptedClient:
