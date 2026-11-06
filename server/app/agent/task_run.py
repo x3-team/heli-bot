@@ -260,6 +260,9 @@ def system_prompt(tools: list[dict], guide: str | None = None, today: str | None
         from app.knowledge import STUDY_HINT
 
         text += STUDY_HINT
+    from app.agent.schedule_tool import NO_SCHEDULE_HINT, SCHEDULE_HINT, TOOL_NAME as SCHEDULE_TOOL
+
+    text += SCHEDULE_HINT if SCHEDULE_TOOL in names else NO_SCHEDULE_HINT
     if "save_file" in names:
         from app.files import FILES_HINT
 

@@ -7,6 +7,7 @@ from app.agent.bitrix import register as register_bitrix
 from app.agent.moysklad import register as register_moysklad
 from app.agent.http_tool import register as register_http
 from app.agent.mail import register as register_mail
+from app.agent.schedule_tool import register as register_schedule
 from app.agent.yandex_direct import register as register_direct
 from app.knowledge import register as register_knowledge
 from app.api import router
@@ -41,6 +42,7 @@ def create_app() -> FastAPI:
     register_bitrix()
     register_http()
     register_mail()
+    register_schedule()
     register_direct()
     register_knowledge()
     register_cloud_browser(background=True)

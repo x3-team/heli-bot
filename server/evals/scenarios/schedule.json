@@ -1,0 +1,66 @@
+[
+  {"id": "sched-01", "title": "Повторяющаяся задача себе — расписание Heli, не Битрикс24",
+   "task": "Поставь повторяющуюся задачу: каждый понедельник в 9:00 (МСК) сделать безобидную сводку — кратко напомнить про учебный ящик (не писать никому наружу, ничего не отправлять). После создания скажи, как она записалась (cron или формулировка расписания).",
+   "expect": [
+     {"type": "called", "tool": "schedule_create", "max": 1},
+     {"type": "state", "path": "heli.schedules[0].expression", "equals": "0 9 * * 1"},
+     {"type": "not_called", "tool": "bitrix24_write"},
+     {"type": "not_called", "tool": "bitrix24_read"},
+     {"type": "not_called", "tool": "mail_send"},
+     {"type": "not_called", "tool": "telegram_send"},
+     {"type": "answer_contains", "any": ["0 9 * * 1", "каждый понедельник в 9:00", "каждый понедельник в 09:00"]}
+   ],
+   "golden": {
+     "calls": [
+       {"tool": "schedule_create", "args": {"label": "Сводка по учебному ящику", "expression": "0 9 * * 1",
+        "request": "Кратко напомни про учебный ящик. Никому не пиши и ничего не отправляй."}}
+     ],
+     "answer": "Поставил в расписание Heli «Сводка по учебному ящику»: cron 0 9 * * 1 (Europe/Moscow) — каждый понедельник в 9:00 МСК. Ближайший запуск 09.11.2026 09:00 МСК. Наружу ничего не отправляется."
+   }},
+  {"id": "sched-02", "title": "Ежедневное напоминание — расписание Heli",
+   "task": "Напоминай мне каждый день в 18:30 сверить кассу.",
+   "expect": [
+     {"type": "called", "tool": "schedule_create", "max": 1},
+     {"type": "state", "path": "heli.schedules[0].expression", "equals": "30 18 * * *"},
+     {"type": "not_called", "tool": "bitrix24_write"},
+     {"type": "answer_contains", "any": ["30 18 * * *", "каждый день в 18:30"]}
+   ],
+   "golden": {
+     "calls": [
+       {"tool": "schedule_create", "args": {"label": "Сверить кассу", "expression": "30 18 * * *",
+        "request": "Напомни сверить кассу."}}
+     ],
+     "answer": "Готово: «Сверить кассу», cron 30 18 * * * — каждый день в 18:30 МСК, первый раз сегодня, 02.11.2026 в 18:30."
+   }},
+  {"id": "sched-03", "title": "Ежемесячное напоминание — расписание Heli",
+   "task": "Каждое 1-е число месяца в 10:00 напоминай оплатить аренду склада.",
+   "expect": [
+     {"type": "called", "tool": "schedule_create", "max": 1},
+     {"type": "state", "path": "heli.schedules[0].expression", "equals": "0 10 1 * *"},
+     {"type": "not_called", "tool": "bitrix24_write"},
+     {"type": "answer_contains", "any": ["0 10 1 * *", "1-го числа"]}
+   ],
+   "golden": {
+     "calls": [
+       {"tool": "schedule_create", "args": {"label": "Аренда склада", "expression": "0 10 1 * *",
+        "request": "Напомни оплатить аренду склада."}}
+     ],
+     "answer": "Поставил «Аренда склада»: cron 0 10 1 * * — каждый месяц 1-го числа в 10:00 МСК, ближайший запуск 01.12.2026."
+   }},
+  {"id": "sched-04", "title": "Явная задача в Битрикс24 остаётся в Битрикс24",
+   "task": "Поставь в Битрикс24 на учебном портале задачу Кузнецову: напомнить про учебный ящик, срок 9 ноября.",
+   "expect": [
+     {"type": "called", "tool": "bitrix24_write", "args": {"method": "tasks.task.add", "params": {"fields": {"TITLE": "ящик", "DEADLINE": "2026-11-09"}}}, "max": 1},
+     {"type": "state", "path": "bitrix24.tasks[id=901].responsible", "equals": "Кузнецов Дмитрий"},
+     {"type": "not_called", "tool": "schedule_create"},
+     {"type": "answer_contains", "any": ["901"]}
+   ],
+   "golden": {
+     "calls": [
+       {"tool": "bitrix24_read", "args": {"method": "user.search", "params": {"FIND": "Кузнецов"}}},
+       {"tool": "bitrix24_write", "args": {"method": "tasks.task.add", "params": {"fields": {"TITLE": "Напомнить про учебный ящик", "RESPONSIBLE_ID": 13, "DEADLINE": "2026-11-09T18:00:00+03:00"}}}},
+       {"tool": "bitrix24_read", "args": {"method": "tasks.task.get", "params": {"taskId": 901}}}
+     ],
+     "answer": "Задача 901 «Напомнить про учебный ящик» поставлена Кузнецову Д. О. на учебном портале, срок 9 ноября."
+   }}
+]
