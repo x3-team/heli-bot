@@ -295,12 +295,23 @@ def _address(text: str) -> str | None:
     return None
 
 
+# http_tool.UA_REJECTED_CODE: the service refused the User-Agent, a new header fixes it, not a browser.
+UA_REJECTED = "user_agent_rejected"
+
+
 def repeat_key(name: str, args: dict) -> str | None:
-    """Identity of a call for the repeat check: the tool and its text arguments (limits and counts aside).
-    Browser tools and confirmations are left out: the page or the user's answer can change between calls."""
+    """Identity of a call for the repeat check: the tool and its text and object arguments (limits and
+    counts aside). Objects count: http_request with new headers (a User-Agent the service asked for) or a
+    new query is a different call, not a repeat. Browser tools and confirmations are left out: the page
+    or the user's answer can change between calls."""
     if name.startswith("browser_") or name == CONFIRM_TOOL:
         return None
-    texts = {k: v.strip().lower() for k, v in args.items() if isinstance(v, str)}
+    texts: dict[str, str] = {}
+    for k, v in args.items():
+        if isinstance(v, str):
+            texts[k] = v.strip().lower()
+        elif isinstance(v, (dict, list)) and v:
+            texts[k] = json.dumps(v, ensure_ascii=False, sort_keys=True, default=str).lower()
     return name + json.dumps(texts, ensure_ascii=False, sort_keys=True)
 
 
@@ -498,12 +509,17 @@ def run_agent(
                 key = repeat_key(call.name, args)
                 if key and key in failed:
                     # The model repeats a call that already failed the same way: don't spend a step on it.
+                    hint = (
+                        "Не повторяй его: передай в headers User-Agent, который требует документация API. "
+                        "Браузер для этого не нужен."
+                        if failed[key] == UA_REJECTED
+                        else "Не повторяй его, попробуй другие аргументы или другой инструмент."
+                    )
                     messages.append(
                         {
                             "role": "tool",
                             "tool_call_id": call.id,
-                            "content": f"Не выполнено: этот вызов уже вернул ошибку ({failed[key]}). "
-                            "Не повторяй его, попробуй другие аргументы или другой инструмент.",
+                            "content": f"Не выполнено: этот вызов уже вернул ошибку ({failed[key]}). {hint}",
                         }
                     )
                     continue
