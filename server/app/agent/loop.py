@@ -78,6 +78,11 @@ _REPORT = (
 FINISH_NOTE = "Лимит действий исчерпан. " + _REPORT
 BUDGET_NOTE = "Задача дошла до предела расходов на один запуск. " + _REPORT
 STOP_NOTE = "Задачу остановили. " + _REPORT
+CAPTCHA_NOTE = (
+    "Сайт попросил капчу при входе, и её никто не прошёл: агент капчи не решает. " + _REPORT
+    + " В «Не сделано» скажи, что нужно: войти на экране «Компьютер агента» или импортировать сессию, "
+    "а затем написать «продолжи»."
+)
 # The budget's last part is kept for the words-only answer: the run never ends without one.
 BUDGET_FINISH_SHARE = Decimal("0.9")
 
@@ -118,6 +123,12 @@ SCREENSHOT_LIMIT_TEXT = (
     "Не выполнено: лимит снимков экрана на задачу исчерпан. Работай по тексту страницы (browser_read) "
     "и номерам элементов."
 )
+# Halfway through the steps the model is asked to check where it is: change the path or finish honestly.
+HALFWAY_NOTE = (
+    "[Heli] Прошло {done} из {total} шагов. Если цель (нужный список, документ, отчёт или карточка) ещё "
+    "не открыта, смени путь: прямая ссылка, другой раздел, «Все функции», поиск в списке. Если и так не "
+    "выходит — закончи сейчас честным итогом «Сделано / Не сделано», не трать оставшиеся шаги."
+)
 # After a save in a system with an API reader, the answer waits for a check through that reader.
 VERIFY_TOOL = "moysklad_read"
 VERIFY_NOTE = (
@@ -125,6 +136,13 @@ VERIFY_NOTE = (
     "сохранились с нужными полями (товар, количество, контрагент, цена). Затем ответь, что проверил."
 )
 _SAVE_LABEL = re.compile(r"сохран|провест|записат|создат|save", re.I)
+# A form typed into in these systems but never saved: the answer waits for «Сохранить» once.
+_FORM_HOSTS = re.compile(r"moysklad\.ru", re.I)
+UNSAVED_NOTE = (
+    "Ты заполнял поля формы, но не нажал «Сохранить» после последнего ввода: без этого запись не появится. "
+    "Нажми «Сохранить», проверь, что ошибок нет и запись сохранилась, и только потом отвечай. "
+    "Если сохранять не нужно по задаче, так и напиши."
+)
 # Looking does not change the page; an action in between makes looking again worthwhile.
 _LOOK_TOOLS = ("browser_read", "browser_screenshot")
 # Tools that load the same thing again whatever the page shows: same args = same call.
@@ -299,6 +317,9 @@ def run_agent(
     last_url: str | None = None
     saved_unchecked = False  # a «Сохранить» click not yet checked through the API reader
     verify_nudged = False
+    halfway_done = budget.max_steps < 10
+    typed_unsaved = False  # typed into a form on a _FORM_HOSTS page after the last save
+    unsaved_nudged = False
 
     def safe_args(name: str, args: dict) -> dict:
         """Arguments as they go to the step stream and the trajectory: no passwords, no internals."""
@@ -417,6 +438,12 @@ def run_agent(
                     messages.append({"role": "user", "content": BROKEN_NOTE})
                 continue
             if not completion.tool_calls:
+                if typed_unsaved and not unsaved_nudged:
+                    unsaved_nudged = True
+                    messages.append({"role": "assistant", "content": text or "…"})
+                    messages.append({"role": "user", "content": UNSAVED_NOTE})
+                    emit({"type": "step", "kind": "unsaved_nudge"})
+                    continue
                 if saved_unchecked and not verify_nudged and VERIFY_TOOL in guard.schemas:
                     # Saved in МойСклад but never checked: one more look through the API before the answer.
                     verify_nudged = True
@@ -539,6 +566,14 @@ def run_agent(
                         label = guard.elements.get(args["ref"], "") if isinstance(args.get("ref"), int) else ""
                         if _SAVE_LABEL.search(f"{label} {args.get('text') or ''}"):
                             saved_unchecked = True
+                            typed_unsaved = False
+                    if (
+                        call.name == "browser_type"
+                        and not args.get("submit")
+                        and last_url
+                        and _FORM_HOSTS.search(last_url)
+                    ):
+                        typed_unsaved = True
                     if call.name == VERIFY_TOOL:
                         saved_unchecked = False
                 if key and result.error:
@@ -571,6 +606,10 @@ def run_agent(
                 out.stopped = stop_after
                 out.final_answer = "Остановился: действие не подтверждено."
                 break
+            if not halfway_done and finish_note is None and round_index >= max_steps // 2:
+                halfway_done = True
+                messages.append({"role": "user", "content": HALFWAY_NOTE.format(done=round_index, total=max_steps)})
+                emit({"type": "step", "kind": "halfway", "round": round_index})
             if blocked >= BLOCKS_TO_STOP and finish_note is None:
                 finish_note = LOOP_NOTE
                 finish_reason = "loop"
@@ -590,7 +629,8 @@ def _stopped_answer(messages: list[dict], complete, emit, out: Outcome) -> str:
     if out.steps == 0:
         return ""
     try:
-        completion = complete(summary_messages(messages, STOP_NOTE), None)
+        note = CAPTCHA_NOTE if out.stopped == "captcha" else STOP_NOTE
+        completion = complete(summary_messages(messages, note), None)
     except Exception:  # noqa: BLE001
         return progress_text(messages, "Задача остановлена.")
     out.steps += 1

@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.agent.credentials import register as register_credentials
+from app.agent.bitrix import register as register_bitrix
 from app.agent.moysklad import register as register_moysklad
 from app.api import router
 from app.browser import install_reaper
@@ -33,6 +34,7 @@ def create_app() -> FastAPI:
     register_files()
     register_credentials()
     register_moysklad()
+    register_bitrix()
     register_cloud_browser(background=True)
     return app
 

@@ -63,6 +63,8 @@ def credential_for(
             select(Credential).where(Credential.user_id == user.id).order_by(Credential.created_at)
         )
     )
+    # A Битрикс24 webhook is for the REST reader, never typed into a sign-in form.
+    rows = [row for row in rows if str(row.username or "").strip().lower() not in {"webhook", "вебхук", "rest"}]
     target = host_of(url)
     if target:
         for row in rows:

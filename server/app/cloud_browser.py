@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import queue
+import re
 import threading
 import time
 import uuid
@@ -84,6 +85,8 @@ TOOL_NAMES = (
 KEYS = {
     "Enter", "Escape", "Tab", "Backspace", "Delete", "PageDown", "PageUp", "ArrowDown", "ArrowUp",
     "ArrowLeft", "ArrowRight", "Home", "End", "Space",
+    # 1С and lists: search in a list, pick a value (F4), clear it, add a row, edit a cell.
+    "Control+F", "Alt+F", "F4", "Shift+F4", "Insert", "F2",
 }
 
 
@@ -206,8 +209,41 @@ SNAPSHOT = r"""() => {
       fields.push((name ? name + ": " : "") + clean(el.value).slice(0, 120));
     }
   }
+  // A window drawn over the page (1С dialogs: period, question, choice form; role=dialog elsewhere).
+  // While it is open, clicks on the form behind it do nothing: the model must deal with it first.
+  let dialog = null;
+  if (!late()) {
+    const BTN = /^(ок|ok|отмена|закрыть|да|нет|выбрать|сформировать|готово|применить|продолжить|сохранить|записать)$/i;
+    const cands = [...document.querySelectorAll(
+      "[role=dialog], [role=alertdialog], [aria-modal=true], [class*=indow], [class*=ialog], [class*=opup], [class*=odal], [class*=loud]"
+    )].slice(0, 400);
+    let best = null, bestZ = -1;
+    for (const el of cands) {
+      if (!visible(el)) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width < 150 || r.height < 80 || r.width > innerWidth * 0.97 || r.height > innerHeight * 0.97) continue;
+      const s = getComputedStyle(el);
+      const dialogish = el.matches("[role=dialog], [role=alertdialog], [aria-modal=true]");
+      if (!dialogish && s.position !== "absolute" && s.position !== "fixed") continue;
+      let z = 0;
+      for (let p = el; p && p !== document.body; p = p.parentElement) {
+        const zi = parseInt(getComputedStyle(p).zIndex, 10);
+        if (!isNaN(zi)) { z = Math.max(z, zi); }
+      }
+      if (!dialogish && z < 10) continue;
+      const buttons = [...el.querySelectorAll("button, [role=button], .press, .pressButton, .frameButton, input[type=button], input[type=submit], a")]
+        .filter(visible).map((b) => clean(b.innerText || b.value || b.getAttribute("title") || "")).filter(Boolean);
+      if (!dialogish && !buttons.some((b) => BTN.test(b))) continue;
+      if (z > bestZ || (z === bestZ && best && best.contains(el))) {
+        bestZ = z;
+        best = el;
+        const first = clean((el.innerText || "").split("\n").find((t) => t.trim()) || "");
+        dialog = { title: first.slice(0, 120), buttons: [...new Set(buttons)].slice(0, 12) };
+      }
+    }
+  }
   const text = (document.body ? document.body.innerText : "").replace(/\n{3,}/g, "\n\n").slice(0, MAX_TEXT);
-  return JSON.stringify({ url: location.href, title: document.title, text, elements, rows, fields, onec, partial: late() });
+  return JSON.stringify({ url: location.href, title: document.title, text, elements, rows, fields, onec, dialog, partial: late() });
 }"""
 
 FIND = r"""([ref, text]) => {
@@ -240,6 +276,27 @@ FIND = r"""([ref, text]) => {
   const r = el.getBoundingClientRect();
   return [r.left + r.width / 2, r.top + r.height / 2];
 }"""
+
+# After «Сохранить»: did the page take it? Validation errors shown, the record's id in the address.
+SAVE_CHECK = r"""() => {
+  const vis = (e) => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e);
+    return r.width > 1 && r.height > 1 && s.visibility !== "hidden" && s.display !== "none"; };
+  const errors = [];
+  const nodes = document.querySelectorAll(
+    "[role=alert], [aria-invalid=true], [class*=error], [class*=Error], [class*=invalid], [class*=Invalid]");
+  for (const e of nodes) {
+    if (errors.length >= 5) break;
+    if (!vis(e)) continue;
+    let t = (e.innerText || "").trim().replace(/\s+/g, " ");
+    if (!t && e.matches("[aria-invalid=true]")) t = "поле «" + (e.getAttribute("aria-label") || e.getAttribute("placeholder") || e.name || "?") + "» заполнено неверно";
+    if (t && t.length < 200 && !errors.some((x) => x.includes(t) || t.includes(x))) errors.push(t);
+  }
+  const m = /[?&#/]id=([0-9a-f-]{8,})/i.exec(location.href);
+  const saving = /Сохраняется|Saving\.\.\./i.test(document.body ? document.body.innerText.slice(0, 5000) : "");
+  return JSON.stringify({ id: m ? m[1] : null, errors, saving });
+}"""
+_SAVE_BUTTON = re.compile(r"^\s*(сохранить|записать|save)\b", re.I)
+
 
 ONEC_PAGE = r"""() => /1С:Предприятие|1C:Enterprise/i.test(document.title)
   || !!document.querySelector("#themesCell, .themesCell, [id^=themesCell], #funcPanel, .ecsCommandBar")"""
@@ -278,7 +335,15 @@ AT_POINT = r"""([x, y]) => {
 }"""
 
 CAPTCHA = r"""() => /showcaptcha|checkcaptcha|captcha/i.test(location.pathname)
-  || /Подтвердите, что запросы отправляли вы|Я не робот|SmartCaptcha/i.test(document.body ? document.body.innerText.slice(0, 3000) : "")"""
+  || /Подтвердите, что запросы отправляли вы|Я не робот|SmartCaptcha/i.test(document.body ? document.body.innerText.slice(0, 3000) : "")
+  || [...document.querySelectorAll("iframe")].some((f) => {
+       // A visible captcha widget in a frame (Yandex SmartCaptcha on the Битрикс24 sign-in, hCaptcha,
+       // a reCAPTCHA checkbox). Invisible reCAPTCHA badges do not count.
+       const src = f.src || "";
+       if (!/smartcaptcha|captcha/i.test(src) || /size=invisible/i.test(src)) return false;
+       const r = f.getBoundingClientRect(), s = getComputedStyle(f);
+       return r.width >= 60 && r.height >= 40 && s.visibility !== "hidden" && s.display !== "none";
+     })"""
 
 # Organic results from a Yandex results page; skips ads and Yandex's own services. Same as cdp.ts.
 SERP = r"""() => {
@@ -302,13 +367,25 @@ SERP = r"""() => {
 
 
 ONEC_HINT = (
-    "(Это 1С. Если нужного раздела, кнопки или строки нет в списке ниже, сделай browser_screenshot "
-    "и нажми browser_click по координатам x, y с картинки.)"
+    "(Это 1С. Быстрее всего — browser_open с навигационной ссылкой <база>/ru_RU/#e1cib/list/<Объект> или "
+    "#e1cib/app/Отчет.<Имя>. Поиск в списке: browser_press Control+F, затем browser_type без ref. Если нужного "
+    "нет в списке элементов, сделай browser_screenshot и нажми browser_click по координатам x, y с картинки.)"
+)
+
+
+DIALOG_NOTE = (
+    "Поверх страницы открыто окно «{title}»{buttons}. Пока оно открыто, клики по форме за ним не работают: "
+    "сначала ответь в нём (нужная кнопка) или закрой его («Закрыть», «Отмена» или browser_press Escape)."
 )
 
 
 def format_snapshot(snap: dict) -> str:
     lines = [f"Адрес: {snap.get('url', '')}", f"Заголовок: {snap.get('title', '')}", ""]
+    dialog = snap.get("dialog")
+    if isinstance(dialog, dict) and (dialog.get("title") or dialog.get("buttons")):
+        buttons = dialog.get("buttons") or []
+        shown = (", кнопки: " + ", ".join(f"«{b}»" for b in buttons)) if buttons else ""
+        lines[2:2] = [DIALOG_NOTE.format(title=dialog.get("title") or "окно", buttons=shown), ""]
     lines.append((snap.get("text") or "").strip() or "(текста нет)")
     if snap.get("fields"):
         lines += ["", "Поля формы:", *snap["fields"]]
@@ -555,9 +632,33 @@ class Page:
         point = self.page.evaluate(FIND, [ref, text])
         if not point:
             raise CloudError("element_not_found")
+        under = str(self.page.evaluate(AT_POINT, [point[0], point[1]]) or "") or (text or "")
         self.page.mouse.click(point[0], point[1])
         self.settle(1200)
-        return self.read()
+        return self.save_report(under) + self.read()
+
+    def save_report(self, label: str) -> str:
+        """After a «Сохранить» click: say whether the page took it, so the model does not report a lost form."""
+        if not _SAVE_BUTTON.search(label or ""):
+            return ""
+        try:
+            for _ in range(8):
+                check = json.loads(self.page.evaluate(SAVE_CHECK))
+                if not check.get("saving"):
+                    break
+                self.page.wait_for_timeout(750)
+        except Exception:  # noqa: BLE001
+            return ""
+        if check.get("errors"):
+            return (
+                "После «Сохранить» на странице ошибки: " + "; ".join(check["errors"])
+                + ". Запись НЕ сохранена: исправь эти поля и нажми «Сохранить» снова.\n\n"
+            )
+        if check.get("saving"):
+            return "После «Сохранить» страница всё ещё сохраняет: перечитай её и проверь, что запись сохранилась.\n\n"
+        if check.get("id"):
+            return f"После «Сохранить» ошибок нет, id записи в адресе: {check['id']}.\n\n"
+        return "После «Сохранить» ошибок не видно, но id в адресе нет: проверь, что запись сохранилась.\n\n"
 
     def click_at(self, x: float, y: float, confirmed: bool) -> str:
         """A click by coordinates from the screenshot. The loop's guard cannot see what is there, so the
@@ -569,7 +670,8 @@ class Page:
             raise CloudError("needs_confirmation:" + under[:60])
         self.page.mouse.click(x, y)
         self.settle(1200)
-        return (f"Нажал в точке ({int(x)}, {int(y)})" + (f" на «{under}»" if under else "") + ".\n\n") + self.read()
+        head = f"Нажал в точке ({int(x)}, {int(y)})" + (f" на «{under}»" if under else "") + ".\n\n"
+        return head + self.save_report(under) + self.read()
 
     def type(self, ref: int | None, text: str, submit: bool) -> str:
         if ref is not None:
@@ -754,6 +856,20 @@ def run_tool(page: Page, tool: str, args: dict) -> str:
 
 
 _SAME_SITE = {"strict": "Strict", "lax": "Lax", "none": "None", "no_restriction": "None", "unspecified": "Lax"}
+
+
+def normalize_origin(raw: dict) -> dict | None:
+    """One origin of a Playwright storage state: {"origin": "https://…", "localStorage": [{name, value}]}."""
+    if not isinstance(raw, dict):
+        return None
+    origin = str(raw.get("origin") or "")
+    if not origin.startswith("https://"):
+        return None
+    items = []
+    for item in raw.get("localStorage") or []:
+        if isinstance(item, dict) and isinstance(item.get("name"), str) and isinstance(item.get("value"), str):
+            items.append({"name": item["name"][:500], "value": item["value"][:100_000]})
+    return {"origin": origin[:300], "localStorage": items[:500]} if items else None
 
 
 def normalize_cookie(raw: dict) -> dict | None:
@@ -994,26 +1110,36 @@ class CloudBrowser:
         sites = {str(c.get("domain") or "").lstrip(".").lower() for c in state.get("cookies") or []}
         return sorted(s for s in sites if s)[:100]
 
-    def import_cookies(self, user_id: uuid.UUID, cookies: list[dict]) -> int:
-        """Add a sign-in made in the user's own browser (cookies exported from it) to the saved profile.
-        The next task starts already signed in. Returns how many cookies were taken."""
+    def import_cookies(self, user_id: uuid.UUID, cookies: list[dict], origins: list[dict] | None = None) -> int:
+        """Add a sign-in made in the user's own browser to the saved profile: cookies exported from it, or a
+        whole Playwright storage state (cookies + localStorage per origin). The next task starts already
+        signed in. Returns how many cookies were taken."""
         if _key() is None:
             raise CloudError("no_vault_key")
         clean = [c for c in (normalize_cookie(raw) for raw in cookies) if c]
-        if not clean:
+        stores = [o for o in (normalize_origin(raw) for raw in origins or []) if o]
+        if not clean and not stores:
             raise CloudError("bad_cookies")
 
         def job() -> int:
             page = self.sessions.get(user_id)
             if page is not None:
-                page.context.add_cookies(clean)
+                if clean:
+                    page.context.add_cookies(clean)
                 self._save(user_id, page)
-                return len(clean)
+                if not stores:
+                    return len(clean)
+                # localStorage only loads with a new context: save, merge, and start fresh next call.
+                self._close(user_id)
             state = self.store.load(user_id) or {"cookies": [], "origins": []}
             keep = {(c.get("name"), c.get("domain"), c.get("path")): c for c in state.get("cookies") or []}
             for cookie in clean:
                 keep[(cookie["name"], cookie["domain"], cookie["path"])] = cookie
             state["cookies"] = list(keep.values())
+            by_origin = {o.get("origin"): o for o in state.get("origins") or []}
+            for item in stores:
+                by_origin[item["origin"]] = item
+            state["origins"] = list(by_origin.values())
             self.store.save(user_id, state)
             return len(clean)
 
@@ -1450,6 +1576,14 @@ def execute(session, user, task_id, name: str, args: dict):
             if ask_for_captcha(browser, user.id, agent_run):
                 after = browser.call(user.id, "browser_read", {}, task_id=task_id)
                 result = Result("Пользователь прошёл капчу.\n\n" + after.text, after.error, after.frame, result.files + after.files)
+            elif agent_run is not None and not agent_run.control.stopped:
+                # Nobody passed it in time: the agent never solves captchas. The run ends with what it did,
+                # and «продолжи» picks it up once a person has signed in on the live screen.
+                from app.agent.control import Stopped
+
+                for info in result.files:
+                    publish(heli_files.published(info))
+                raise Stopped("captcha")
             else:
                 result = Result(
                     "Ошибка: сайт показал капчу, и её не прошли. Попробуй другой сайт или скажи пользователю, "

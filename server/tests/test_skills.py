@@ -182,3 +182,60 @@ def test_moysklad_read_is_get_only_and_compact() -> None:
     assert seen[0].method == "GET" and seen[0].url.host == "api.moysklad.ru"
     assert '"article": "GL-M-100"' in text and '"salePrice": 125.5' in text and "href" not in text
     assert moysklad.auth_header("token", "abc") == "Bearer abc"
+
+
+def test_bitrix24_read_allows_only_reading_methods() -> None:
+    from app.agent import bitrix
+
+    assert bitrix.build_call({"method": "crm.deal.list", "params": {"select": ["ID"]}}) == ("crm.deal.list", {"select": ["ID"]})
+    for method in ("crm.deal.add", "crm.deal.update", "crm.deal.delete", "tasks.task.add", "batch"):
+        with pytest.raises(bitrix.BxError):
+            bitrix.build_call({"method": method})
+
+
+def test_bitrix24_webhook_goes_only_to_the_portal_host() -> None:
+    from app.agent import bitrix
+
+    assert bitrix.webhook_base("romashka.bitrix24.ru", "https://evil.example/rest/1/abc123/") == (
+        "https://romashka.bitrix24.ru/rest/1/abc123/"
+    )
+    assert bitrix.webhook_base("https://romashka.bitrix24.ru/", "1/abc123") == "https://romashka.bitrix24.ru/rest/1/abc123/"
+    with pytest.raises(bitrix.BxError):
+        bitrix.webhook_base("romashka.bitrix24.ru", "not a webhook")
+
+
+def test_bitrix24_read_uses_the_webhook_and_keeps_it_out_of_logins(session, monkeypatch) -> None:
+    import httpx
+
+    from app.agent import bitrix
+
+    monkeypatch.setenv("VAULT_MASTER_KEY", KEY)
+    user = _user(session, "bx@example.com")
+    store_credential(session, user, "romashka.bitrix24.ru", "ivan", SECRET)
+    store_credential(session, user, "romashka.bitrix24.ru", "webhook", "https://romashka.bitrix24.ru/rest/7/qwe789/")
+    session.flush()
+    # The sign-in form gets the login, never the webhook.
+    assert credential_for(session, user, url="https://romashka.bitrix24.ru/")["username"] == "ivan"
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, str(request.url), json.loads(request.content)))
+        return httpx.Response(200, json={"result": [{"ID": "5", "TITLE": "Окна", "OPPORTUNITY": "120000.00", "X": ""}], "total": 1})
+
+    result = bitrix.execute(
+        session, user, None, "bitrix24_read",
+        {"method": "crm.deal.list", "params": {"filter": {"STAGE_ID": "NEW"}}},
+        transport=httpx.MockTransport(handler),
+    )
+    assert seen == [("POST", "https://romashka.bitrix24.ru/rest/7/qwe789/crm.deal.list.json", {"filter": {"STAGE_ID": "NEW"}})]
+    assert result.error is None and "Окна" in result.content and "Найдено 1" in result.content
+    assert "qwe789" not in result.content
+
+
+def test_bitrix24_read_without_webhook_explains_how_to_add_one(session, monkeypatch) -> None:
+    from app.agent import bitrix
+
+    monkeypatch.setenv("VAULT_MASTER_KEY", KEY)
+    user = _user(session, "nobx@example.com")
+    result = bitrix.execute(session, user, None, "bitrix24_read", {"method": "crm.deal.list"})
+    assert result.error == "no_credential" and "Входящий вебхук" in result.content

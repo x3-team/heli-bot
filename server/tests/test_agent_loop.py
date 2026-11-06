@@ -811,3 +811,38 @@ def test_vision_round_gets_a_short_context() -> None:
     short = vision_messages(history, limit=2000)
     assert short[0] == {"role": "system", "content": "sys"} and short[-1] is image
     assert sum(len(str(m["content"])) for m in short) < 5000
+
+
+def test_halfway_note_asks_to_change_path_or_finish() -> None:
+    pages = iter(range(100))
+    complete = _scripted(*[_completion(calls=[("browser_read", {})]) for _ in range(6)], _completion("Готово"))
+    run_agent([{"role": "user", "content": "x"}], tools=BROWSER_TOOLS,
+              call_tool=lambda *a: ToolResult(f"страница {next(pages)}"), complete=complete, budget=Budget(max_steps=10))
+    notes = [m for m in complete.seen[-1][0] if m["role"] == "user" and "Прошло 5 из 10 шагов" in str(m["content"])]
+    assert len(notes) == 1
+
+
+def test_typed_form_in_moysklad_is_saved_before_the_answer() -> None:
+    complete = _scripted(
+        _completion(calls=[("browser_open", {"url": "https://online.moysklad.ru/app/#supply/edit"})]),
+        _completion(calls=[("browser_type", {"ref": 3, "text": "10"})]),
+        _completion("Приёмка заполнена."),
+        _completion(calls=[("browser_click", {"text": "Сохранить"})]),
+        _completion("Сохранил приёмку."),
+    )
+    called = []
+    out = run_agent([{"role": "user", "content": "x"}], tools=BROWSER_TOOLS,
+                    call_tool=lambda c, n, a: called.append(n) or ToolResult("ок"), complete=complete, budget=Budget())
+    assert "не нажал «Сохранить»" in complete.seen[3][0][-1]["content"]
+    assert called[-1] == "browser_click" and out.final_answer == "Сохранил приёмку."
+
+
+def test_search_typing_elsewhere_does_not_ask_to_save() -> None:
+    complete = _scripted(
+        _completion(calls=[("browser_open", {"url": "https://online.moysklad.ru/app/#good"})]),
+        _completion(calls=[("browser_type", {"ref": 1, "text": "перчатки", "submit": True})]),
+        _completion("Нашёл 3 товара."),
+    )
+    out = run_agent([{"role": "user", "content": "x"}], tools=BROWSER_TOOLS,
+                    call_tool=lambda *a: ToolResult("ок"), complete=complete, budget=Budget())
+    assert out.final_answer == "Нашёл 3 товара."
