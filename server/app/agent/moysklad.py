@@ -645,7 +645,8 @@ def run_read(args: dict, cred: dict | None, secret_of: Callable[[dict], str], tr
             raise MsError(
                 "no_credential",
                 "Нет доступа к МоемуСкладу в «Доступах». Читай данные с экрана, а пользователю скажи, что для "
-                "проверки через API нужно сохранить логин и пароль МоегоСклада.",
+                "проверки через API нужно сохранить доступ в «Доступах»: сайт online.moysklad.ru, логин и пароль "
+                "МоегоСклада (или логин token и токен доступа к API). Пароль не пишите в чат.",
             )
         data = fetch(path, params, auth_header(cred["username"], secret_of(cred)), transport)
         return ClientResult(format_result(data))

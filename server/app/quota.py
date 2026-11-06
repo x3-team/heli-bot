@@ -41,6 +41,8 @@ class UsageSnapshot:
     weekly_limit: Decimal
     monthly_limit: Decimal
     daily_limit: Decimal
+    global_daily_used: Decimal
+    global_daily_limit: Decimal
     blocked: bool
     warning: bool
     week_key: str
@@ -70,13 +72,25 @@ def snapshot(session: Session, user: User, now: datetime | None = None) -> Usage
     day_start = day_local.astimezone(timezone.utc)
     week_used = _spent(session, UsageLedger.user_id == user.id, UsageLedger.created_at >= week_start)
     month_used = _spent(session, UsageLedger.user_id == user.id, UsageLedger.created_at >= month_start)
-    daily_used = _spent(session, UsageLedger.created_at >= day_start)
+    # Every limit is per account: a training pack and a tester never share a day.
+    daily_used = _spent(session, UsageLedger.user_id == user.id, UsageLedger.created_at >= day_start)
     weekly_limit = weekly_limit_of(user)
     monthly_limit = monthly_limit_of(user)
-    daily_limit = _money(get_settings().daily_limit_rub)
+    settings = get_settings()
+    daily_limit = _money(settings.daily_limit_rub)
+    # Server-wide day cap only when GLOBAL_DAILY_LIMIT_RUB > 0 (off by default).
+    global_daily_limit = _money(settings.global_daily_limit_rub)
+    global_daily_used = (
+        _spent(session, UsageLedger.created_at >= day_start) if global_daily_limit > 0 else Decimal("0")
+    )
     week_percent = _percent(week_used, weekly_limit)
     month_percent = _percent(month_used, monthly_limit)
-    blocked = week_percent >= 100 or month_percent >= 100 or (daily_limit <= 0 or daily_used >= daily_limit)
+    blocked = (
+        week_percent >= 100
+        or month_percent >= 100
+        or (daily_limit > 0 and daily_used >= daily_limit)
+        or (global_daily_limit > 0 and global_daily_used >= global_daily_limit)
+    )
     warning = week_percent >= 80 or month_percent >= 80
     return UsageSnapshot(
         week_percent=week_percent,
@@ -87,6 +101,8 @@ def snapshot(session: Session, user: User, now: datetime | None = None) -> Usage
         weekly_limit=weekly_limit,
         monthly_limit=monthly_limit,
         daily_limit=daily_limit,
+        global_daily_used=global_daily_used,
+        global_daily_limit=global_daily_limit,
         blocked=blocked,
         warning=warning,
         week_key=week_local.date().isoformat(),
@@ -269,7 +285,9 @@ def _ensure_room(session: Session, user: User, reserve: Decimal) -> None:
         raise QuotaError("limit_reached")
     if snap.month_used + reserve > snap.monthly_limit:
         raise QuotaError("limit_reached")
-    if snap.daily_used + reserve > snap.daily_limit:
+    if snap.daily_limit > 0 and snap.daily_used + reserve > snap.daily_limit:
+        raise QuotaError("limit_reached")
+    if snap.global_daily_limit > 0 and snap.global_daily_used + reserve > snap.global_daily_limit:
         raise QuotaError("limit_reached")
 
 

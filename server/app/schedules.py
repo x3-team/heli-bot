@@ -44,6 +44,40 @@ def parse_expression(text: str) -> str:
     return cleaned
 
 
+# cron day of week (0 and 7 are Sunday) in the accusative: «каждый понедельник», «каждую среду».
+_EVERY_WEEKDAY = (
+    "каждое воскресенье",
+    "каждый понедельник",
+    "каждый вторник",
+    "каждую среду",
+    "каждый четверг",
+    "каждую пятницу",
+    "каждую субботу",
+    "каждое воскресенье",
+)
+_MONTHS_GEN = (
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+)
+
+
+def describe(expression: str) -> str:
+    """A cron line in words, Moscow time: "0 9 * * 1" -> "каждый понедельник в 9:00 МСК"."""
+    minute, hour, day, month, weekday = expression.split(" ")
+    if not (minute.isdigit() and hour.isdigit()):
+        return f"по cron «{expression}» (МСК)"
+    at = f"в {int(hour)}:{int(minute):02d} МСК"
+    if day == "*" and month == "*":
+        if weekday == "*":
+            return f"каждый день {at}"
+        return f"{_EVERY_WEEKDAY[int(weekday)]} {at}"
+    if weekday == "*" and day.isdigit():
+        if month == "*":
+            return f"каждый месяц {int(day)}-го числа {at}"
+        return f"каждый год {int(day)} {_MONTHS_GEN[int(month) - 1]} {at}"
+    return f"по cron «{expression}» (МСК)"
+
+
 def create_schedule(session: Session, user: User, label: str, expression: str, request: str, now: datetime | None = None) -> Schedule:
     cron = parse_expression(expression)
     moment = _aware(now)
@@ -97,11 +131,19 @@ def run_due(
 
 
 def next_after(expression: str, now: datetime) -> datetime:
-    local = _aware(now).astimezone(MSK).replace(second=0, microsecond=0) + timedelta(minutes=1)
-    for _ in range(60 * 24 * 8):
-        if _matches(expression, local):
-            return local.astimezone(timezone.utc)
-        local += timedelta(minutes=1)
+    """The first matching minute after `now`, Moscow time. Looks day by day, so monthly and yearly rules work too."""
+    start = _aware(now).astimezone(MSK).replace(second=0, microsecond=0) + timedelta(minutes=1)
+    _, _, day, month, weekday = expression.split(" ")
+    # Up to 5 years: «29 февраля» comes round once in 4.
+    for offset in range(366 * 5):
+        date = (start + timedelta(days=offset)).date()
+        if not (_hit(day, date.day) and _hit(month, date.month) and _hit_weekday(weekday, date.weekday())):
+            continue
+        local = start if offset == 0 else datetime(date.year, date.month, date.day, tzinfo=MSK)
+        while local.date() == date:
+            if _matches(expression, local):
+                return local.astimezone(timezone.utc)
+            local += timedelta(minutes=1)
     raise ScheduleError("bad_schedule")
 
 
@@ -136,14 +178,19 @@ def _run_one(session: Session, row: Schedule, client: HeliClient, driver, moment
 
 def _matches(expression: str, local: datetime) -> bool:
     minute, hour, day, month, weekday = expression.split(" ")
-    cron_dow = (local.weekday() + 1) % 7
     return (
         _hit(minute, local.minute)
         and _hit(hour, local.hour)
         and _hit(day, local.day)
         and _hit(month, local.month)
-        and _hit(weekday, cron_dow)
+        and _hit_weekday(weekday, local.weekday())
     )
+
+
+def _hit_weekday(field: str, python_weekday: int) -> bool:
+    """cron day of week: 0 and 7 are Sunday, 1 is Monday."""
+    cron_dow = (python_weekday + 1) % 7
+    return _hit("0" if field == "7" else field, cron_dow)
 
 
 def _hit(field: str, value: int) -> bool:

@@ -86,6 +86,9 @@ def run_scenario(scenario: dict, agent: Agent) -> Result:
             if not _accepts(agent, "history"):
                 raise TypeError("агент не принимает history, а сценарий — продолжение диалога")
             extra["history"] = scenario["history"]
+        if scenario.get("study_first") and _accepts(agent, "study_first"):
+            # Как в проде, когда сервис незнакомый и в базе знаний о нём нет (task_run.needs_study).
+            extra["study_first"] = True
         out = agent(task_text(scenario, world), world.tools(), call_tool, budget, **extra) or {}
         crash = None
     except Exception as exc:  # агент упал: это провал сценария, а не всего прогона
