@@ -9,9 +9,17 @@ is cut out before the model sees it.
 
 Writes (app.agent.write_policy). GET and HEAD are reads, and so are POSTs to endpoints that read
 (READ_ENDPOINTS: Ozon …/list|info, Direct method «get» and reports; Metrika has no POST reads): they
-run freely. Writes to sandboxes (SANDBOX_HOSTS plus HELI_HTTP_SANDBOX_HOSTS) run as before. A write to
-any other host is a live write: the loop shows a card (method, host, path, body; for ads and payments
-a budget warning) and the request goes out only after the user's «да» for this very call.
+run freely, and so does a POST for an OAuth token (…/oauth/token): it hands out a token, it changes
+nothing. Writes to sandboxes and public training APIs (SANDBOX_HOSTS, PUBLIC_DEMO_HOSTS plus
+HELI_HTTP_SANDBOX_HOSTS) run at once: reqres.in, petstore, httpbin, api.edu.cdek.ru have no account of
+the user's behind them. A write to any other host is a live write: the loop shows a card (method,
+host, path, body; for ads and payments a budget warning) and the request goes out only after the
+user's «да» for this very call.
+
+User-Agent. Public APIs (hh.ru, Nominatim) refuse a request without an identifying User-Agent and
+blacklist browser ones. The server sends app.web.USER_AGENT unless the caller passes its own, and
+replaces an empty or browser-like one (Mozilla/…, Chrome/…). When a service still refuses the
+User-Agent, the result says so plainly, so the model fixes the header instead of opening a browser.
 """
 
 from __future__ import annotations
@@ -34,6 +42,7 @@ RESULT_CHARS = 8000
 MAX_BODY_BYTES = 200_000
 METHODS = {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"}
 READ_METHODS = {"GET", "HEAD"}
+TOKEN = "token"  # check_policy's mode for an OAuth token request; write_policy sees it as a read
 SECRET_RE = re.compile(r"\{\{\s*secret:([^{}]{1,200}?)\s*\}\}")
 REDACTED = "<CREDENTIAL>"
 # Headers that only the server sets.
@@ -42,6 +51,28 @@ _FORBIDDEN_HEADERS = {"host", "content-length", "transfer-encoding", "connection
 _SHOWN_HEADERS = ("content-type", "retryin", "units", "units-used-login", "requestid", "location", "x-request-id")
 
 SANDBOX_HOSTS = ("api-sandbox.direct.yandex.com", "api-sandbox.direct.yandex.ru")
+# Public demo and training APIs: there is no account of the user's or Heli's behind them, a POST there
+# changes only the service's own test data. Writes run at once, like in a sandbox (dangerous verbs such
+# as DELETE still ask). A subdomain matches too (eu.httpbin.org).
+PUBLIC_DEMO_HOSTS = (
+    "api.edu.cdek.ru",  # СДЭК: официальная учебная среда API v2
+    "reqres.in",
+    "petstore.swagger.io",
+    "petstore3.swagger.io",
+    "fakestoreapi.com",
+    "httpbin.org",
+    "jsonplaceholder.typicode.com",
+    "dummyjson.com",
+    "postman-echo.com",
+    "restful-booker.herokuapp.com",
+)
+# OAuth token endpoints (/oauth/token, /oauth2/token, /v2/oauth/token, oauth.yandex.ru/token): a POST
+# there exchanges credentials for a token and changes nothing in the account.
+_TOKEN_PATH = re.compile(r"(?i)/oauth2?/(?:v\d+/)?token/?$")
+# Browser User-Agents: services like hh.ru blacklist them for API calls, and the bot is not a browser.
+_BROWSER_UA = re.compile(r"(?i)mozilla/|chrome/|safari/|firefox/|edg/|opera/|yabrowser/")
+_UA_REJECTED = re.compile(r"(?i)user[-_ ]?agent")
+UA_REJECTED_CODE = "user_agent_rejected"
 
 
 @dataclass(frozen=True)
@@ -84,7 +115,20 @@ class HttpToolError(Exception):
 
 def sandbox_hosts() -> set[str]:
     extra = os.environ.get("HELI_HTTP_SANDBOX_HOSTS", "")
-    return {h.strip().lower() for h in (*SANDBOX_HOSTS, *extra.split(",")) if h.strip()}
+    return {h.strip().lower() for h in (*SANDBOX_HOSTS, *PUBLIC_DEMO_HOSTS, *extra.split(",")) if h.strip()}
+
+
+def is_public_demo(host: str) -> bool:
+    from app.skills.hosts import host_matches
+
+    return any(host_matches(host, s) for s in PUBLIC_DEMO_HOSTS)
+
+
+def is_token_request(method: str, host: str, path: str) -> bool:
+    """POST for an OAuth token: not a change in the account, on any host."""
+    if method != "POST":
+        return False
+    return bool(_TOKEN_PATH.search(path)) or (host.startswith("oauth.") and path.rstrip("/") == "/token")
 
 
 def is_sandbox(host: str) -> bool:
@@ -95,7 +139,7 @@ def is_sandbox(host: str) -> bool:
 
 def is_read(method: str, host: str, path: str, body) -> bool:
     """True when the call cannot change a live account."""
-    if method in READ_METHODS:
+    if method in READ_METHODS or is_token_request(method, host, path):
         return True
     if method != "POST":
         return False  # PUT, PATCH, DELETE always write
@@ -139,15 +183,19 @@ def check_policy(method: str, url: str, body, confirmed: bool = False) -> str:
     from app.agent import write_policy as wp
 
     mode = kind(method, url, body)
-    if mode == wp.READ and is_sandbox((urlsplit(url).hostname or "").lower()):
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if mode == wp.READ and is_token_request(method, host, parts.path or "/"):
+        return TOKEN  # shown as «получение токена» in the answer
+    if mode == wp.READ and is_sandbox(host):
         return wp.SANDBOX  # shown as «песочница» in the answer
     if mode == wp.LIVE and not confirmed:
-        parts = urlsplit(url)
         raise HttpToolError(
             wp.REFUSED_CODE,
-            f"Не выполнено: {method} {(parts.hostname or '').lower()}{parts.path} меняет данные боевого аккаунта, "
-            "а пользователь это изменение не подтвердил. Запрос не отправлен. В песочнице (для Директа — "
-            "api-sandbox.direct.yandex.com) можно без подтверждения.",
+            f"Не выполнено: {method} {host}{parts.path} меняет данные в кабинете клиента на {host}, "
+            "а пользователь это изменение не подтвердил. Запрос не отправлен. Без подтверждения можно писать в "
+            "песочницы и публичные учебные API (api-sandbox.direct.yandex.com, api.edu.cdek.ru, reqres.in, "
+            "petstore.swagger.io, httpbin.org…).",
         )
     return mode
 
@@ -166,6 +214,8 @@ def classify(args: dict):
             body = json.loads(body)
         except ValueError:
             pass
+    if body is None and isinstance(args.get("form"), dict):
+        body = args["form"]
     parts = urlsplit(url if "://" in url else f"https://{url}")
     host = (parts.hostname or "").lower()
     path = parts.path or "/"
@@ -264,12 +314,17 @@ def _fn(name: str, description: str, properties: dict, required: list[str]) -> d
 
 TOOL = _fn(
     "http_request",
-    "HTTP-запрос к API сервиса (Ozon, Wildberries, Яндекс Директ и Метрика, МойСклад и др.): метод, адрес, "
-    "заголовки, JSON-тело. Ключи не печатай и не проси: пиши {{secret:ИМЯ}}, где ИМЯ — сайт записи в "
-    "«Доступах» (например {{secret:api-seller.ozon.ru}}) или сайт/логин; сервер подставит ключ только для "
-    "запросов на этот сайт. Чтение (GET и читающие POST: Ozon …/list, …/info; Директ method get и reports) — "
-    "свободно. Изменение в песочнице (api-sandbox.direct.yandex.com) — сразу; в боевом аккаунте сервер сам "
-    "покажет пользователю карточку подтверждения, сам ask_confirmation для этого не вызывай. "
+    "HTTP-запрос к API сервиса (Ozon, Wildberries, Яндекс Директ и Метрика, МойСклад, СДЭК, hh.ru и др.): "
+    "метод, адрес, заголовки, JSON-тело (json) или форма (form, application/x-www-form-urlencoded). Ключи не "
+    "печатай и не проси: пиши {{secret:ИМЯ}}, где ИМЯ — сайт записи в «Доступах» (например "
+    "{{secret:api-seller.ozon.ru}}) или сайт/логин; сервер подставит ключ только для запросов на этот сайт. "
+    "Чтение (GET и читающие POST: Ozon …/list, …/info; Директ method get и reports) и POST за OAuth-токеном "
+    "(…/oauth/token) — свободно. Запись в песочницы и публичные учебные API (api-sandbox.direct.yandex.com, "
+    "api.edu.cdek.ru, reqres.in, petstore.swagger.io, fakestoreapi.com, httpbin.org, "
+    "jsonplaceholder.typicode.com) — сразу: это не кабинет клиента, вызывай и показывай ответ API как есть, "
+    "браузер для этого не нужен. Запись в кабинет клиента (CRM, Директ, Метрика, МойСклад, Ozon…) — сервер "
+    "сам покажет пользователю карточку подтверждения, сам ask_confirmation для этого не вызывай. "
+    "User-Agent сервер ставит свой (HeliBot); браузерный User-Agent не подставляй. "
     "Перед первым запросом к незнакомому API найди его документацию (web_search, open_url).",
     {
         "method": {"type": "string", "enum": sorted(METHODS)},
@@ -277,6 +332,8 @@ TOOL = _fn(
         "query": {"type": "object", "description": "Параметры строки запроса"},
         "headers": {"type": "object", "description": "Заголовки, например {\"Api-Key\": \"{{secret:api-seller.ozon.ru}}\"}"},
         "json": {"description": "JSON-тело запроса"},
+        "form": {"type": "object", "description": "Тело формой (x-www-form-urlencoded), например "
+                 "{\"grant_type\": \"client_credentials\", \"client_id\": \"…\"}. Вместе с json не передавай"},
     },
     ["method", "url"],
 )
@@ -292,6 +349,7 @@ class Prepared:
     headers: dict
     body: object
     mode: str
+    form: dict | None = None
 
 
 def prepare(args: dict, lookup, resolver=None) -> tuple[Prepared, list[str]]:
@@ -318,24 +376,44 @@ def prepare(args: dict, lookup, resolver=None) -> tuple[Prepared, list[str]]:
             body = json.loads(body)
         except ValueError:
             pass
-    if not isinstance(headers, dict) or not isinstance(query, dict):
-        raise HttpToolError("bad_args", "Ошибка: headers и query — объекты.")
-    headers = {str(k): str(v) for k, v in headers.items() if str(k).lower() not in _FORBIDDEN_HEADERS}
+    form = args.get("form")
+    if not isinstance(headers, dict) or not isinstance(query, dict) or not isinstance(form, (dict, type(None))):
+        raise HttpToolError("bad_args", "Ошибка: headers, query и form — объекты.")
+    if form is not None and body is not None:
+        raise HttpToolError("bad_args", "Ошибка: передай тело либо в json, либо в form, не оба сразу.")
+    if form is not None:
+        form = {str(k): "" if v is None else str(v) for k, v in form.items()}
+    headers = with_user_agent({str(k): str(v) for k, v in headers.items() if str(k).lower() not in _FORBIDDEN_HEADERS})
     try:
         url = check_url(raw_url, resolver) if resolver else check_url(raw_url)
     except WebError as exc:
         raise HttpToolError(exc.code, f"Ошибка: адрес недоступен ({exc.code}).") from None
     host = (urlsplit(url).hostname or "").lower()
-    mode = check_policy(method, url, body, confirmed=wp.confirmed(args))
-    used: list[str] = []
+    mode = check_policy(method, url, body if body is not None else form, confirmed=wp.confirmed(args))
     url_filled, a = resolve_secrets(url, host, lookup)
     query, b = resolve_secrets(query, host, lookup)
     headers, c = resolve_secrets(headers, host, lookup)
     body, d = resolve_secrets(body, host, lookup)
-    used = a + b + c + d
-    if body is not None and len(json.dumps(body, ensure_ascii=False).encode()) > MAX_BODY_BYTES:
+    form, e = resolve_secrets(form, host, lookup)
+    used = a + b + c + d + e
+    payload = body if body is not None else form
+    if payload is not None and len(json.dumps(payload, ensure_ascii=False).encode()) > MAX_BODY_BYTES:
         raise HttpToolError("body_too_large", "Ошибка: тело запроса больше 200 КБ.")
-    return Prepared(method, str(url_filled), host, query, headers, body, mode), used
+    return Prepared(method, str(url_filled), host, query, headers, body, mode, form), used
+
+
+def with_user_agent(headers: dict) -> dict:
+    """headers with an identifying User-Agent: the caller's own, or app.web.USER_AGENT when it is
+    missing, empty or a browser's (hh.ru blacklists those; the bot does not pretend to be a browser)."""
+    from app.web import USER_AGENT
+
+    own = next((v for k, v in headers.items() if k.lower() == "user-agent"), None)
+    out = {k: v for k, v in headers.items() if k.lower() != "user-agent"}
+    if own is not None and own.strip() and not _BROWSER_UA.search(own):
+        out["User-Agent"] = own.strip()
+    else:
+        out["User-Agent"] = USER_AGENT
+    return out
 
 
 def send(req: Prepared, transport: httpx.BaseTransport | None = None) -> httpx.Response:
@@ -344,9 +422,27 @@ def send(req: Prepared, transport: httpx.BaseTransport | None = None) -> httpx.R
             req.method,
             req.url,
             params=req.query or None,
-            headers={"User-Agent": "HeliBot/0.1", **req.headers},
+            headers=with_user_agent(req.headers),
             json=req.body if req.body is not None else None,
+            data=req.form if req.form is not None else None,
         )
+
+
+def user_agent_rejected(response: httpx.Response) -> bool:
+    """400/403 whose body talks about the User-Agent (hh.ru: bad_user_agent, Nominatim: User-Agent policy)."""
+    if response.status_code not in (400, 403) or response.request.method == "HEAD":
+        return False
+    return bool(_UA_REJECTED.search(response.text[:4000]))
+
+
+def user_agent_hint(response: httpx.Response) -> str:
+    sent = response.request.headers.get("user-agent", "")
+    return (
+        f"Нужен свой User-Agent: сервис отверг заголовок User-Agent (сервер отправил «{sent}»). Это не данные и не "
+        "повод открывать браузер. Посмотри в документации API, какой User-Agent он требует (обычно название "
+        "приложения и контакт, у hh.ru ещё есть заголовок HH-User-Agent), и повтори http_request с ним в headers. "
+        "Браузерный User-Agent (Chrome, Firefox) не подставляй: такие сервисы держат его в чёрном списке."
+    )
 
 
 def format_response(response: httpx.Response, mode: str, secrets: list[str]) -> str:
@@ -358,10 +454,16 @@ def format_response(response: httpx.Response, mode: str, secrets: list[str]) -> 
             text = json.dumps(response.json(), ensure_ascii=False)
         except ValueError:
             pass
-    label = {"sandbox": "песочница", "live": "боевой аккаунт, изменение подтверждено"}.get(mode, "чтение")
+    label = {
+        "sandbox": "песочница или учебный API",
+        "live": "кабинет клиента, изменение подтверждено",
+        TOKEN: "получение токена, данные не меняются",
+    }.get(mode, "чтение")
     head = f"HTTP {response.status_code} ({label})"
     if shown:
         head += "\n" + "\n".join(shown)
+    if user_agent_rejected(response):
+        head = f"{user_agent_hint(response)}\n\n{head}"
     out = redact(f"{head}\n\n{text}", secrets)
     return out if len(out) <= RESULT_CHARS else out[:RESULT_CHARS] + "\n…[ответ обрезан]"
 
@@ -393,6 +495,8 @@ def execute(
         req, secrets = prepare(args, vault_lookup(session, user), resolver=resolver)
         response = send(req, transport)
         error = None if response.status_code < 400 else f"http_{response.status_code}"
+        if user_agent_rejected(response):
+            error = UA_REJECTED_CODE
         return ClientResult(format_response(response, req.mode, secrets), error)
     except HttpToolError as exc:
         return ClientResult(redact(exc.text, secrets), exc.code)
