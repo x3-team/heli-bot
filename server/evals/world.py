@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from app import knowledge as _kn
 from app.agent import bitrix as _bx
 
 BASE_WORLD_PATH = Path(__file__).with_name("base_world.json")
@@ -98,6 +99,8 @@ TOOLS: list[dict] = [
 # Битрикс24 — те же инструменты и те же списки методов, что в проде (app.agent.bitrix): REST через вебхук.
 # Портал мира учебный, поэтому bitrix24_write разрешён; удалений нет и здесь.
 TOOLS += [copy.deepcopy(_bx.TOOL), copy.deepcopy(_bx.WRITE_TOOL)]
+# База знаний — та же схема, что в проде; в мире только поиск по state["knowledge"].
+TOOLS.append(copy.deepcopy(_kn.SEARCH_TOOL))
 
 TOOL_NAMES = {t["function"]["name"] for t in TOOLS}
 
@@ -212,6 +215,13 @@ class World:
             if page["url"].removeprefix("https://").rstrip("/") == clean:
                 return {"url": page["url"], "title": page["title"], "text": page["text"]}
         raise ToolError("404")
+
+    def _t_knowledge_search(self, query: str) -> dict:
+        notes = _ranked(query, self.state.get("knowledge", []), lambda n: (n["topic"], n["fact"]))
+        if not notes:
+            return {"notes": [], "hint": "В базе знаний ничего нет по этой теме. Найди официальную справку "
+                                         "или документацию (web_search, open_url)."}
+        return {"notes": notes[:5]}
 
     def _t_company_by_inn(self, inn: str) -> dict:
         key = _digits(inn)

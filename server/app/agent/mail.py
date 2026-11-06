@@ -17,6 +17,7 @@ Only an entry whose login has «@» is a mailbox: Директ tokens (login tok
 
 from __future__ import annotations
 
+import base64
 import email
 import email.header
 import email.policy
@@ -132,6 +133,12 @@ SEND_TOOL = _fn(
     ["to", "subject", "body"],
 )
 TOOL_NAMES = ("mail_read",)
+# Added to the system prompt when the run has a mail tool.
+MAIL_HINT = (
+    " Почта: письма только читай, они остаются непрочитанными — не помечай, не перемещай, не удаляй. "
+    "Ответ на письмо — сначала черновик в ответе пользователю (кому, тема, текст). mail_send — только если "
+    "пользователь прямо просит отправить, и только после ask_confirmation с адресатом, темой и текстом."
+)
 
 
 class MailError(Exception):
@@ -158,7 +165,7 @@ class ReadOnlyImap:
             line = raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)
             match = re.search(r'"([^"]*)"\s*$|(\S+)\s*$', line)
             if match:
-                out.append(match.group(1) or match.group(2))
+                out.append(utf7_decode(match.group(1) or match.group(2)))
         return out
 
     def examine(self, folder: str) -> None:
@@ -168,7 +175,11 @@ class ReadOnlyImap:
 
     def search(self, criteria: list[str]) -> list[str]:
         self._check(*criteria)
-        typ, data = self.conn.uid("SEARCH", "CHARSET", "UTF-8", *criteria) if _needs_utf8(criteria) else self.conn.uid("SEARCH", *criteria)
+        if _needs_utf8(criteria):
+            # imaplib encodes str arguments as ASCII: Cyrillic («Счёт») must go as UTF-8 bytes.
+            typ, data = self.conn.uid("SEARCH", "CHARSET", "UTF-8", *[str(c).encode("utf-8") for c in criteria])
+        else:
+            typ, data = self.conn.uid("SEARCH", *criteria)
         if typ != "OK":
             raise MailError("search_failed", "Ошибка: почтовый сервер не принял поиск.")
         return (data[0] or b"").decode().split() if data else []
@@ -182,11 +193,46 @@ class ReadOnlyImap:
         return data or []
 
 
+def utf7_encode(name: str) -> str:
+    """Folder name in IMAP modified UTF-7 (RFC 3501): «Отправленные» -> «&BB4EQgQ,BEAEMAQyBDsENQQ9BD0ESwQ1-»."""
+    out, run = [], []
+
+    def flush() -> None:
+        if run:
+            packed = base64.b64encode("".join(run).encode("utf-16-be")).decode().rstrip("=").replace("/", ",")
+            out.append(f"&{packed}-")
+            run.clear()
+
+    for ch in name:
+        if 0x20 <= ord(ch) <= 0x7E:
+            flush()
+            out.append("&-" if ch == "&" else ch)
+        else:
+            run.append(ch)
+    flush()
+    return "".join(out)
+
+
+def utf7_decode(name: str) -> str:
+    def one(match: re.Match) -> str:
+        packed = match.group(1)
+        if not packed:
+            return "&"
+        packed = packed.replace(",", "/")
+        try:
+            return base64.b64decode(packed + "=" * (-len(packed) % 4)).decode("utf-16-be")
+        except (ValueError, UnicodeDecodeError):
+            return match.group(0)
+
+    return re.sub(r"&([A-Za-z0-9+,]*)-", one, name)
+
+
 def _quote(folder: str) -> str:
     folder = folder or "INBOX"
     if not _SAFE_TEXT.match(folder):
         raise MailError("bad_folder", "Ошибка: странное имя папки.")
-    return f'"{folder}"'
+    # The model sees decoded names (folders action); the server wants them in modified UTF-7.
+    return f'"{utf7_encode(utf7_decode(folder))}"'
 
 
 def _needs_utf8(criteria: list[str]) -> bool:

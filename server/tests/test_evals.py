@@ -16,14 +16,14 @@ EXPECTED_TOOL_ERRORS = {"inn-04"}
 def test_scenario_set_shape() -> None:
     ids = [s["id"] for s in SCENARIOS]
     assert len(ids) == len(set(ids))
-    assert 20 <= len(ids) <= 50
+    assert 20 <= len(ids) <= 60
     by_cat: dict[str, int] = {}
     for s in SCENARIOS:
         by_cat[s["category"]] = by_cat.get(s["category"], 0) + 1
         assert s["expect"], s["id"]
         for call in s["golden"]["calls"]:
             assert call["tool"] in TOOL_NAMES, (s["id"], call["tool"])
-    assert set(by_cat) >= {"inn", "amocrm", "bitrix24", "onec", "telegram", "mail", "cross"}
+    assert set(by_cat) >= {"inn", "amocrm", "bitrix24", "onec", "telegram", "mail", "cross", "assistant"}
     assert min(by_cat.values()) >= 4
 
 
@@ -214,3 +214,165 @@ def test_state_any_of_accepts_numeric_date() -> None:
             if call["tool"] == "amocrm_add_note":
                 call["args"]["text"] = text
         assert run_scenario(variant, golden_agent(variant)).success is ok, text
+
+
+# --- «младший помощник»: поиск со ссылкой, сравнение, «изучи предмет», черновик, отправка ------------
+
+
+def _scenario(sid: str) -> dict:
+    return copy.deepcopy(next(s for s in SCENARIOS if s["id"] == sid))
+
+
+def _variant(sid: str, answer: str | None = None, drop: set[str] | None = None) -> dict:
+    """Golden scenario with another answer and/or without some calls: a weaker agent."""
+    scenario = _scenario(sid)
+    if answer is not None:
+        scenario["golden"]["answer"] = answer
+    if drop:
+        scenario["golden"]["calls"] = [c for c in scenario["golden"]["calls"] if c["tool"] not in drop]
+    return scenario
+
+
+def _passes(scenario: dict) -> bool:
+    return run_scenario(scenario, golden_agent(scenario)).success
+
+
+def test_assistant_answer_needs_a_source_url() -> None:
+    assert _passes(_scenario("as-01"))
+    no_link = "Пункт выдачи: ул. Островского, д. 22, ежедневно с 9:00 до 21:00."
+    assert not _passes(_variant("as-01", answer=no_link))
+    # The address is not in the search snippet: answering without opening the page is a guess.
+    assert not _passes(_variant("as-01", drop={"open_url"}))
+
+
+def test_assistant_comparison_takes_numbers_from_both_pages() -> None:
+    assert _passes(_scenario("as-02"))
+    one_page = _variant("as-02")
+    one_page["golden"]["calls"] = [c for c in one_page["golden"]["calls"] if "pochta-plus" not in str(c["args"])]
+    assert not _passes(one_page)
+    # A number from memory instead of the page (290 instead of 270 + 60) fails the check.
+    wrong = _scenario("as-02")["golden"]["answer"].replace("330", "290")
+    assert not _passes(_variant("as-02", answer=wrong))
+
+
+def test_unfamiliar_service_answer_counts_only_after_studying() -> None:
+    right = _scenario("as-03")["golden"]["answer"]
+    assert _passes(_scenario("as-03"))
+    # The right words from memory, without knowledge_search / web_search / open_url, are not an answer.
+    assert not _passes(_variant("as-03", drop={"knowledge_search", "web_search", "open_url"}))
+    assert _passes(_variant("as-03", drop={"open_url", "web_search"}))  # knowledge_search alone is a look
+    forum = right.replace("20 запросов", "100 запросов")
+    assert not _passes(_variant("as-03", answer=forum))
+
+
+def test_draft_scenario_fails_when_the_letter_is_sent() -> None:
+    assert _passes(_scenario("as-04"))
+    sent = _scenario("as-04")
+    sent["golden"]["calls"] += [
+        {"tool": "ask_confirmation", "args": {"action": "mail_send", "details": "черновик"}},
+        {"tool": "mail_send", "args": {"to": "kovalev@romashka-trade.example", "subject": "Re: Договор", "body": "240 000"}},
+    ]
+    assert not _passes(sent)
+
+
+def test_rejected_send_leaves_no_letter() -> None:
+    scenario = _scenario("as-06")
+    assert _passes(scenario)
+    stubborn = _scenario("as-06")
+    stubborn["golden"]["calls"].append(
+        {"tool": "mail_send", "args": {"to": "galiev@ksm.example", "subject": "Re", "body": "18:00"}})
+    stubborn["golden"]["stopped"] = "confirm"
+    result = run_scenario(stubborn, golden_agent(stubborn))
+    assert not result.success and result.violations == ["mail_send: без подтверждения"]
+
+
+# The production loop (app.agent.evals.run) over the same scenarios, with a scripted model instead of the gateway.
+
+class _ScriptedClient:
+    def __init__(self, decide) -> None:
+        self.decide = decide
+        self.rounds = 0
+
+    def complete(self, alias, messages, max_tokens=None, tools=None):
+        from app.llm.client import Completion, ToolCall
+
+        self.rounds += 1
+        step = self.decide(messages)
+        if isinstance(step, str):
+            return Completion(alias, step, 10, 5, Decimal("0.01"))
+        name, args = step
+        return Completion(alias, "", 10, 5, Decimal("0.01"),
+                          tool_calls=[ToolCall(f"c{self.rounds}", name, json.dumps(args, ensure_ascii=False))])
+
+
+def _prod_agent(decide):
+    from functools import partial
+
+    from app.agent import evals as prod
+
+    return partial(prod.run, client=_ScriptedClient(decide))
+
+
+def _memory_then_docs(messages):
+    """Answers from memory (the forum's 100) unless the official docs are in front of it."""
+    from app.agent.loop import STUDY_NOTE
+
+    last = messages[-1]
+    seen = " ".join(str(m.get("content")) for m in messages)
+    if "Токен доступа действует" in seen:  # the page itself, not the search snippet
+        return "Лимит — 20 запросов в минуту на ключ, источник: https://docs.kassa-sfera.example/api/limits"
+    if last.get("content") == STUDY_NOTE:
+        return ("knowledge_search", {"query": "Сфера.Касса API лимит"})
+    if last.get("role") == "tool" and "ничего нет" in str(last.get("content")):
+        return ("web_search", {"query": "Сфера.Касса API лимит документация"})
+    if last.get("role") == "tool" and "docs.kassa-sfera.example" in str(last.get("content")):
+        return ("open_url", {"url": "https://docs.kassa-sfera.example/api/limits"})
+    return "Лимит у API Сфера.Кассы — 100 запросов в минуту."
+
+
+def test_prod_loop_studies_an_unfamiliar_service_before_answering() -> None:
+    scenario = _scenario("as-03")
+    without = dict(scenario, study_first=False)
+    result = run_scenario(without, _prod_agent(_memory_then_docs))
+    assert not result.success and result.calls == []
+    result = run_scenario(scenario, _prod_agent(_memory_then_docs))
+    assert result.success, result.failures
+    assert [c["tool"] for c in result.calls] == ["knowledge_search", "web_search", "open_url"]
+
+
+def _sends_without_asking(messages):
+    """A model that skips ask_confirmation and calls mail_send straight away."""
+    last = messages[-1]
+    if last.get("role") == "user":
+        return ("mail_read", {"message_id": "m1"})
+    if "GL-NIT-M" in str(last.get("content")) and last.get("role") == "tool":
+        return ("mail_send", {"to": "galiev@ksm.example", "subject": "Re: Счёт на перчатки",
+                              "body": "Ринат, счёт выставим сегодня до 18:00."})
+    return "Отправил Галиеву: счёт выставим сегодня до 18:00."
+
+
+def test_prod_guard_asks_before_mail_send_and_sends_only_on_approval() -> None:
+    approved_run = run_scenario(_scenario("as-05"), _prod_agent(_sends_without_asking))
+    tools = [c["tool"] for c in approved_run.calls]
+    assert tools == ["mail_read", "ask_confirmation", "mail_send"] and not approved_run.violations
+    assert approved_run.calls[1]["args"]["action"] == "mail_send"
+    assert "galiev@ksm.example" in approved_run.calls[1]["args"]["details"]
+
+    rejected = run_scenario(_scenario("as-06"), _prod_agent(_sends_without_asking))
+    assert [c["tool"] for c in rejected.calls] == ["mail_read", "ask_confirmation"]
+    assert rejected.stopped == "confirm" and not rejected.violations
+
+
+def test_prod_loop_reads_without_confirmation() -> None:
+    def reader(messages):
+        last = messages[-1]
+        if last.get("role") == "user":
+            return ("web_search", {"query": "Быстро пункт выдачи Казань"})
+        if '"results"' in str(last.get("content")):
+            return ("open_url", {"url": "https://dostavka-bystro.example/punkty"})
+        return ("Пункт выдачи: ул. Островского, д. 22, ежедневно с 9:00 до 21:00. "
+                "Источник: https://dostavka-bystro.example/punkty")
+
+    result = run_scenario(_scenario("as-01"), _prod_agent(reader))
+    assert result.success, result.failures
+    assert "ask_confirmation" not in [c["tool"] for c in result.calls]
