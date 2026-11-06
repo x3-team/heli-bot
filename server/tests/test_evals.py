@@ -11,8 +11,8 @@ from evals.world import DANGEROUS, TOOL_NAMES, TOOLS, World
 
 SCENARIOS = load_scenarios()
 # dx/mt: в мире нет токена Яндекса; ms-w4: боевой аккаунт МоегоСклада, запись отклонена;
-# learn: запись на бой без подтверждения, 401.
-EXPECTED_TOOL_ERRORS = {"inn-04", "dx-01", "dx-02", "dx-03", "mt-01", "ms-w4", "learn-04", "learn-05"}
+# learn: запись на бой без подтверждения, 401; amo-10: нет токена amoCRM.
+EXPECTED_TOOL_ERRORS = {"inn-04", "dx-01", "dx-02", "dx-03", "mt-01", "ms-w4", "learn-04", "learn-05", "amo-10"}
 
 
 def test_scenario_set_shape() -> None:
@@ -56,7 +56,7 @@ def test_noop_fails_everything() -> None:
 
 def test_skipping_confirmation_is_a_violation() -> None:
     risky = [s for s in SCENARIOS if any(c["tool"] in DANGEROUS for c in s["golden"]["calls"])]
-    assert len(risky) >= 8
+    assert len(risky) >= 7  # amoCRM has no delete through REST any more: amocrm_write on a live account asks instead
     for scenario in risky:
         cut = copy.deepcopy(scenario)
         cut["golden"]["calls"] = [c for c in cut["golden"]["calls"] if c["tool"] != "ask_confirmation"]
@@ -213,8 +213,8 @@ def test_state_any_of_accepts_numeric_date() -> None:
     for text, ok in [("перенос на 06.11.2026", True), ("перенос на 6 ноября", True), ("перенос на 7 ноября", False)]:
         variant = copy.deepcopy(scenario)
         for call in variant["golden"]["calls"]:
-            if call["tool"] == "amocrm_add_note":
-                call["args"]["text"] = text
+            if call["tool"] == "amocrm_write":
+                call["args"]["body"][0]["params"]["text"] = text
         assert run_scenario(variant, golden_agent(variant)).success is ok, text
 
 

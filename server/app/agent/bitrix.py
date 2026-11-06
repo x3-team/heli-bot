@@ -250,7 +250,14 @@ def webhook_for(session, user, portal: str | None) -> dict | None:
     from app.skills.hosts import host_matches, host_of
     from app.vault import list_credentials
 
-    rows = [row for row in list_credentials(session, user) if is_webhook_login(row.get("username"))]
+    from app.agent.amocrm import account_host
+
+    # amoCRM tokens may be saved with the same login «webhook»: they are not Битрикс24 webhooks.
+    rows = [
+        row
+        for row in list_credentials(session, user)
+        if is_webhook_login(row.get("username")) and not account_host(row.get("site"))
+    ]
     target = host_of(portal)
     if target:
         for row in rows:
