@@ -10,20 +10,20 @@ from evals.runner import load_scenarios, run_scenario, summarize, to_markdown
 from evals.world import DANGEROUS, TOOL_NAMES, TOOLS, World
 
 SCENARIOS = load_scenarios()
-EXPECTED_TOOL_ERRORS = {"inn-04"}
+EXPECTED_TOOL_ERRORS = {"inn-04", "ms-w4"}
 
 
 def test_scenario_set_shape() -> None:
     ids = [s["id"] for s in SCENARIOS]
     assert len(ids) == len(set(ids))
-    assert 20 <= len(ids) <= 50
+    assert 20 <= len(ids) <= 60
     by_cat: dict[str, int] = {}
     for s in SCENARIOS:
         by_cat[s["category"]] = by_cat.get(s["category"], 0) + 1
         assert s["expect"], s["id"]
         for call in s["golden"]["calls"]:
             assert call["tool"] in TOOL_NAMES, (s["id"], call["tool"])
-    assert set(by_cat) >= {"inn", "amocrm", "bitrix24", "onec", "telegram", "mail", "cross"}
+    assert set(by_cat) >= {"inn", "amocrm", "bitrix24", "onec", "telegram", "mail", "cross", "moysklad"}
     assert min(by_cat.values()) >= 4
 
 

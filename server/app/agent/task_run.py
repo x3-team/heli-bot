@@ -244,6 +244,10 @@ def system_prompt(tools: list[dict], guide: str | None = None, today: str | None
         text += CLOUD_HINT if "browser_open" in server_executed() else BROWSER_HINT
     if CONFIRM_TOOL in names:
         text += CONFIRM_HINT
+    if "moysklad_write" in names:
+        from app.agent.moysklad import WRITE_HINT
+
+        text += WRITE_HINT
     if "save_credential" in names:
         from app.agent.credentials import CREDENTIALS_HINT
 

@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.agent import bitrix as _bx
+from app.agent import moysklad as _ms
+from evals.moysklad_mock import MoySkladMock
 
 BASE_WORLD_PATH = Path(__file__).with_name("base_world.json")
 
@@ -99,7 +101,27 @@ TOOLS: list[dict] = [
 # Портал мира учебный, поэтому bitrix24_write разрешён; удалений нет и здесь.
 TOOLS += [copy.deepcopy(_bx.TOOL), copy.deepcopy(_bx.WRITE_TOOL)]
 
-TOOL_NAMES = {t["function"]["name"] for t in TOOLS}
+# МойСклад — те же moysklad_read / moysklad_write, что в проде (app.agent.moysklad), поверх мока JSON API 1.2
+# (evals/moysklad_mock.py). Учебный аккаунт мира — moysklad.sandbox_accounts, доступы — moysklad.access.
+TOOLS += [copy.deepcopy(_ms.TOOL), copy.deepcopy(_ms.WRITE_TOOL)]
+
+# Экран браузера. Предлагается модели, только если в мире "browser": true (сценарии МоегоСклада): там
+# проверяем, что при работающем API модель не уходит в форму. Форма, как в прогоне 06.11, не сохраняется.
+BROWSER_TOOLS: list[dict] = [
+    _tool("browser_open", "Открыть адрес во вкладке браузера. Возвращает текст страницы с пронумерованными элементами.",
+          _s(url=_str("Адрес"))),
+    _tool("browser_read", "Прочитать текущую страницу браузера.", _s()),
+    _tool("browser_click", "Нажать на элемент страницы по номеру или тексту.",
+          _s(ref=_num("Номер элемента", True), text=_str("Текст элемента", True))),
+    _tool("browser_type", "Ввести текст в поле по номеру.",
+          _s(ref=_num("Номер поля", True), text=_str("Что ввести"))),
+]
+BROWSER_PAGE = (
+    "МойСклад — Товар (новый). Элементы: [1] Наименование [2] Артикул [3] Закупочная цена [4] Цена продажи "
+    "[5] Сохранить [6] Закрыть"
+)
+
+TOOL_NAMES = {t["function"]["name"] for t in TOOLS} | {t["function"]["name"] for t in BROWSER_TOOLS}
 
 
 @dataclass
@@ -196,6 +218,10 @@ class World:
             result, error = {"error": str(exc)}, str(exc)
         self.calls.append(Call(tool, args, result, error))
         return result
+
+    def tools(self) -> list[dict]:
+        """Схемы для агента: экран браузера — только в мирах с "browser": true."""
+        return TOOLS + BROWSER_TOOLS if self.state.get("browser") else TOOLS
 
     def called(self, tool: str) -> list[Call]:
         return [c for c in self.calls if c.tool == tool and c.error is None]
@@ -393,6 +419,47 @@ class World:
                 task["responsible"] = self._b24_user_name(fields["RESPONSIBLE_ID"])
             return {"result": {"task": self._b24_task_out(task)}}
         raise ToolError("not_in_world")
+
+    # --- МойСклад -----------------------------------------------------------
+    def _ms_mock(self) -> MoySkladMock:
+        if not hasattr(self, "_moysklad_mock"):
+            self._moysklad_mock = MoySkladMock(self.state["moysklad"])
+        return self._moysklad_mock
+
+    def _ms_secret(self, cred: dict) -> str:
+        return next(a["secret"] for a in self.state["moysklad"]["access"] if a["id"] == cred["id"])
+
+    def _ms_result(self, result) -> dict:
+        if result.error:
+            raise ToolError(f"{result.error}: {result.content}")
+        return {"content": result.content}
+
+    def _t_moysklad_read(self, resource: str, **args: Any) -> dict:
+        creds = [a for a in self.state["moysklad"]["access"] if _ms.is_moysklad_site(a["site"])]
+        cred = {k: creds[0][k] for k in ("id", "site", "username")} if creds else None
+        return self._ms_result(_ms.run_read({"resource": resource, **args}, cred, self._ms_secret, self._ms_mock().transport()))
+
+    def _t_moysklad_write(self, action: str, **args: Any) -> dict:
+        unknown = set(args) - set(_ms.WRITE_TOOL["function"]["parameters"]["properties"])
+        if unknown:
+            raise TypeError(f"unexpected arguments {sorted(unknown)}")
+        creds = [{k: a[k] for k in ("id", "site", "username")} for a in self.state["moysklad"]["access"]]
+        sandbox = set(self.state["moysklad"].get("sandbox_accounts") or [])
+        return self._ms_result(_ms.run_write({"action": action, **args}, creds, self._ms_secret,
+                                             self._ms_mock().transport(), sandbox=sandbox))
+
+    # --- экран браузера (только "browser": true) ------------------------------
+    def _t_browser_open(self, url: str) -> dict:
+        return {"url": url, "text": BROWSER_PAGE}
+
+    def _t_browser_read(self) -> dict:
+        return {"text": BROWSER_PAGE}
+
+    def _t_browser_click(self, ref: Any = None, text: str = "") -> dict:
+        return {"text": "После «Сохранить»: ошибка — поле «Артикул» не активно, запись не сохранена.\n" + BROWSER_PAGE}
+
+    def _t_browser_type(self, text: str, ref: Any = None) -> dict:
+        return {"text": "Поле не активно, ввод не принят.\n" + BROWSER_PAGE}
 
     # --- 1С ---------------------------------------------------------------
     def _t_onec_stock(self, query: str, warehouse: str = "") -> dict:
