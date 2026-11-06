@@ -18,9 +18,21 @@ logging.getLogger("openai").setLevel(logging.WARNING)
 
 
 class HeliError(Exception):
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, detail: str = "") -> None:
         super().__init__(code)
         self.code = code
+        # Why the gateway refused (HTTP status, error type, short message). Never contains the key.
+        self.detail = detail
+
+
+def failure_detail(exc: BaseException) -> str:
+    """«402 PermissionDeniedError: …» for logs and the CI smoke: the code alone hides the reason."""
+    status = getattr(exc, "status_code", None)
+    text = " ".join(str(exc).split())[:200]
+    key = os.environ.get("HELI_API_KEY", "")
+    if key and len(key) >= 8:
+        text = text.replace(key, "<KEY>")
+    return " ".join(part for part in (str(status) if status else "", f"{type(exc).__name__}: {text}") if part)
 
 
 @dataclass
@@ -93,9 +105,10 @@ class HeliClient:
                 temperature=0,
                 **kwargs,
             )
-        except Exception:
-            log.info("model request failed alias=%s", alias)
-            raise HeliError("request_failed") from None
+        except Exception as exc:
+            detail = failure_detail(exc)
+            log.info("model request failed alias=%s %s", alias, detail)
+            raise HeliError("request_failed", detail) from None
         usage = response.usage
         input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
         output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
@@ -140,9 +153,10 @@ class HeliClient:
             raise HeliError(exc.code) from None
         try:
             response = self._client.embeddings.create(model=model, input=text)
-        except Exception:
-            log.info("embedding request failed")
-            raise HeliError("request_failed") from None
+        except Exception as exc:
+            detail = failure_detail(exc)
+            log.info("embedding request failed %s", detail)
+            raise HeliError("request_failed", detail) from None
         data = getattr(response, "data", None) or []
         if not data:
             raise HeliError("request_failed")
