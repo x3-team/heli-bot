@@ -24,8 +24,19 @@ class Settings(BaseSettings):
     # Testing without sign-up: POST /v1/auth/open hands out a token for one shared account.
     open_access: bool = Field(default=False, validation_alias="HELI_OPEN_ACCESS")
     open_access_email: str = Field(default="owner@heli.local", validation_alias="HELI_OPEN_ACCESS_EMAIL")
+    # Comma-separated emails that get admin rights (invites, codes, feedback). Synced on every request.
+    admin_emails: str = Field(default="", validation_alias="HELI_ADMIN_EMAILS")
+    # Beta: new accounts only with an invite from the admin.
+    invite_only: bool = Field(default=True, validation_alias="HELI_INVITE_ONLY")
+    # Internal training accounts (comma-separated emails) used for test packs. They outlive
+    # HELI_OPEN_ACCESS=0: the shared account owner@heli.local keeps its vault, tasks and quotas and
+    # works with a fresh token (admin login code or `python -m app.cli training-token`), never as admin.
+    training_emails: str = Field(default="", validation_alias="HELI_TRAINING_EMAILS")
     smtp_host: str = Field(default="", validation_alias="SMTP_HOST")
+    # Per-user daily cap (each account has its own day).
     daily_limit_rub: Decimal = Field(default=Decimal("1000"), validation_alias="DAILY_LIMIT_RUB")
+    # Optional server-wide daily cap over all accounts. 0 (default) = off.
+    global_daily_limit_rub: Decimal = Field(default=Decimal("0"), validation_alias="GLOBAL_DAILY_LIMIT_RUB")
     default_monthly_limit_rub: Decimal = Field(
         default=Decimal("1000"),
         validation_alias="DEFAULT_MONTHLY_LIMIT_RUB",

@@ -7,6 +7,7 @@ import {
   deleteMemory,
   loadBrowser,
   loadCredentials,
+  loadAuthConfig,
   loadMe,
   openAccess,
   loadMemory,
@@ -35,6 +36,7 @@ import {
   type ScheduleItem,
   type Usage,
 } from "./api";
+import { AdminTesters } from "./admin";
 import { resolveApiBase } from "./apiBase";
 import { trialLabel } from "./authSession";
 import { clampComputerWidth as clampWidth, clampPercent, confirmationNeeded, limitTone } from "./behavior";
@@ -159,7 +161,7 @@ export function Shell({ apiBase: apiBaseProp }: { apiBase?: string }) {
 
 type AuthScreen = "register" | "signin" | "recover";
 
-const OPERATOR_CODE_NOTICE = "Почта ещё не подключена. Введите код, который выдал оператор.";
+const OPERATOR_CODE_NOTICE = "Почта ещё не подключена. Введите код, который выдал администратор.";
 
 function SignIn({ apiBase, onAuth }: { apiBase: string; onAuth: (auth: AuthResult) => void }) {
   const [screen, setScreen] = useState<AuthScreen>("signin");
@@ -171,6 +173,11 @@ function SignIn({ apiBase, onAuth }: { apiBase: string; onAuth: (auth: AuthResul
   const [sent, setSent] = useState(false);
   const [pdn, setPdn] = useState(false);
   const [training, setTraining] = useState(false);
+  const [inviteOnly, setInviteOnly] = useState(false);
+
+  useEffect(() => {
+    void loadAuthConfig(apiBase).then((config) => setInviteOnly(config.inviteOnly));
+  }, [apiBase]);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
@@ -224,7 +231,7 @@ function SignIn({ apiBase, onAuth }: { apiBase: string; onAuth: (auth: AuthResul
     setBusy(true);
     try {
       if (screen === "register") {
-        onAuth(await registerAccount(apiBase, email.trim(), password, pdn, training));
+        onAuth(await registerAccount(apiBase, email.trim(), password, pdn, training, invite));
         return;
       }
       if (screen === "recover") {
@@ -323,6 +330,12 @@ function SignIn({ apiBase, onAuth }: { apiBase: string; onAuth: (auth: AuthResul
               minLength={8}
               required={screen === "register" || (screen === "recover" && sent)}
             />
+          </label>
+        ) : null}
+        {screen === "register" ? (
+          <label className="stack">
+            {inviteOnly ? "Код приглашения" : "Код приглашения (если есть)"}
+            <input value={invite} onChange={(event) => setInvite(event.target.value)} />
           </label>
         ) : null}
         {screen === "signin" && useCode ? (
@@ -1776,6 +1789,7 @@ function Settings({
           Отправить отчёт
         </button>
       </section>
+      <AdminTesters apiBase={apiBase} token={token} />
       <button type="button" onClick={onSignOut}>Выйти</button>
     </div>
   );
