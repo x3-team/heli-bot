@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.agent import bitrix as _bx
+from app.agent import schedule_tool as _sched
 
 BASE_WORLD_PATH = Path(__file__).with_name("base_world.json")
 
@@ -98,6 +99,9 @@ TOOLS: list[dict] = [
 # Битрикс24 — те же инструменты и те же списки методов, что в проде (app.agent.bitrix): REST через вебхук.
 # Портал мира учебный, поэтому bitrix24_write разрешён; удалений нет и здесь.
 TOOLS += [copy.deepcopy(_bx.TOOL), copy.deepcopy(_bx.WRITE_TOOL)]
+
+# Расписание Heli — тот же инструмент, что в проде (app.agent.schedule_tool), cron по МСК.
+TOOLS += [copy.deepcopy(_sched.TOOL)]
 
 TOOL_NAMES = {t["function"]["name"] for t in TOOLS}
 
@@ -461,6 +465,23 @@ class World:
                "subject": subject, "body": body, "date": self.state["today"]}
         mail["messages"].append(msg)
         return {"ok": True, "id": msg["id"]}
+
+    # --- расписание Heli --------------------------------------------------
+    def _t_schedule_create(self, label: str, expression: str, request: str) -> dict:
+        from datetime import datetime
+
+        from app.schedules import ScheduleError, next_after, parse_expression
+
+        # Часы мира: полдень по Москве в день state["today"].
+        now = datetime.fromisoformat(self.state["today"]).replace(hour=12, tzinfo=_sched.MSK)
+        try:
+            cron = parse_expression(expression)
+            next_run = next_after(cron, now)
+        except ScheduleError:
+            raise ToolError("bad_schedule") from None
+        rows = self.state.setdefault("heli", {}).setdefault("schedules", [])
+        rows.append({"label": label, "expression": cron, "request": request, "next_run": next_run.isoformat()})
+        return {"content": _sched.saved_text(label, cron, next_run, request), "expression": cron}
 
     # --- человек ----------------------------------------------------------
     def _t_ask_confirmation(self, action: str, details: str = "") -> dict:
