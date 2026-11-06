@@ -15,6 +15,10 @@ Workflow: **Actions → deploy-pinvds → Run workflow**.
 
 `.env`, `var/` (database, browser profiles, files) and the venv are kept as they are.
 
+The API must run only under the `heli-bot-api` unit. If another process (for example `python -m app.main`
+started by hand) holds port 8001, `deploy` stops it before the restart and then checks that the process
+answering on the port belongs to the unit; `diff` shows who holds the port.
+
 ## Secrets (Settings → Secrets and variables → Actions)
 
 | Secret | Value |

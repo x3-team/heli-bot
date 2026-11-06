@@ -37,6 +37,7 @@ else
 fi
 log "deploy user: $ME"
 command -v rsync >/dev/null 2>&1 || { log "rsync is not installed on the host (apt-get install rsync)"; exit 1; }
+command -v ss >/dev/null 2>&1 || { log "ss is not installed on the host (apt-get install iproute2)"; exit 1; }
 as_app() {
   if [ "$ME" = "$APP_USER" ]; then "$@"; else $SUDO runuser -u "$APP_USER" -- "$@"; fi
 }
@@ -53,6 +54,28 @@ if [ "$MODE" = deploy ] && ! $SVC --version >/dev/null 2>&1; then
   exit 1
 fi
 
+# The API must run only under the unit. A process started by hand (python -m app.main) that still holds
+# the port would keep serving the old code and make the health check lie, so it is stopped first.
+unit_owns() { grep -q "/$UNIT.service" "/proc/$1/cgroup" 2>/dev/null; }
+port_pids() { ss -Hltnp "sport = :$PORT" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u; }
+port_busy() { [ -n "$(ss -Hltn "sport = :$PORT" 2>/dev/null)" ]; }
+orphan_pids() { for pid in $(port_pids); do unit_owns "$pid" || echo "$pid"; done; }
+describe_pid() { ps -o pid=,user=,etime=,args= -p "$1" 2>/dev/null | sed 's/^ *//' || echo "$1"; }
+stop_orphans() {
+  local pids pid
+  pids="$(orphan_pids)"
+  [ -n "$pids" ] || return 0
+  for pid in $pids; do
+    log "stopping process outside $UNIT on port $PORT: $(describe_pid "$pid")"
+    kill "$pid" 2>/dev/null || $SUDO kill "$pid" 2>/dev/null || {
+      log "cannot stop pid $pid as $ME (it belongs to $(ps -o user= -p "$pid" 2>/dev/null))"; return 1; }
+  done
+  for _ in $(seq 1 10); do [ -z "$(orphan_pids)" ] && return 0; sleep 1; done
+  for pid in $(orphan_pids); do kill -9 "$pid" 2>/dev/null || $SUDO kill -9 "$pid" 2>/dev/null || true; done
+  sleep 1
+  [ -z "$(orphan_pids)" ]
+}
+
 [ -d "$APP_DIR/server" ] || { log "no $APP_DIR/server on this host"; exit 1; }
 [ -f "$APP_DIR/.env" ] || { log "no $APP_DIR/.env on this host"; exit 1; }
 
@@ -67,6 +90,12 @@ RSYNC_EXCLUDES=(--exclude '__pycache__/' --exclude '*.pyc' --exclude '*.egg-info
   --exclude '/var/' --exclude '/.env' --exclude '/backups/')
 
 if [ "$MODE" = diff ]; then
+  log "unit $UNIT: $(systemctl is-active "$UNIT" 2>/dev/null || true)"
+  for pid in $(port_pids); do
+    if unit_owns "$pid"; then log "port $PORT: $(describe_pid "$pid") (in $UNIT)";
+    else log "port $PORT: $(describe_pid "$pid") OUTSIDE $UNIT, deploy will stop it"; fi
+  done
+  if port_busy && [ -z "$(port_pids)" ]; then log "port $PORT is busy, owner not visible to $ME"; fi
   log "running copy: $(cat "$APP_DIR/server/REVISION" 2>/dev/null || echo 'no REVISION (copied by hand)')"
   log "files that would change (rsync dry run):"
   $SUDO rsync -rcn --delete --itemize-changes "${RSYNC_EXCLUDES[@]}" "$STAGE/server/" "$APP_DIR/server/" | sed 's/^/  /' || true
@@ -123,13 +152,17 @@ if ! as_app_with_env bash -c "cd '$APP_DIR/server' && exec '$APP_DIR/venv/bin/al
   log "alembic failed"; rollback; exit 1
 fi
 
-# 4. Restart and check.
+# 4. Restart under the unit and check that the unit, not a stray process, answers.
+if ! stop_orphans; then log "a process outside $UNIT still holds port $PORT"; rollback; exit 1; fi
 $SVC restart "$UNIT"
 ok=0
 for attempt in $(seq 1 15); do
-  if curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then ok=1; break; fi
+  if curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+    if [ -n "$(port_pids)" ] && [ -z "$(orphan_pids)" ] && systemctl is-active --quiet "$UNIT"; then ok=1; break; fi
+  fi
   sleep 2
 done
+log "unit $UNIT: $(systemctl is-active "$UNIT" 2>/dev/null || true); port $PORT: $(for p in $(port_pids); do describe_pid "$p"; done | tr '\n' ';')"
 if [ "$ok" != 1 ]; then
   log "local health check failed"
   $JOURNAL -u "$UNIT" -n 60 --no-pager || true
