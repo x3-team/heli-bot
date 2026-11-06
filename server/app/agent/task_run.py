@@ -164,7 +164,7 @@ def extend_for(complexity: int) -> int:
 
 
 # A run that stopped before the end leaves a checkpoint; «продолжи» in the next task picks it up.
-CONTINUABLE = {"budget", "max_steps", "loop", "stop", "pause", "quota", "client_timeout"}
+CONTINUABLE = {"budget", "max_steps", "loop", "stop", "pause", "quota", "client_timeout", "captcha"}
 CHECKPOINT_TTL = timedelta(hours=24)
 _CONTINUE = re.compile(r"^\s*(продолж|дальше|давай дальше|доделай|continue)", re.I)
 CONTINUE_NOTE = (
@@ -415,6 +415,8 @@ def execute_task(
             control.checkpoint()
             try:
                 return executor(session, user, task.id, name, real_args)
+            except Stopped:
+                raise
             except Exception:  # noqa: BLE001
                 log.exception("server executor failed tool=%s", name)
                 return ClientResult("", "executor_failed")

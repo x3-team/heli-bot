@@ -592,3 +592,57 @@ def test_imported_cookies_join_the_saved_profile(browser, tmp_path):
     user = uuid.uuid4()
     taken = browser.import_cookies(user, [{"name": "sid", "value": "1", "domain": "x.bitrix24.ru"}])
     assert taken == 1 and browser.saved_sites(user) == ["x.bitrix24.ru"]
+
+
+@pytest.mark.skipif(_chromium() is None, reason="Playwright Chromium not installed")
+def test_real_chromium_sees_a_captcha_widget_in_a_frame():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        browser_ = pw.chromium.launch(executable_path=_chromium())
+        page = browser_.new_page(viewport=cb.VIEWPORT)
+        p = cb.Page(page.context, page)
+        page.set_content('<p>Вход</p><iframe src="about:blank#smartcaptcha.yandexcloud.net/checkbox" width="300" height="100"></iframe>')
+        assert p.is_captcha()
+        page.set_content('<p>Форма</p><iframe src="about:blank#recaptcha/api2/anchor?size=invisible" width="256" height="60"></iframe>')
+        assert not p.is_captcha()
+        page.set_content('<p>Форма</p><iframe src="about:blank#smartcaptcha" width="300" height="100" style="display:none"></iframe>')
+        assert not p.is_captcha()
+        browser_.close()
+
+
+def test_storage_state_origins_are_checked():
+    assert cb.normalize_origin({"origin": "https://b24.example", "localStorage": [{"name": "a", "value": "1"}, {"x": 1}]}) == {
+        "origin": "https://b24.example", "localStorage": [{"name": "a", "value": "1"}]
+    }
+    assert cb.normalize_origin({"origin": "http://b24.example", "localStorage": [{"name": "a", "value": "1"}]}) is None
+    assert cb.normalize_origin({"origin": "https://b24.example", "localStorage": []}) is None
+
+
+@pytest.mark.skipif(_chromium() is None, reason="Playwright Chromium not installed")
+def test_real_chromium_reports_dialogs_and_failed_saves():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        browser_ = pw.chromium.launch(executable_path=_chromium())
+        page = browser_.new_page(viewport=cb.VIEWPORT)
+        p = cb.Page(page.context, page)
+        page.set_content(
+            '<div>Форма</div><div class="cloudWindow" style="position:absolute;z-index:500;left:300px;top:200px;'
+            'width:400px;height:200px;background:#fff">Выберите период<div class="press">Выбрать</div>'
+            '<div class="press">Отмена</div></div>'
+        )
+        text = p.read()
+        assert "Поверх страницы открыто окно «Выберите период»" in text and "«Отмена»" in text
+        page.set_content(
+            '<input aria-label="Контрагент"><button onclick="document.getElementById(\'e\').style.display=\'block\'">'
+            'Сохранить</button><div id="e" class="field-error" style="display:none">Заполните поле «Контрагент»</div>'
+        )
+        assert "Запись НЕ сохранена" in p.click(None, "Сохранить")
+        report = p.save_report("Сохранить")
+        assert "Заполните поле «Контрагент»" in report and "НЕ сохранена" in report
+        page.set_content("<p>Документ</p>")
+        page.evaluate("history.replaceState(null, '', '#supply/edit?id=0f1e2d3c-1111-2222-3333-444455556666')")
+        assert "id записи в адресе: 0f1e2d3c-1111-2222-3333-444455556666" in p.save_report("Сохранить")
+        assert p.save_report("Отмена") == ""
+        browser_.close()

@@ -1202,7 +1202,10 @@ def cloud_browser_input(body: CloudInputBody, user: User = Depends(get_current_u
 
 
 class CloudCookiesBody(BaseModel):
-    cookies: list[dict] = Field(min_length=1, max_length=500)
+    """Exported cookies, or a whole Playwright storage state ({"cookies": [...], "origins": [...]})."""
+
+    cookies: list[dict] = Field(default_factory=list, max_length=500)
+    origins: list[dict] = Field(default_factory=list, max_length=50)
 
 
 @router.post("/cloud-browser/cookies")
@@ -1211,7 +1214,7 @@ def cloud_browser_cookies(body: CloudCookiesBody, user: User = Depends(get_curre
     sign-ins, so tasks start signed in (Битрикс24 asks a captcha on every new sign-in from the server)."""
     _cloud_on()
     try:
-        taken = cloud_browser.pool().import_cookies(user.id, body.cookies)
+        taken = cloud_browser.pool().import_cookies(user.id, body.cookies, body.origins)
     except cloud_browser.CloudError as exc:
         raise HTTPException(status_code=503 if exc.code == "no_vault_key" else 400, detail=exc.code) from None
     return {"imported": taken, **cloud_browser.pool().status(user.id)}

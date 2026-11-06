@@ -65,7 +65,9 @@ for _schema in (
     ),
     _fn(
         "browser_press",
-        "Нажать клавишу в браузере: Enter, Escape, Tab, PageDown, PageUp, ArrowDown, ArrowUp.",
+        "Нажать клавишу в браузере: Enter, Escape, Tab, PageDown, PageUp, ArrowDown, ArrowUp. "
+        "В 1С и списках ещё: Control+F (поиск в списке, затем browser_type без ref), Alt+F (поиск по колонке), "
+        "F4 (выбор значения поля), Shift+F4 (очистить поле), Insert (добавить строку), F2 (изменить ячейку).",
         {"key": {"type": "string"}},
         ["key"],
     ),
