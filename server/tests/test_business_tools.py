@@ -230,6 +230,74 @@ def test_mail_ignores_api_tokens_saved_for_yandex(session, monkeypatch) -> None:
     assert mail.mailbox_for(session, user) is None
 
 
+@pytest.mark.parametrize(
+    ("site", "hosts"),
+    [
+        ("yandex.ru", ("imap.yandex.ru", "smtp.yandex.ru")),
+        ("https://mail.yandex.ru/?uid=1", ("imap.yandex.ru", "smtp.yandex.ru")),
+        ("Яндекс", ("imap.yandex.ru", "smtp.yandex.ru")),
+        ("imap.yandex.ru", ("imap.yandex.ru", "smtp.yandex.ru")),
+        ("mail.ru", ("imap.mail.ru", "smtp.mail.ru")),
+        ("e.mail.ru", ("imap.mail.ru", "smtp.mail.ru")),
+        ("bk.ru", ("imap.mail.ru", "smtp.mail.ru")),
+        ("gmail.com", ("imap.gmail.com", "smtp.gmail.com")),
+        ("https://mail.google.com/mail/u/0/", ("imap.gmail.com", "smtp.gmail.com")),
+        ("imap.custom.example", ("imap.custom.example", "smtp.custom.example")),
+        ("imap.custom.example:993", ("imap.custom.example", "smtp.custom.example")),
+        ("mail.custom.example", ("mail.custom.example", "smtp.custom.example")),
+        ("beget.com", ("imap.beget.com", "smtp.beget.com")),
+    ],
+)
+def test_mail_hosts_for_services_and_own_domain(site, hosts) -> None:
+    assert mail.hosts_for(site) == hosts
+
+
+@pytest.mark.parametrize("site", ["", "custom.example", "company.bitrix24.ru", "online.moysklad.ru", "direct.yandex.ru", "imap."])
+def test_mail_hosts_for_non_mail_sites(site) -> None:
+    assert mail.hosts_for(site) is None
+
+
+@pytest.mark.parametrize(
+    ("site", "login", "imap_host"),
+    [
+        ("mail.yandex.ru", "shop@yandex.ru", "imap.yandex.ru"),
+        ("mail.ru", "shop@mail.ru", "imap.mail.ru"),
+        ("gmail.com", "shop@gmail.com", "imap.gmail.com"),
+        ("imap.custom.example", "info@custom.example", "imap.custom.example"),
+    ],
+)
+def test_mailbox_for_picks_the_mailbox(session, monkeypatch, site, login, imap_host) -> None:
+    monkeypatch.setenv("VAULT_MASTER_KEY", KEY)
+    user = _user(session)
+    store_credential(session, user, site, login, "app-password-1")
+    row, (imap, _smtp) = mail.mailbox_for(session, user)
+    assert row["username"] == login and imap == imap_host
+
+
+def test_mailbox_for_skips_webhooks_and_tokens(session, monkeypatch) -> None:
+    monkeypatch.setenv("VAULT_MASTER_KEY", KEY)
+    user = _user(session)
+    store_credential(session, user, "mail.custom.example", "webhook", "https://mail.custom.example/rest/1/abc/")
+    store_credential(session, user, "company.bitrix24.ru", "webhook", "https://company.bitrix24.ru/rest/1/abc/")
+    store_credential(session, user, "direct.yandex.ru", "token", DIRECT_TOKEN)
+    store_credential(session, user, "online.moysklad.ru", "admin@company", "pass-1")
+    assert mail.mailbox_for(session, user) is None
+    store_credential(session, user, "imap.custom.example", "info@custom.example", "app-password-1")
+    row, hosts = mail.mailbox_for(session, user)
+    assert row["site"] == "imap.custom.example" and hosts == ("imap.custom.example", "smtp.custom.example")
+
+
+def test_no_mailbox_explains_how_to_connect_and_hints_the_imap_host(session, monkeypatch) -> None:
+    monkeypatch.setenv("VAULT_MASTER_KEY", KEY)
+    user = _user(session)
+    store_credential(session, user, "custom.example", "info@custom.example", "app-password-1")
+    result = mail.execute(session, user, None, "mail_read", {"action": "list"})
+    assert result.error == "no_credential"
+    assert "пароль приложения" in result.content and "не пишите в чат" in result.content
+    assert "imap.custom.example" in result.content
+    assert "app-password-1" not in result.content
+
+
 # --- Директ и Метрика ---------------------------------------------------------------
 
 
