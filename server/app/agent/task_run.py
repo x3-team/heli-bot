@@ -6,25 +6,37 @@ import base64
 import binascii
 import logging
 import os
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.aliases import PUBLIC_MODEL_ALIASES
 from app.agent.executors import executor_for, server_executed
-from app.agent.control import ClientResult, Control, NoControl
-from app.agent.loop import CONFIRM_TOOL, Budget, Outcome, ToolResult, approved, has_image, run_agent
+from app.agent.control import ClientResult, Control, NoControl, Stopped
+from app.agent.loop import (
+    CONFIRM_TOOL,
+    Budget,
+    Outcome,
+    ToolResult,
+    approved,
+    has_image,
+    run_agent,
+    vision_messages,
+)
 from app.agent.tools import SERVER_TOOL_NAMES, client_tool_names, tools_for
 from app.llm.client import HeliClient
 from app.llm.router import Router, classification_messages, parse_classification
 from app.llm.tools import call_tool as call_server_tool
 from app.memory import relevant, with_memory
 from app.models import Task, User
-from app.quota import estimate_turn_reserve, metered_complete, remaining_ratio, snapshot
+from app.quota import QuotaError, estimate_turn_reserve, metered_complete, remaining_ratio, snapshot
 from app.trajectories import add_step
 from app.web import search_provider
 
@@ -138,6 +150,69 @@ def today_text(today: str | None = None) -> str:
 
 # Model rounds per run by the classifier's complexity: forms in 1С / МойСклад need more than 15.
 STEPS_BY_COMPLEXITY = {1: 15, 2: 30, 3: 40}
+
+
+# Extra rounds a run gets once when it hits the step limit while still moving (see Budget.extend_steps).
+EXTEND_BY_COMPLEXITY = {1: 10, 2: 20, 3: 20}
+
+
+def extend_for(complexity: int) -> int:
+    raw = os.environ.get("HELI_EXTEND_STEPS", "").strip()
+    if raw.isdigit():
+        return int(raw)
+    return EXTEND_BY_COMPLEXITY.get(complexity, 20)
+
+
+# A run that stopped before the end leaves a checkpoint; «продолжи» in the next task picks it up.
+CONTINUABLE = {"budget", "max_steps", "loop", "stop", "pause", "quota", "client_timeout"}
+CHECKPOINT_TTL = timedelta(hours=24)
+_CONTINUE = re.compile(r"^\s*(продолж|дальше|давай дальше|доделай|continue)", re.I)
+CONTINUE_NOTE = (
+    "Это продолжение задачи выше. Браузер остался на той же странице: начни с browser_read, "
+    "не начинай заново и не повторяй уже сделанное. Доделай то, что в прошлом ответе в «Не сделано»."
+)
+
+
+def save_checkpoint(task: Task, outcome: Outcome, url: str | None) -> None:
+    if outcome.stopped not in CONTINUABLE:
+        return
+    context = dict(task.context or {})
+    context["checkpoint"] = {
+        "request": task.request_text[:4000],
+        "summary": (outcome.final_answer or "")[:4000],
+        "url": url,
+        "stopped": outcome.stopped,
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    task.context = context
+    flag_modified(task, "context")
+
+
+def continuation(session: Session, user: User, task: Task, history: list[dict]) -> list[dict]:
+    """For «продолжи»: the stopped task and what it managed, as a prior turn the model can go on from."""
+    if not _CONTINUE.match(task.request_text or ""):
+        return []
+    since = datetime.now(timezone.utc) - CHECKPOINT_TTL
+    rows = session.scalars(
+        select(Task)
+        .where(Task.user_id == user.id, Task.id != task.id, Task.created_at >= since)
+        .order_by(Task.created_at.desc())
+        .limit(5)
+    ).all()
+    for row in rows:
+        point = (row.context or {}).get("checkpoint") if isinstance(row.context, dict) else None
+        if not isinstance(point, dict) or not point.get("request"):
+            continue
+        summary = str(point.get("summary") or "")
+        if summary and any(summary[:200] in m.get("content", "") for m in history if m["role"] == "assistant"):
+            return [{"role": "user", "content": CONTINUE_NOTE}]
+        where = f"\nСтраница, где остановился: {point['url']}" if point.get("url") else ""
+        return [
+            {"role": "user", "content": str(point["request"])},
+            {"role": "assistant", "content": (summary or "Остановился, не закончив.") + where},
+            {"role": "user", "content": CONTINUE_NOTE},
+        ]
+    return []
 
 
 def steps_for(complexity: int) -> int:
@@ -272,6 +347,11 @@ def execute_task(
     request = task.request_text + attachments_note(user.id, attached if isinstance(attached, list) else [])
     prompt = with_memory(request, relevant(session, user, task.request_text))
     history = history_messages(task.context)
+    resumed = continuation(session, user, task, history)
+    if resumed:
+        # The last item is the note for this run; the rest is the task it continues.
+        history = history + resumed[:-1]
+        prompt = prompt + "\n\n" + resumed[-1]["content"]
     classified = metered_complete(
         session,
         user,
@@ -301,7 +381,7 @@ def execute_task(
         max_steps = steps_for(complexity)
     ratio = remaining_ratio(snapshot(session, user))
     route = Router(client).route(phase="execute", complexity=complexity, quota_remaining=ratio)
-    state = {"url": None}
+    state = {"url": None, "rounds": 0}
     messages: list[dict] = [
         {"role": "system", "content": system_prompt(tools, _guide(task.request_text, None))},
         *history,
@@ -312,10 +392,22 @@ def execute_task(
         if state["url"] and msgs and msgs[0].get("role") == "system":
             msgs[0] = {"role": "system", "content": system_prompt(tools, _guide(task.request_text, state["url"]))}
         # A screenshot in this round: a model that sees pictures reads it (1С and other canvas-like pages).
-        alias = vision_alias() if has_image(msgs) else route.alias
-        return metered_complete(
-            session, user, task.id, client, alias, msgs, max_tokens=ANSWER_MAX_TOKENS, tools=round_tools
-        )
+        # It costs more per token, so it gets the run as a short transcript plus the picture.
+        alias = route.alias
+        if has_image(msgs):
+            alias = vision_alias()
+            msgs = vision_messages(msgs)
+        try:
+            completion = metered_complete(
+                session, user, task.id, client, alias, msgs, max_tokens=ANSWER_MAX_TOKENS, tools=round_tools
+            )
+        except QuotaError:
+            if state["rounds"] == 0:
+                raise
+            # Out of money mid-run: stop, and the loop answers with what was done.
+            raise Stopped("quota") from None
+        state["rounds"] += 1
+        return completion
 
     def ask_client(call_id: str, name: str, real_args: dict, safe_args: dict) -> ClientResult:
         executor = executor_for(name)
@@ -431,6 +523,7 @@ def execute_task(
         complete=complete,
         budget=Budget(
             max_steps=max_steps,
+            extend_steps=extend_for(complexity),
             max_rub=run_max_rub(),
             estimate_rub=estimate_rub if estimate_rub is not None else estimate_turn_reserve(task.request_text),
             autopause=autopause,
@@ -439,6 +532,7 @@ def execute_task(
         on_event=on_event,
         start_cost=classified.cost_rub,
     )
+    save_checkpoint(task, outcome, state["url"])
     session.commit()
     return Turn(
         alias=outcome.alias or route.alias,

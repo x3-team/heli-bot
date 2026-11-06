@@ -35,6 +35,8 @@ class Budget:
     max_rub: Decimal | None = None
     estimate_rub: Decimal | None = None
     autopause: bool = True
+    # Rounds added once when the step limit comes while the run still makes progress (no loop, money left).
+    extend_steps: int = 0
 
 
 @dataclass
@@ -66,10 +68,18 @@ BROKEN_NOTE = (
 )
 BUDGET_TEXT = "Остановился: задача дошла до предела расходов на один запуск."
 GAVE_UP = "Не успел закончить задачу за отведённые шаги."
-FINISH_NOTE = (
-    "Лимит действий исчерпан. Больше инструменты не вызывай: ответь пользователю тем, что уже нашёл, "
-    "с конкретными цифрами и источниками, и скажи, что не успел."
+CONTINUE_HINT = "Чтобы продолжить с этого места, напишите «продолжи»."
+_REPORT = (
+    "Больше инструменты не вызывай. Ответь пользователю по-русски, коротко, в три части: "
+    "«Сделано:» что уже сделано и найдено (конкретные цифры, номера документов, источники); "
+    "«Не сделано:» что осталось сделать по задаче; «Где остановился:» раздел или страница. "
+    f"Последней строкой напиши: «{CONTINUE_HINT}» Не выдумывай того, чего не видел."
 )
+FINISH_NOTE = "Лимит действий исчерпан. " + _REPORT
+BUDGET_NOTE = "Задача дошла до предела расходов на один запуск. " + _REPORT
+STOP_NOTE = "Задачу остановили. " + _REPORT
+# The budget's last part is kept for the words-only answer: the run never ends without one.
+BUDGET_FINISH_SHARE = Decimal("0.9")
 
 
 LOOP_NOTE = (
@@ -86,8 +96,35 @@ REPEAT_BLOCKED = (
     "Не выполнено: этот вызов уже дважды дал один и тот же результат, повтор ничего не изменит. "
     "Смени тактику или закончи и честно скажи пользователю, что не получилось."
 )
-# A third identical call is refused; this many refusals end the run with a summary.
-BLOCKS_TO_STOP = 2
+# A third identical call is refused. Before giving up the loop tries to unstick the page itself:
+# Esc (a modal dialog), then reloading the page. This many refusals end the run with a summary.
+BLOCKS_TO_STOP = 3
+RECOVER_ESC = (
+    "\n\n[Heli] Я нажал Esc, чтобы закрыть возможный диалог или меню. Прочитай страницу заново "
+    "(browser_read) и попробуй другой путь: другой раздел или пункт меню, поиск, кнопку «Закрыть» / "
+    "«Отмена» у окна, прямой адрес."
+)
+RECOVER_RELOAD = (
+    "\n\n[Heli] Я перезагрузил страницу {url}. Начни с browser_read и иди к цели другим путём, "
+    "не тем, что не сработал."
+)
+# Old tool results are cut to this many characters: only the last few are shown in full.
+KEEP_FULL_RESULTS = 3
+OLD_RESULT_CHARS = 1200
+OLD_RESULT_CUT = "\n…[старый результат сокращён]"
+# Screenshots per run: each one sends a round to the paid vision model.
+MAX_SCREENSHOTS = 8
+SCREENSHOT_LIMIT_TEXT = (
+    "Не выполнено: лимит снимков экрана на задачу исчерпан. Работай по тексту страницы (browser_read) "
+    "и номерам элементов."
+)
+# After a save in a system with an API reader, the answer waits for a check through that reader.
+VERIFY_TOOL = "moysklad_read"
+VERIFY_NOTE = (
+    "Прежде чем ответить, проверь через moysklad_read, что документ или карточка действительно "
+    "сохранились с нужными полями (товар, количество, контрагент, цена). Затем ответь, что проверил."
+)
+_SAVE_LABEL = re.compile(r"сохран|провест|записат|создат|save", re.I)
 # Looking does not change the page; an action in between makes looking again worthwhile.
 _LOOK_TOOLS = ("browser_read", "browser_screenshot")
 # Tools that load the same thing again whatever the page shows: same args = same call.
@@ -167,6 +204,59 @@ def summary_messages(messages: list[dict], note: str, limit: int = 14000) -> lis
     ]
 
 
+def compact_history(messages: list[dict], keep: int = KEEP_FULL_RESULTS, limit: int = OLD_RESULT_CHARS) -> None:
+    """Cut old tool results in place: the model needs the last pages in full, older ones only in short."""
+    tool_positions = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+    for index in tool_positions[:-keep] if keep else tool_positions:
+        content = messages[index].get("content")
+        if isinstance(content, str) and len(content) > limit + len(OLD_RESULT_CUT) and not content.endswith(OLD_RESULT_CUT):
+            messages[index] = {**messages[index], "content": content[:limit] + OLD_RESULT_CUT}
+
+
+VISION_NOTE = (
+    "Продолжай задачу. Ниже снимок экрана: найди на нём нужное и сделай следующий шаг "
+    "(browser_click по координатам x, y этого снимка, browser_type, browser_press) или ответь, если всё готово."
+)
+
+
+def vision_messages(messages: list[dict], limit: int = 8000) -> list[dict]:
+    """A short context for the round that looks at a screenshot: the run as text plus the picture.
+
+    The vision model costs more per token than the text model, so it gets the transcript, not the history."""
+    images = [m for m in messages if m.get("role") == "user" and isinstance(m.get("content"), list)]
+    if not images:
+        return messages
+    rest = [m for m in messages if m is not images[-1]]
+    return [*summary_messages(rest, VISION_NOTE, limit=limit), images[-1]]
+
+
+def progress_text(messages: list[dict], note: str) -> str:
+    """The answer when no model could write one (quota, network): what was done, from the calls themselves."""
+    done: list[str] = []
+    for message in messages:
+        for call in message.get("tool_calls") or [] if message.get("role") == "assistant" else []:
+            fn = call.get("function", {})
+            args = parse_args(fn.get("arguments") or "{}")
+            what = args.get("url") or args.get("text") or args.get("query") or args.get("resource") or ""
+            if fn.get("name") == "browser_type":
+                what = ""  # typed text may be private
+            done.append(f"{fn.get('name')}{(' ' + str(what)[:80]) if what else ''}")
+    lines = [note]
+    if done:
+        lines.append("Сделано шагов: " + str(len(done)) + ". Последние: " + "; ".join(done[-5:]) + ".")
+    lines.append(CONTINUE_HINT)
+    return "\n".join(lines)
+
+
+def _address(text: str) -> str | None:
+    for line in (text or "").splitlines()[:3]:
+        if line.startswith(("Адрес:", "URL:")):
+            value = line.split(":", 1)[1].strip()
+            if value.startswith("http"):
+                return value
+    return None
+
+
 def repeat_key(name: str, args: dict) -> str | None:
     """Identity of a call for the repeat check: the tool and its text arguments (limits and counts aside).
     Browser tools and confirmations are left out: the page or the user's answer can change between calls."""
@@ -202,6 +292,13 @@ def run_agent(
     broken_rounds = 0
     finish_note: str | None = None  # set: the next round is the last, words only
     finish_reason: str | None = None
+    max_steps = budget.max_steps
+    extended = False
+    screenshots = 0
+    recoveries = 0
+    last_url: str | None = None
+    saved_unchecked = False  # a «Сохранить» click not yet checked through the API reader
+    verify_nudged = False
 
     def safe_args(name: str, args: dict) -> dict:
         """Arguments as they go to the step stream and the trajectory: no passwords, no internals."""
@@ -248,10 +345,10 @@ def run_agent(
         round_index = 0
         while True:
             control.checkpoint()
-            if budget.max_rub is not None and spent >= budget.max_rub:
-                out.stopped = "budget"
-                out.final_answer = BUDGET_TEXT
-                break
+            if budget.max_rub is not None and finish_note is None and spent >= budget.max_rub * BUDGET_FINISH_SHARE:
+                # Keep the rest of the money for the answer: what was done and what is left.
+                finish_note = BUDGET_NOTE
+                finish_reason = "budget"
             if budget.autopause and threshold is not None and spent > threshold:
                 control.auto_pause(
                     "cost",
@@ -260,7 +357,20 @@ def run_agent(
                 # Resumed: pause again if the run costs another half of what it has spent.
                 threshold = spent * AUTOPAUSE_RATIO
             out_of_calls = budget.max_tool_calls is not None and calls_used >= budget.max_tool_calls
-            out_of_steps = round_index >= budget.max_steps - 1
+            out_of_steps = round_index >= max_steps - 1
+            if (
+                out_of_steps
+                and finish_note is None
+                and not extended
+                and budget.extend_steps > 0
+                and blocked == 0
+                and (budget.max_rub is None or spent < budget.max_rub / 2)
+            ):
+                # Still moving and money is left: a long form in 1С or МойСклад gets more rounds once.
+                extended = True
+                max_steps += budget.extend_steps
+                out_of_steps = False
+                emit({"type": "step", "kind": "extended", "max_steps": max_steps})
             if finish_note is None and (out_of_steps or out_of_calls):
                 finish_note = FINISH_NOTE
                 finish_reason = "max_steps" if out_of_steps and not out_of_calls else None
@@ -270,6 +380,7 @@ def run_agent(
                 # some models print their tool-call markup instead of an answer.
                 completion = complete(summary_messages(messages, finish_note), None)
             else:
+                compact_history(messages)
                 completion = complete(messages, tools)
             drop_old_screens()
             round_index += 1
@@ -306,6 +417,13 @@ def run_agent(
                     messages.append({"role": "user", "content": BROKEN_NOTE})
                 continue
             if not completion.tool_calls:
+                if saved_unchecked and not verify_nudged and VERIFY_TOOL in guard.schemas:
+                    # Saved in МойСклад but never checked: one more look through the API before the answer.
+                    verify_nudged = True
+                    messages.append({"role": "assistant", "content": text or "…"})
+                    messages.append({"role": "user", "content": VERIFY_NOTE})
+                    emit({"type": "step", "kind": "verify_nudge", "tool": VERIFY_TOOL})
+                    continue
                 out.final_answer = text
                 break
             completion.text = text
@@ -341,9 +459,27 @@ def run_agent(
                 ):
                     # Third time the same call, and twice it changed nothing: refuse, don't loop.
                     blocked += 1
-                    messages.append({"role": "tool", "tool_call_id": call.id, "content": REPEAT_BLOCKED})
                     emit({"type": "step", "kind": "repeat_blocked", "tool": call.name, "args": safe_args(call.name, args)})
+                    note = ""
+                    if blocked < BLOCKS_TO_STOP:
+                        # Stuck UI: try to unstick it before the run gives up (dialog, then reload).
+                        recoveries += 1
+                        rid = f"{call.id}_recover{recoveries}"
+                        if blocked == 1 and "browser_press" in guard.schemas:
+                            run_call(rid, "browser_press", {"key": "Escape"})
+                            note = RECOVER_ESC
+                        elif last_url and "browser_open" in guard.schemas:
+                            run_call(rid, "browser_open", {"url": last_url})
+                            note = RECOVER_RELOAD.format(url=last_url)
+                        if note:
+                            seen.clear()
+                    messages.append({"role": "tool", "tool_call_id": call.id, "content": REPEAT_BLOCKED + note})
                     continue
+                if call.name == "browser_screenshot":
+                    screenshots += 1
+                    if screenshots > MAX_SCREENSHOTS:
+                        messages.append({"role": "tool", "tool_call_id": call.id, "content": SCREENSHOT_LIMIT_TEXT})
+                        continue
                 approved_here = False
                 if guard.needs_approval(call.name, args):
                     if guard.consume(call.name):
@@ -395,6 +531,16 @@ def run_agent(
                         for other in [k for k in seen if k.startswith(_LOOK_TOOLS)]:
                             seen.pop(other)
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": content})
+                if not result.error:
+                    if call.name == "browser_open" and isinstance(args.get("url"), str):
+                        last_url = args["url"]
+                    last_url = _address(result.content) or last_url
+                    if call.name == "browser_click":
+                        label = guard.elements.get(args["ref"], "") if isinstance(args.get("ref"), int) else ""
+                        if _SAVE_LABEL.search(f"{label} {args.get('text') or ''}"):
+                            saved_unchecked = True
+                    if call.name == VERIFY_TOOL:
+                        saved_unchecked = False
                 if key and result.error:
                     failed[key] = result.error
                 guard.remember_page(result.content)
@@ -431,9 +577,40 @@ def run_agent(
                 out.stopped = "loop"
     except Stopped as exc:
         out.stopped = exc.reason
+        out.cost_rub = spent
+        out.final_answer = _stopped_answer(messages, complete, emit, out)
+        spent = out.cost_rub
     out.final_answer = mask_passwords(out.final_answer)
     out.cost_rub = spent
     return out
+
+
+def _stopped_answer(messages: list[dict], complete, emit, out: Outcome) -> str:
+    """Stopped from outside (stop, pause timeout, quota): still tell the user what was done and what is left."""
+    if out.steps == 0:
+        return ""
+    try:
+        completion = complete(summary_messages(messages, STOP_NOTE), None)
+    except Exception:  # noqa: BLE001
+        return progress_text(messages, "Задача остановлена.")
+    out.steps += 1
+    out.cost_rub += completion.cost_rub
+    out.input_tokens += completion.input_tokens
+    out.output_tokens += completion.output_tokens
+    text = strip_markup(completion.text)
+    emit(
+        {
+            "type": "step",
+            "kind": "answer",
+            "model_alias": completion.alias,
+            "text": mask_passwords(text),
+            "input_tokens": completion.input_tokens,
+            "output_tokens": completion.output_tokens,
+            "cost_rub": completion.cost_rub,
+            "spent_rub": out.cost_rub,
+        }
+    )
+    return text or progress_text(messages, "Задача остановлена.")
 
 
 def has_image(messages: list[dict]) -> bool:

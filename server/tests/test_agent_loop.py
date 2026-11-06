@@ -87,8 +87,9 @@ def test_autopause_without_a_live_client_ends_with_pause() -> None:
         complete=complete,
         budget=Budget(estimate_rub=Decimal("1")),
     )
-    # 1 ₽ spent is within 1.5 ₽; after the second call 2 ₽ > 1.5 ₽ → pause.
-    assert out.stopped == "pause" and out.steps == 2
+    # 1 ₽ spent is within 1.5 ₽; after the second call 2 ₽ > 1.5 ₽ → pause, then a words-only answer.
+    assert out.stopped == "pause" and out.steps == 3
+    assert "Сделано шагов: 2" in out.final_answer and "продолжи" in out.final_answer
 
 
 def test_autopause_off_keeps_going_until_budget() -> None:
@@ -100,7 +101,9 @@ def test_autopause_off_keeps_going_until_budget() -> None:
         complete=complete,
         budget=Budget(estimate_rub=Decimal("1"), autopause=False, max_rub=Decimal("3")),
     )
-    assert out.stopped == "budget" and out.steps == 3
+    # 3 rounds reach 90 % of 3 ₽; the fourth is the words-only answer, never an empty reply.
+    assert out.stopped == "budget" and out.steps == 4
+    assert out.final_answer
 
 
 def test_autopause_waits_for_resume_then_continues() -> None:
@@ -600,8 +603,12 @@ from app.agent.loop import has_image, strip_markup  # noqa: E402
 DSML = '<｜DSML｜tool_calls><｜DSML｜invoke name="browser_open"><｜DSML｜parameter name="url">https://x</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>'
 BROWSER_TOOLS = [
     {"type": "function", "function": {"name": n, "parameters": {}}}
-    for n in ("browser_open", "browser_read", "browser_click", "browser_type", "browser_screenshot")
+    for n in ("browser_open", "browser_read", "browser_click", "browser_type", "browser_press", "browser_screenshot")
 ]
+
+
+def _tool(name: str) -> dict:
+    return {"type": "function", "function": {"name": name, "parameters": {}}}
 
 
 def test_strip_markup_drops_dsml() -> None:
@@ -637,16 +644,24 @@ def test_markup_only_answer_is_retried_then_summarized() -> None:
 
 
 def test_same_browser_call_with_same_result_is_stopped() -> None:
-    same = ("browser_open", {"url": "https://base/ru_RU/#e1cib/list/Справочник.Контрагенты"})
-    complete = _scripted(*[_completion(calls=[same]) for _ in range(4)], _completion("Честно: не открылось."))
+    url = "https://base/ru_RU/#e1cib/list/Справочник.Контрагенты"
+    same = ("browser_open", {"url": url})
+    complete = _scripted(*[_completion(calls=[same]) for _ in range(9)], _completion("Честно: не открылось."))
     called = []
     out = run_agent(
         [{"role": "user", "content": "x"}], tools=BROWSER_TOOLS,
-        call_tool=lambda c, n, a: called.append(n) or ToolResult("Поиск Ctrl+Shift+F\nСправка"),
-        complete=complete, budget=Budget(),
+        call_tool=lambda c, n, a: called.append((n, a.get("key") or a.get("url"))) or ToolResult("Поиск Ctrl+Shift+F\nСправка"),
+        complete=complete, budget=Budget(max_steps=20),
     )
-    assert len(called) == 2  # the third and fourth identical opens are refused
     assert "второй раз дал тот же результат" in complete.seen[2][0][-1]["content"]
+    # Before giving up the loop tries Esc (a dialog), then reloads the page, then stops.
+    assert called == [
+        ("browser_open", url), ("browser_open", url), ("browser_press", "Escape"),
+        ("browser_open", url), ("browser_open", url), ("browser_open", url),
+        ("browser_open", url), ("browser_open", url),
+    ]
+    assert "нажал Esc" in complete.seen[3][0][-1]["content"]
+    assert "перезагрузил страницу" in complete.seen[6][0][-1]["content"]
     assert out.stopped == "loop" and out.final_answer == "Честно: не открылось."
 
 
@@ -702,3 +717,97 @@ def test_screenshot_goes_to_the_model_once() -> None:
     )
     assert out.final_answer == "Открыл раздел"
     assert has_image(complete.seen[1][0]) and not has_image(complete.seen[2][0])
+
+
+def test_stop_from_outside_still_answers_what_was_done() -> None:
+    from app.agent.control import Control
+
+    control = Control()
+    rounds = iter(range(100))
+
+    def complete(messages, tools):
+        if tools is None:
+            return _completion("Сделано: открыл отчёт. Не сделано: цифры. Чтобы продолжить, напишите «продолжи».")
+        if next(rounds) == 1:
+            control.stop()
+        return _completion(calls=[("browser_read", {})])
+
+    out = run_agent([{"role": "user", "content": "x"}], tools=BROWSER_TOOLS,
+                    call_tool=lambda *a: ToolResult("страница"), complete=complete, budget=Budget(), control=control)
+    assert out.stopped == "stop"
+    assert out.final_answer.startswith("Сделано: открыл отчёт")
+
+
+def test_stop_answer_falls_back_to_the_calls_when_no_model_answers() -> None:
+    from app.agent.control import Control
+
+    control = Control()
+
+    def complete(messages, tools):
+        if tools is None:
+            raise RuntimeError("quota")
+        control.stop()
+        return _completion(calls=[("browser_open", {"url": "https://online.moysklad.ru/app/"})])
+
+    out = run_agent([{"role": "user", "content": "x"}], tools=BROWSER_TOOLS,
+                    call_tool=lambda *a: ToolResult("ок"), complete=complete, budget=Budget(), control=control)
+    assert out.stopped == "stop"
+    assert "browser_open https://online.moysklad.ru/app/" in out.final_answer and "продолжи" in out.final_answer
+
+
+def test_productive_run_gets_more_steps_once() -> None:
+    pages = iter(range(100))
+    complete = _scripted(*[_completion(calls=[("browser_read", {})]) for _ in range(6)], _completion("Готово"))
+    events = []
+    out = run_agent([{"role": "user", "content": "x"}], tools=BROWSER_TOOLS,
+                    call_tool=lambda *a: ToolResult(f"страница {next(pages)}"), complete=complete,
+                    budget=Budget(max_steps=4, extend_steps=4), on_event=events.append)
+    assert out.final_answer == "Готово" and out.stopped is None
+    assert [e["max_steps"] for e in events if e.get("kind") == "extended"] == [8]
+
+
+def test_old_tool_results_are_cut() -> None:
+    from app.agent.loop import OLD_RESULT_CUT, compact_history
+
+    messages = [{"role": "tool", "tool_call_id": str(i), "content": "я" * 5000} for i in range(5)]
+    compact_history(messages, keep=3, limit=100)
+    assert [m["content"].endswith(OLD_RESULT_CUT) for m in messages] == [True, True, False, False, False]
+    assert len(messages[0]["content"]) == 100 + len(OLD_RESULT_CUT)
+
+
+def test_screenshots_are_limited_per_run() -> None:
+    from app.agent.loop import MAX_SCREENSHOTS
+
+    shots = [_completion(calls=[("browser_screenshot", {}), ("browser_click", {"x": i, "y": 1, "text": "т"})])
+             for i in range(MAX_SCREENSHOTS + 2)]
+    complete = _scripted(*shots, _completion("Готово"))
+    called = []
+    run_agent([{"role": "user", "content": "x"}], tools=BROWSER_TOOLS,
+              call_tool=lambda c, n, a: called.append(n) or ToolResult(f"ок {c}", data={"screenshot": c.encode()}),
+              complete=complete, budget=Budget(max_steps=40))
+    assert called.count("browser_screenshot") == MAX_SCREENSHOTS
+
+
+def test_save_in_moysklad_is_checked_through_the_api_before_answering() -> None:
+    tools = BROWSER_TOOLS + [_tool("moysklad_read")]
+    complete = _scripted(
+        _completion(calls=[("browser_click", {"text": "Сохранить"})]),
+        _completion("Приёмка сохранена."),
+        _completion(calls=[("moysklad_read", {"resource": "supply"})]),
+        _completion("Приёмка сохранена, проверил через API: 10 шт."),
+    )
+    out = run_agent([{"role": "user", "content": "x"}], tools=tools, call_tool=lambda *a: ToolResult("ок"),
+                    complete=complete, budget=Budget())
+    assert "moysklad_read" in complete.seen[2][0][-1]["content"]
+    assert out.final_answer == "Приёмка сохранена, проверил через API: 10 шт."
+
+
+def test_vision_round_gets_a_short_context() -> None:
+    from app.agent.loop import vision_messages
+
+    image = {"role": "user", "content": [{"type": "text", "text": "снимок"}, {"type": "image_url", "image_url": {"url": "data:"}}]}
+    history = [{"role": "system", "content": "sys"}, {"role": "user", "content": "задача"},
+               {"role": "tool", "tool_call_id": "1", "content": "я" * 50000}, image]
+    short = vision_messages(history, limit=2000)
+    assert short[0] == {"role": "system", "content": "sys"} and short[-1] is image
+    assert sum(len(str(m["content"])) for m in short) < 5000
