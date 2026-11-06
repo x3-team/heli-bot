@@ -28,6 +28,15 @@
     {"url": "https://pogoda.example/kazan", "title": "Погода в Казани на неделю",
      "keywords": "погода казань",
      "text": "Казань, 3 ноября: +4, дождь. 4 ноября: +2, облачно. 5 ноября: −1, снег."},
+    {"url": "https://support.google.com/analytics/answer/9267568", "title": "[GA4] О ключевых событиях — Справка Google Analytics",
+     "keywords": "ga4 key event ключевое событие ключевые события конверсия google analytics справка что такое",
+     "text": "Ключевое событие (key event) — это событие, которое измеряет действие, особенно важное для успеха вашего бизнеса. Любое собираемое событие можно отметить как ключевое в разделе Администратор → Ключевые события. Раньше ключевые события назывались конверсиями. Количество ключевых событий показывается в отчётах (метрика «Ключевые события»), их можно связать с Google Рекламой как конверсии."},
+    {"url": "https://yandex.ru/support/metrica/ru/general/goal-js-event", "title": "Цель через «JavaScript-событие» — Яндекс Метрика. Справка",
+     "keywords": "метрика цель цели javascript событие reachgoal справка яндекс",
+     "text": "Цель «JavaScript-событие» отслеживает действия на сайте, при которых адрес страницы не меняется: нажатие кнопки, отправку формы. Для достижения цели вызывается метод reachGoal с идентификатором цели, заданным в настройках счётчика."},
+    {"url": "https://seo-blog.example/ga4-key-events", "title": "Key events в GA4 простыми словами",
+     "keywords": "ga4 key event ключевое событие что такое цель метрики",
+     "text": "Key event — это то же самое, что цель в Яндекс Метрике, Google просто переименовал цели. Чтобы проверить, отправьте тестовый хит на боевой сайт через Measurement Protocol."},
     {"url": "https://dostavka-bystro.example/punkty", "title": "Служба доставки «Быстро»: пункты выдачи в Казани",
      "keywords": "быстро доставка пункт выдачи казань адрес часы работы",
      "text": "Служба доставки «Быстро» работает в Казани с 2019 года и доставляет посылки по городу и в пригороды. Заказы можно получить у курьера или забрать самостоятельно. Пункт выдачи в Казани: ул. Островского, д. 22, вход со двора. Часы работы: ежедневно с 9:00 до 21:00. Хранение заказа — 5 дней."},
@@ -132,6 +141,20 @@
       {"id": "m5", "folder": "sent", "from": "vitalii@getheli.example", "to": "belova@flowers.example", "subject": "Прайс на упаковку", "date": "2026-10-20",
        "body": "Мария, прайс во вложении. Лента 48 мм — 95 руб."}
     ]
+  },
+  "ga4": {
+    "sandbox_ids": ["G-HELITRAIN1"],
+    "properties": {
+      "400000001": {"name": "Heli учебный ресурс", "measurement_id": "G-HELITRAIN1", "total_users": 312,
+                    "key_events": ["generate_lead"],
+                    "events": [
+                      {"eventName": "page_view", "eventCount": 1840, "totalUsers": 312, "keyEvents": 0},
+                      {"eventName": "session_start", "eventCount": 655, "totalUsers": 312, "keyEvents": 0},
+                      {"eventName": "click_phone", "eventCount": 41, "totalUsers": 37, "keyEvents": 0},
+                      {"eventName": "generate_lead", "eventCount": 23, "totalUsers": 21, "keyEvents": 23}
+                    ]}
+    },
+    "hits": []
   },
   "moysklad": {
     "sandbox_accounts": ["heli-train"],

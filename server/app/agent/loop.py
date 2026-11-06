@@ -150,7 +150,7 @@ UNSAVED_NOTE = (
 # knowledge base or the official help. Once per run, so a topic that needs no study costs one round.
 STUDY_TOOLS = {"knowledge_search", "web_search", "open_url", "fetch_page"}
 ACT_TOOLS = {
-    "http_request", "direct_api", "browser_click", "browser_type", "browser_press", "mail_send",
+    "http_request", "direct_api", "ga4_send_event", "browser_click", "browser_type", "browser_press", "mail_send",
     "save_credential", "save_file", "use_computer",
 }
 STUDY_GATE = (

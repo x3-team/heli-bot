@@ -254,6 +254,7 @@ _DIRECT_GUIDE = """\
 Правила советов
 - Конверсионные стратегии (оплата за конверсии, оптимизация конверсий) — только при ≥10 конверсий в неделю по цели. Меньше — ручные ставки или «Максимум кликов» с ограничением цены клика, сначала накопить данные. Перед советом посчитай конверсии за 7 и 28 дней и покажи расчёт.
 - Не меняй ничего в боевом кабинете: ни ставки, ни стратегию, ни статус кампаний. Изменение проверяй в песочнице (direct_api sandbox=true), а пользователю дай список: что, где и почему поменять.
+- Цели Метрики и события GA4 — разные вещи (подробно в плейбуке GA4). Хиты в счётчик Метрики (mc.yandex.ru) не отправляй, цели в боевом счётчике не создавай: опиши пользователю, какую завести.
 - Новые правила и ограничения Директа сверяй с официальной справкой (yandex.ru/support/direct, yandex.ru/dev/direct) и сохраняй через knowledge_save.
 
 Капча, SMS или второй фактор при входе в Яндекс ID — не решай: остановись и попроси пользователя пройти её на экране «Компьютер агента»."""
@@ -280,6 +281,46 @@ PLAYBOOKS = (
     ),
 )
 
+
+_GA4_GUIDE = """\
+Google Analytics 4 (analytics.google.com, Data API, Measurement Protocol) и связка с Метрикой и Директом.
+
+Как читать
+- Отчёты — ga4_read: run_report (dimensions eventName/date, metrics eventCount, totalUsers, keyEvents), key_events (какие события отмечены ключевыми), metadata, data_streams. Чтение ничего не меняет; настройки ресурса Heli не трогает.
+- Метрика — metrika_read (goals, stat с ym:s:goal<ID>reaches), Директ — direct_api reports с Goals.
+
+Как говорить о целях и событиях
+- Событие GA4 — любое собранное действие; ключевое событие (key event, бывшая «конверсия») — событие, отмеченное владельцем как важное; цель Метрики — условие на визит в счётчике Яндекса. Это разные системы, цифры не складывай и не подменяй одну другой.
+- Определения давай со ссылкой на справку: Google — support.google.com/analytics (answer/9267568 о ключевых событиях, answer/9322688 о событиях), Яндекс — yandex.ru/support/metrica. Не выдумывай: нет ссылки — найди справку (knowledge_search, web_search, open_url).
+- Конверсионные стратегии Директа — только при ≥10 конверсий в неделю по цели (то же правило, что в Директе); меньше — ручные ставки или «Максимум кликов» с ограничением цены клика.
+
+Запреты
+- Тестовые хиты (ga4_send_event, heli_train_ping) — только на учебный Measurement ID. На боевой сайт getheli и сайты клиентов хиты не шлются даже «для проверки», и такого совета не давай: проверяй чтением отчётов или DebugView владельца.
+- Боевые счётчики Метрики — только чтение; хиты на mc.yandex.ru и google-analytics.com через http_request не отправляются.
+- Капчу и второй фактор в аккаунте Google не решай: попроси пользователя пройти их на экране «Компьютер агента»."""
+
+
+PLAYBOOKS = (
+    *PLAYBOOKS,
+    Playbook(
+        id="ga4",
+        name="Google Analytics 4",
+        keywords=(r"ga4", r"google\s?analytics", r"гугл\W?аналитик\w*", r"measurement\s?protocol", r"key\s?events?",
+                  r"ключев\w* событ\w*", r"аналитик\w* сайт\w*"),
+        host_suffixes=("analytics.google.com",),
+        url_markers=("analytics.google.com",),
+        guide=_GA4_GUIDE,
+        login=LoginForm(
+            username_selectors=("input#identifierId", "input[type='email']"),
+            password_selectors=("input[name='Passwd']", "input[type='password']"),
+            submit_selectors=("#identifierNext button", "#passwordNext button", "text=Далее"),
+            two_step=True,
+            next_selectors=("#identifierNext button", "text=Далее"),
+        ),
+        confirm_before=("сохранить", "отметить как ключевое", "удалить", "создать"),
+        auth_hosts=("accounts.google.com",),
+    ),
+)
 
 def playbook(app_id: str) -> Playbook | None:
     return next((book for book in PLAYBOOKS if book.id == app_id), None)
