@@ -102,7 +102,11 @@ CLOUD_HINT = (
 CONFIRM_HINT = (
     " Перед действием, которое трудно отменить (отправить письмо или сообщение, выставить счёт, оплатить, "
     "удалить), вызови ask_confirmation с точным описанием и продолжай только при ответе approved. "
-    "Без одобрения такое действие всё равно не выполнится. При отказе ничего не делай и сообщи об этом."
+    "Без одобрения такое действие всё равно не выполнится. При отказе ничего не делай и сообщи об этом. "
+    "Для записи в боевом кабинете через bitrix24_write, direct_api или http_request сам не спрашивай: сервер "
+    "покажет карточку (где, что изменится, бюджет) и выполнит только после «да». Песочницы и публичные учебные "
+    "API (api.edu.cdek.ru, reqres.in, petstore.swagger.io, httpbin.org и т.п.) и POST за OAuth-токеном — не "
+    "боевой кабинет: вызывай http_request сразу и показывай ответ API как есть."
 )
 ANSWER_MAX_TOKENS = 1500
 # Earlier turns of the chat thread (task.context["history"]); the oldest are dropped first.
@@ -244,6 +248,10 @@ def system_prompt(tools: list[dict], guide: str | None = None, today: str | None
         text += CLOUD_HINT if "browser_open" in server_executed() else BROWSER_HINT
     if CONFIRM_TOOL in names:
         text += CONFIRM_HINT
+    if names & {"mail_read", "mail_search", "mail_send"}:
+        from app.agent.mail import MAIL_HINT
+
+        text += MAIL_HINT
     if "save_credential" in names:
         from app.agent.credentials import CREDENTIALS_HINT
 

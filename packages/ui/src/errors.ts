@@ -2,6 +2,8 @@ const ERRORS: Record<string, string> = {
   auth_not_configured: "На сервере не настроена авторизация (JWT_SECRET).",
   email_not_configured: "Почта для кода ещё не подключена. Код выдаёт оператор.",
   invite_invalid: "Код приглашения не подошёл.",
+  invite_required: "Нужен код приглашения. Его выдаёт администратор.",
+  admin_required: "Это может только администратор.",
   code_invalid: "Код не подошёл.",
   token_invalid: "Нужно войти снова.",
   pdn_consent_required: "Нужно согласие на обработку данных.",
