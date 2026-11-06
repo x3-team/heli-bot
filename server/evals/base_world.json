@@ -36,7 +36,11 @@
     "5033011222": {"name": "ООО «Подмосковье Агро»", "ogrn": "1095033000222", "kpp": "503301001", "director": "Лебедев Олег Викторович", "address": "Московская обл., г. Раменское, ул. Полевая, д. 3", "status": "действующая"}
   },
   "amocrm": {
+    "subdomain": "heli-uchebny",
+    "token": "amo-world-token-0123456789abcdef",
+    "sandbox": true,
     "me": "Виталий",
+    "users": [{"id": 1001, "name": "Виталий"}, {"id": 1002, "name": "Олег"}],
     "stages": ["Первичный контакт", "Переговоры", "Принимают решение", "Согласование договора", "Успешно реализовано", "Закрыто и не реализовано"],
     "next_id": 5001,
     "contacts": [
@@ -49,6 +53,15 @@
       {"id": 4002, "name": "Перчатки 500 коробок — КазаньСтройМаш", "price": 615000, "contact_id": 302, "stage": "Принимают решение", "responsible": "Олег", "notes": []},
       {"id": 4003, "name": "Ленты упаковочные — ИП Белова", "price": 18000, "contact_id": 303, "stage": "Первичный контакт", "responsible": "Виталий", "notes": []},
       {"id": 4004, "name": "Тестовая сделка — удалить", "price": 1, "contact_id": null, "stage": "Первичный контакт", "responsible": "Виталий", "notes": []}
+    ],
+    "tasks": [],
+    "unsorted": [
+      {"uid": "f7a1c2d3", "source_name": "Форма на сайте uralpack-test.example", "category": "forms", "form_name": "Заявка на КП", "created_at": 1793606100,
+       "text": "Нужно 200 коробок нитриловых перчаток M, пришлите КП", "lead": {"name": "Заявка с сайта: перчатки нитриловые", "price": 0},
+       "contact": {"name": "Наталья Крылова", "phone": "+7 912 300-40-50", "email": "krylova@uralpack.example", "company": "ООО «УралПак»"}},
+      {"uid": "b9e8d7c6", "source_name": "Telegram @heli_shop_bot", "category": "chats", "created_at": 1793613300,
+       "text": "Есть ли спецодежда на 15 человек?", "lead": {"name": "Сделка из Telegram: спецодежда", "price": 0},
+       "contact": {"name": "Игорь Пестов", "phone": "+7 921 555-01-02", "email": "", "company": ""}}
     ]
   },
   "bitrix24": {

@@ -118,7 +118,18 @@ REST прежде экрана
 
 
 _AMO_GUIDE = """\
-amoCRM (аккаунт на поддомене <аккаунт>.amocrm.ru).
+amoCRM (аккаунт на поддомене <аккаунт>.amocrm.ru, Kommo — <аккаунт>.kommo.com).
+
+REST прежде экрана
+- Если в «Доступах» есть токен amoCRM (find_credential об этом скажет), любую задачу делай через REST API v4: amocrm_read читает, amocrm_write пишет. В аккаунт на экране не входи и пароль не вводи.
+- Токена нет — amocrm_read ответит, как его добавить: передай это пользователю. Пароль и токен в чате не проси: только в «Доступы» (сайт — адрес аккаунта, имя token, секрет — долгосрочный токен).
+- Чтение: leads (query, with=contacts), contacts и companies (query — имя, телефон, почта), leads/pipelines (воронки и ID этапов), leads/unsorted (неразобранное), tasks, users (ID ответственного), leads/<id>/notes.
+- Запись: POST contacts / companies / leads (контакт к сделке — _embedded.contacts [{id}]), POST leads/complex (сделка сразу с контактом и компанией), PATCH leads/<id> со status_id и pipeline_id (смена этапа), POST tasks (text, complete_till в unix-времени, entity_id, entity_type leads, responsible_user_id), POST leads/<id>/notes ([{note_type common, params {text}}]), POST leads/unsorted/<uid>/accept (принять заявку; status_id — этап, куда её взять).
+- Перед созданием контакта поищи его (contacts с query): дублей не создавай. ID этапа бери из leads/pipelines, ID ответственного — из users.
+- После записи проверь её через amocrm_read (GET по ID из ответа) и сверь поля с задачей.
+- На учебном аккаунте amocrm_write пишет сразу. На боевом аккаунте клиента каждая запись — только после подтверждения пользователя (сервер спросит сам, при отказе ничего не меняй).
+- Удаления через REST нет: удалить сделку или отклонить заявку из неразобранного пользователь делает сам. Не больше 10 записей за вызов, массовые правки не делай.
+- Вход на экране — только если токена нет и пользователь сам вошёл, или нужен экран, которого нет в API. Капчу не решай и не обходи: поставь задачу на паузу и попроси пользователя пройти её или добавить токен в «Доступы».
 
 Навигация
 - Левое меню: Рабочий стол, Сделки, Задачи, Списки (контакты и компании), Почта, Чаты, Аналитика, Настройки.
@@ -204,7 +215,7 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         id="amocrm",
         name="amoCRM",
         keywords=(r"amo\s?crm", r"амо\s?црм\w*", r"амо(?![\w])", r"амошк\w*", r"amo(?![\w])"),
-        host_suffixes=("amocrm.ru", "amocrm.com"),
+        host_suffixes=("amocrm.ru", "amocrm.com", "kommo.com"),
         url_markers=("/leads/pipeline/", "/leads/detail/", "/contacts/list/"),
         guide=_AMO_GUIDE,
         login=LoginForm(

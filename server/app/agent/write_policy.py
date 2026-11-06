@@ -107,7 +107,7 @@ def has_rule(tool: str) -> bool:
 
 # Built-in tools whose modules register their rule on import. Loaded on first use, so the guard
 # knows them even in a process that never called their register().
-_BUILTIN = ("app.agent.http_tool", "app.agent.bitrix", "app.agent.yandex_direct")
+_BUILTIN = ("app.agent.http_tool", "app.agent.bitrix", "app.agent.yandex_direct", "app.agent.amocrm")
 _loaded = False
 
 

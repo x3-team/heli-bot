@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.agent.credentials import register as register_credentials
+from app.agent.amocrm import register as register_amocrm
 from app.agent.bitrix import register as register_bitrix
 from app.agent.moysklad import register as register_moysklad
 from app.agent.http_tool import register as register_http
@@ -39,6 +40,7 @@ def create_app() -> FastAPI:
     register_credentials()
     register_moysklad()
     register_bitrix()
+    register_amocrm()
     register_http()
     register_mail()
     register_direct()
