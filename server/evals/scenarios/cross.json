@@ -34,23 +34,25 @@
    "expect": [
      {"type": "called", "tool": "onec_find_counterparty"},
      {"type": "called", "tool": ["company_by_inn", "web_search"]},
-     {"type": "called", "tool": "bitrix24_create_task", "args": {"responsible": "Смирнова"}, "max": 1},
+     {"type": "called", "tool": "bitrix24_write", "args": {"method": "tasks.task.add", "params": {"fields": {"RESPONSIBLE_ID": 12}}}, "max": 1},
      {"type": "answer_contains", "all": ["54 000"], "any": ["ликвидац"]}
    ],
    "golden": {"calls": [{"tool": "onec_find_counterparty", "args": {"query": "Невский Логистик"}},
                         {"tool": "company_by_inn", "args": {"inn": "7805123456"}},
-                        {"tool": "bitrix24_create_task", "args": {"title": "Невский Логистик: отгрузка в долг", "responsible": "Смирнова Анна", "description": "Компания в ликвидации, долг 54 000 руб. Решить по отгрузке."}}],
+                        {"tool": "bitrix24_read", "args": {"method": "user.search", "params": {"FIND": "Главный бухгалтер"}}},
+                        {"tool": "bitrix24_write", "args": {"method": "tasks.task.add", "params": {"fields": {"TITLE": "Невский Логистик: отгрузка в долг", "RESPONSIBLE_ID": 12, "DESCRIPTION": "Компания в ликвидации, долг 54 000 руб. Решить по отгрузке."}}}}],
               "answer": "ООО «Невский Логистик» в процессе ликвидации, долг 54 000 руб. Поставил задачу Смирновой А. В."}},
 
   {"id": "x-04", "title": "Чат → задача складу → примечание в сделке",
    "task": "В чате продаж КазаньСтройМаш просит перенести отгрузку. Поставь задачу складу и добавь примечание в их сделку.",
    "expect": [
      {"type": "called", "tool": "telegram_read"},
-     {"type": "called", "tool": "bitrix24_create_task", "args": {"responsible": "Кузнецов"}, "max": 1},
+     {"type": "called", "tool": "bitrix24_write", "args": {"method": "tasks.task.add", "params": {"fields": {"RESPONSIBLE_ID": 13}}}, "max": 1},
      {"type": "state", "path": "amocrm.deals[id=4002].notes", "any_of": [["6 ноября"], ["06.11"]]}
    ],
    "golden": {"calls": [{"tool": "telegram_read", "args": {"chat": "Отдел продаж"}},
-                        {"tool": "bitrix24_create_task", "args": {"title": "Перенести отгрузку КазаньСтройМаш на 6 ноября", "responsible": "Кузнецов", "deadline": "2026-11-06"}},
+                        {"tool": "bitrix24_read", "args": {"method": "user.search", "params": {"FIND": "Склад"}}},
+                        {"tool": "bitrix24_write", "args": {"method": "tasks.task.add", "params": {"fields": {"TITLE": "Перенести отгрузку КазаньСтройМаш на 6 ноября", "RESPONSIBLE_ID": 13, "DEADLINE": "2026-11-06T18:00:00+03:00"}}}},
                         {"tool": "amocrm_list_deals", "args": {"query": "КазаньСтройМаш"}},
                         {"tool": "amocrm_add_note", "args": {"deal_id": 4002, "text": "Клиент попросил перенести отгрузку на 6 ноября"}}],
               "answer": "Задача складу поставлена, в сделку 4002 добавлено примечание о переносе на 6 ноября."}},
@@ -59,12 +61,12 @@
    "task": "Сделай утреннюю сводку: просроченные задачи в Битрикс24, кто нам должен по 1С и сделки на этапе «Принимают решение».",
    "budget": {"max_steps": 10},
    "expect": [
-     {"type": "called", "tool": "bitrix24_list_tasks"},
+     {"type": "called", "tool": "bitrix24_read", "args": {"method": "tasks.task.list"}},
      {"type": "called", "tool": "onec_find_counterparty"},
      {"type": "called", "tool": "amocrm_list_deals"},
      {"type": "answer_contains", "all": ["Инвентаризац", "128 400", "54 000", "615 000"]}
    ],
-   "golden": {"calls": [{"tool": "bitrix24_list_tasks", "args": {"status": "open"}},
+   "golden": {"calls": [{"tool": "bitrix24_read", "args": {"method": "tasks.task.list", "params": {"filter": {"!STATUS": 5}}}},
                         {"tool": "onec_find_counterparty", "args": {"query": ""}},
                         {"tool": "amocrm_list_deals", "args": {"query": "Принимают решение"}}],
               "answer": "Просрочено: «Инвентаризация склада №2». Должны: КазаньСтройМаш 128 400 руб., Невский Логистик 54 000 руб. На этапе «Принимают решение»: «Перчатки 500 коробок — КазаньСтройМаш», 615 000 руб."}},

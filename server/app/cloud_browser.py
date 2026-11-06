@@ -324,6 +324,55 @@ ONEC_CLOSE_START = r"""() => {
   return closed;
 }"""
 
+# Error windows of 1С that the start-window closer does not touch and that block the form: a navigation
+# link that 1С did not take, the «версия конфигурации» notice, and «Перейти по ссылке» left open after a
+# failed link. Closed by their own button; the result says which, so a failed link is not opened again.
+ONEC_ERRORS = r"""() => {
+  const RULES = [
+    { kind: "nav", re: /неверный формат навигационной ссылки/i },
+    { kind: "nav", re: /не удалось перейти по навигационной ссылке/i },
+    { kind: "nav", re: /навигационн\S* ссылк\S* (?:не найден|не существует|недоступн)/i },
+    { kind: "version", re: /версия конфигурации\s.{0,80}выпущена/i },
+    { kind: "navwin", re: /^(?:переход по (?:навигационной )?ссылке|перейти по (?:навигационной )?ссылке)$/i },
+  ];
+  const ORDER = { nav: ["ок", "ok", "закрыть", "нет", "отмена"], version: ["ок", "ok", "закрыть", "нет"], navwin: ["отмена", "закрыть"] };
+  const BUTTONS = "button, [role=button], .press, .pressButton, .frameButton, input[type=button], input[type=submit], a, [id^=form][id*=Button], [id*=_cmd_]";
+  const CLOSE = ".openedClose, [id$=_close], [id$=Close], .frameClose, .closeButton, .close, [title='Закрыть'], [title^='Закрыть']";
+  const clean = (t) => (t || "").replace(/\s+/g, " ").trim();
+  const visible = (el) => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 1 && r.height > 1 && s.visibility !== "hidden" && s.display !== "none"; };
+  const fire = (el) => ["mousedown", "mouseup", "click"].forEach((t) =>
+    el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })));
+  const out = [];
+  const done = new Set();
+  const t0 = performance.now();
+  const nodes = document.body ? [...document.body.getElementsByTagName("*")] : [];
+  for (const rule of RULES) {
+    if (rule.kind === "navwin" && !out.some((o) => o.kind === "nav")) continue; // a working link closes it itself
+    for (let i = 0; i < nodes.length && i < 20000 && performance.now() - t0 < 2500; i++) {
+      const el = nodes[i];
+      if (el.children.length > 3 || done.has(el)) continue;
+      const text = clean(el.innerText);
+      if (!text || text.length > 400 || !rule.re.test(text) || !visible(el)) continue;
+      let box = el, button = null;
+      for (let up = 0; box && box !== document.body && up < 12 && !button; up++, box = box.parentElement) {
+        const r = box.getBoundingClientRect();
+        if (r.width > innerWidth * 0.97 && r.height > innerHeight * 0.97) break;
+        const cands = [...box.querySelectorAll(BUTTONS)].filter(visible);
+        for (const want of ORDER[rule.kind]) {
+          button = cands.find((b) => clean(b.innerText || b.value || b.getAttribute("title")).toLowerCase() === want);
+          if (button) break;
+        }
+        if (!button) button = [...box.querySelectorAll(CLOSE)].find(visible) || null;
+      }
+      done.add(el);
+      if (out.some((o) => o.text === text)) continue;
+      if (button) fire(button);
+      out.push({ kind: rule.kind === "navwin" ? "nav" : rule.kind, text: text.slice(0, 200), closed: !!button });
+    }
+  }
+  return out;
+}"""
+
 # What is under a point: the label the guard checks before a click by coordinates.
 AT_POINT = r"""([x, y]) => {
   let el = document.elementFromPoint(x, y);
@@ -370,6 +419,13 @@ ONEC_HINT = (
     "(Это 1С. Быстрее всего — browser_open с навигационной ссылкой <база>/ru_RU/#e1cib/list/<Объект> или "
     "#e1cib/app/Отчет.<Имя>. Поиск в списке: browser_press Control+F, затем browser_type без ref. Если нужного "
     "нет в списке элементов, сделай browser_screenshot и нажми browser_click по координатам x, y с картинки.)"
+)
+
+
+ONEC_LINK_FAILED = (
+    "nav_link_failed=true: навигационная ссылка {link} не открылась ({why}). Окно ошибки закрыто. "
+    "Не открывай эту ссылку снова. Один раз можно попробовать соседнее имя объекта из подсказки 1С, "
+    "иначе иди через меню: раздел слева → нужный список или отчёт, или ☰ → «Все функции»."
 )
 
 
@@ -566,7 +622,17 @@ class Page:
     def open(self, url: str) -> str:
         self.opened_file = False
         notes: list[str] = []
-        if onec_link(url) and same_base(self.page.url, url) and self.is_onec():
+        link = onec_link(url)
+        if link:
+            url = onec_clean_link(url)
+            failed = getattr(self, "failed_onec_links", None)
+            if failed is None:
+                failed = self.failed_onec_links = set()
+            key = onec_link_key(url)
+            if key in failed and self.is_onec():
+                # The model keeps opening a link 1С already refused (1c-08: three times): send it to the menu.
+                return ONEC_LINK_FAILED.format(link=key, why="уже не открылась в этом сеансе") + "\n\n" + self.read()
+        if link and same_base(self.page.url, url) and self.is_onec():
             # 1С is open: changing only the #e1cib hash does not open the form. «Перейти по ссылке» does.
             if self.onec_go(url):
                 notes.append("Открыл навигационную ссылку 1С через «Перейти по ссылке» (Shift+F11).")
@@ -588,7 +654,36 @@ class Page:
             closed = self.close_start_windows()
             if closed:
                 notes.append("Закрыл стартовые окна 1С: " + ", ".join(f"«{t}»" for t in closed) + ".")
+            errors = self.close_error_windows()
+            versions = [e for e in errors if e["kind"] == "version"]
+            if versions:
+                notes.append("Закрыл окно 1С о версии конфигурации.")
+            nav = [e for e in errors if e["kind"] == "nav"]
+            if nav and link:
+                key = onec_link_key(url)
+                self.failed_onec_links.add(key)
+                notes.insert(0, ONEC_LINK_FAILED.format(link=key, why="1С ответила «" + nav[0]["text"][:120] + "»"))
         return ("\n".join(notes) + "\n\n" if notes else "") + self.read()
+
+    def close_error_windows(self) -> list[dict]:
+        """Close 1С error windows (bad navigation link, version notice). Escape if an error had no button."""
+        found: list[dict] = []
+        for _ in range(3):
+            try:
+                batch = self.page.evaluate(ONEC_ERRORS) or []
+            except Exception:  # noqa: BLE001
+                break
+            batch = [e for e in batch if isinstance(e, dict) and e.get("text") not in {f["text"] for f in found}]
+            if not batch:
+                break
+            found += batch
+            if not all(e.get("closed") for e in batch):
+                try:
+                    self.page.keyboard.press("Escape")
+                except Exception:  # noqa: BLE001
+                    pass
+            self.settle(700)
+        return found
 
     def is_onec(self) -> bool:
         try:
@@ -598,7 +693,8 @@ class Page:
 
     def onec_go(self, url: str) -> bool:
         """Shift+F11 «Перейти по ссылке», type the e1cib link, Enter. False: the dialog did not show up."""
-        link = url[url.lower().index("e1cib/"):]
+        link = onec_clean_link(url)
+        link = link[link.lower().index("e1cib/"):]
         try:
             self.page.keyboard.press("Shift+F11")
             self.page.wait_for_timeout(900)
@@ -607,8 +703,20 @@ class Page:
             )
             if not focused:
                 return False
+            # 1С keeps the last link in this field: clear it, or the new one is glued on («Неверный формат…»).
+            self.page.evaluate(
+                "() => { const e = document.activeElement; if (e && 'value' in e) { e.value = '';"
+                " e.dispatchEvent(new Event('input', { bubbles: true })); } }"
+            )
             self.page.keyboard.press("Control+A")
+            self.page.keyboard.press("Delete")
             self.page.keyboard.insert_text(link)
+            typed = self.page.evaluate("() => { const e = document.activeElement; return e && 'value' in e ? e.value : null; }")
+            if isinstance(typed, str) and typed.strip() != link:
+                self.page.evaluate(
+                    "(v) => { const e = document.activeElement; e.value = v; e.dispatchEvent(new Event('input', { bubbles: true })); }",
+                    link,
+                )
             self.page.keyboard.press("Enter")
             self.settle(2500)
             return True
@@ -904,6 +1012,24 @@ def onec_link(url: str) -> bool:
     return "e1cib/" in (url or "").lower()
 
 
+def onec_clean_link(url: str) -> str:
+    """The link as 1С expects it in «Перейти по ссылке»: Cyrillic, not %D0%A1… (the address bar form of it),
+    no spaces or trailing punctuation the model copied along. A %-encoded name is «Неверный формат…» in 1С."""
+    from urllib.parse import unquote
+
+    text = (url or "").strip().rstrip(".,;)").strip("«»\"'").rstrip(".,;)")
+    if "%" in text:
+        text = unquote(text)
+    return text.replace(" ", "")
+
+
+def onec_link_key(url: str) -> str:
+    """e1cib/list/Справочник.Контрагенты: the same link whatever base and encoding it came with."""
+    text = onec_clean_link(url)
+    at = text.lower().find("e1cib/")
+    return text[at:] if at >= 0 else text
+
+
 def same_base(current: str, target: str) -> bool:
     """Same 1С base: scheme, host and path up to /ru_RU/ (or the whole path without the #hash)."""
     a, b = urlsplit(current or ""), urlsplit(target or "")
@@ -1062,6 +1188,17 @@ class CloudBrowser:
                 return Result("Ошибка: captcha", "captcha", self.frame(user_id))
             self._ya_captcha.pop(user_id, None)
         return self._run(user_id, lambda page: format_hits(page.serp()))
+
+    def url(self, user_id: uuid.UUID) -> str:
+        """Address of the user's page now ("" without one)."""
+        def job() -> str:
+            page = self.sessions.get(user_id)
+            return page.location()[0] if page else ""
+
+        try:
+            return str(self._submit(job).result(timeout=CALL_TIMEOUT_S) or "")
+        except Exception:  # noqa: BLE001
+            return ""
 
     def captcha(self, user_id: uuid.UUID) -> bool:
         """The current page asks to prove a human is there."""
@@ -1485,6 +1622,11 @@ def set_pool(value: CloudBrowser | None) -> None:
 SEARCH_TOOL = "browser_search"
 UPLOAD_TOOL = "browser_upload"
 CAPTCHA_TEXT = "Сайт просит пройти капчу. Пройдите её на экране «Компьютер агента», и я продолжу сам."
+BITRIX_CAPTCHA_TEXT = (
+    "Битрикс24 просит пройти капчу при входе. Пройдите её на экране «Компьютер агента», и я продолжу сам. "
+    "Чтобы дальше работать без входа и капчи, добавьте в «Доступы» входящий вебхук портала: сайт — адрес "
+    "портала, логин webhook, пароль — адрес вебхука."
+)
 SEARCH_CAPTCHA_TEXT = "Яндекс просит пройти капчу. Пройдите её на экране «Компьютер агента», и я продолжу сам."
 _SHOT_TOOLS = {"browser_screenshot"}
 # After these the page may have turned into a captcha.
@@ -1573,7 +1715,20 @@ def execute(session, user, task_id, name: str, args: dict):
         result = browser.call(user.id, name, args, task_id=task_id)
         if name in _CAPTCHA_TOOLS and not result.error and browser.captcha(user.id):
             publish({"type": "screen", "version": browser.frame_version(user.id)})
-            if ask_for_captcha(browser, user.id, agent_run):
+            portal = _bitrix_portal(browser.url(user.id), str(args.get("url") or "") if name == "browser_open" else "")
+            webhook = _bitrix_webhook(session, user, portal) if portal is not None else None
+            if webhook is not None:
+                # REST through the webhook does the job without a sign-in: no pause, no steps spent on the captcha.
+                for info in result.files:
+                    publish(heli_files.published(info))
+                return ClientResult(
+                    f"Вход в Битрикс24 просит капчу. Для {webhook['site']} в «Доступах» есть вебхук: не входи на экране, "
+                    "делай задачу через bitrix24_read" + (" и bitrix24_write" if _bitrix_sandbox(webhook["site"]) else "")
+                    + ". Капчу не решай.",
+                    "captcha_use_rest",
+                )
+            text = BITRIX_CAPTCHA_TEXT if portal is not None else CAPTCHA_TEXT
+            if ask_for_captcha(browser, user.id, agent_run, text):
                 after = browser.call(user.id, "browser_read", {}, task_id=task_id)
                 result = Result("Пользователь прошёл капчу.\n\n" + after.text, after.error, after.frame, result.files + after.files)
             elif agent_run is not None and not agent_run.control.stopped:
@@ -1597,6 +1752,36 @@ def execute(session, user, task_id, name: str, args: dict):
     publish({"type": "screen", "version": browser.frame_version(user.id)})
     shot = result.frame if (name in _SHOT_TOOLS or result.error) else None
     return ClientResult(result.text, result.error, shot)
+
+
+def _bitrix_portal(current: str, opened: str) -> str | None:
+    """The Битрикс24 portal behind a captcha: "" for its shared sign-in (bitrix24.net), None when it is not Битрикс24."""
+    from app.skills.hosts import host_matches, host_of
+
+    for url in (opened, current):
+        host = host_of(url)
+        if not host:
+            continue
+        if any(host_matches(host, s) for s in ("bitrix24.ru", "bitrix24.com", "bitrix24.by", "bitrix24.kz")):
+            return host
+        if host_matches(host, "bitrix24.net"):
+            return ""
+    return None
+
+
+def _bitrix_webhook(session, user, portal: str) -> dict | None:
+    try:
+        from app.agent import bitrix
+
+        return bitrix.webhook_for(session, user, portal or None) if session is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _bitrix_sandbox(site: str) -> bool:
+    from app.agent import bitrix
+
+    return bitrix.is_sandbox(site)
 
 
 def _mime(name: str) -> str:

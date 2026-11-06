@@ -646,3 +646,72 @@ def test_real_chromium_reports_dialogs_and_failed_saves():
         assert "id записи в адресе: 0f1e2d3c-1111-2222-3333-444455556666" in p.save_report("Сохранить")
         assert p.save_report("Отмена") == ""
         browser_.close()
+
+
+ONEC_ERR = """<!doctype html><html><head><title>Управление торговлей / 1С:Предприятие</title>
+<style>.press{cursor:pointer;padding:4px}.win{position:absolute;z-index:50;left:200px;top:150px;width:400px;height:160px;background:#eee}</style></head><body>
+<div id="themesCell"><div class="themeCell">Склад и доставка</div></div>
+<div class="win" id="go"><div class="title">Перейти по ссылке</div><input value="e1cib/app/Отчет.Нет">
+<div class="press" onclick="document.getElementById('go').remove()">Отмена</div></div>
+<div class="win" id="err" style="top:200px;z-index:60"><div>Неверный формат навигационной ссылки!</div>
+<div class="press" onclick="document.getElementById('err').remove()">OK</div></div>
+<div class="win" id="ver" style="top:300px;z-index:40"><div>Версия конфигурации 3.0.150 была выпущена для ознакомления</div>
+<div class="press" onclick="document.getElementById('ver').remove()">Закрыть</div></div>
+<div class="press" style="position:absolute;left:10px;top:500px">ОК</div>
+</body></html>"""
+
+
+@pytest.mark.skipif(_chromium() is None, reason="Playwright Chromium not installed")
+def test_real_chromium_closes_1c_link_errors_and_does_not_retry_the_link():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        browser_ = pw.chromium.launch(executable_path=_chromium())
+        page = browser_.new_page(viewport=cb.VIEWPORT)
+        p = cb.Page(page.context, page)
+        opened: list[str] = []
+        p.goto = lambda url: (opened.append(url), page.set_content(ONEC_ERR))
+        link = "https://demo.example/trade/ru_RU/#e1cib/app/%D0%9E%D1%82%D1%87%D0%B5%D1%82.%D0%9D%D0%B5%D1%82"
+        text = p.open(link)
+        assert text.startswith("nav_link_failed=true: навигационная ссылка e1cib/app/Отчет.Нет не открылась")
+        assert "Неверный формат навигационной ссылки" in text and "версии конфигурации" in text
+        assert page.evaluate("() => ['go', 'err', 've'].map((id) => !!document.getElementById(id))") == [False, False, False]
+        assert "Неверный формат" not in text.split("Адрес:", 1)[1]
+        # The same link again (encoded the other way): no second trip, straight to the menu.
+        again = p.open("https://demo.example/trade/ru_RU/#e1cib/app/Отчет.Нет")
+        assert "уже не открылась" in again and len(opened) == 1
+        # A plain 1С page has nothing to close; an «ОК» of the form itself is never clicked.
+        page.set_content(ONEC_ERR.replace("Неверный формат навигационной ссылки!", "Склад").replace("Версия конфигурации", "Вид"))
+        assert p.close_error_windows() == []
+        browser_.close()
+
+
+def test_1c_links_are_cleaned_for_go_to_link():
+    assert cb.onec_clean_link("«https://h/b/ru_RU/#e1cib/list/%D0%A1%D0%BF.%D0%9A»,") == "https://h/b/ru_RU/#e1cib/list/Сп.К"
+    assert cb.onec_link_key("https://h/b/ru_RU/#e1cib/list/Справочник.Контрагенты") == "e1cib/list/Справочник.Контрагенты"
+
+
+ONEC_GO = """<!doctype html><html><head><title>Бухгалтерия / 1С:Предприятие</title></head><body>
+<div id="themesCell">Банк</div>
+<script>
+document.addEventListener("keydown", (e) => {
+  if (e.key === "F11" && e.shiftKey) {
+    const i = document.createElement("input"); i.value = "e1cib/list/Справочник.Старое"; document.body.appendChild(i); i.focus();
+    i.addEventListener("keydown", (k) => { if (k.key === "Enter") { document.title = "Перешёл:" + i.value; i.remove(); } });
+  }
+});
+</script></body></html>"""
+
+
+@pytest.mark.skipif(_chromium() is None, reason="Playwright Chromium not installed")
+def test_real_chromium_go_to_link_replaces_the_remembered_link():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        browser_ = pw.chromium.launch(executable_path=_chromium())
+        page = browser_.new_page(viewport=cb.VIEWPORT)
+        page.set_content(ONEC_GO)
+        p = cb.Page(page.context, page)
+        assert p.onec_go("https://h/b/ru_RU/#e1cib/list/%D0%A1%D0%BF%D1%80%D0%B0%D0%B2%D0%BE%D1%87%D0%BD%D0%B8%D0%BA.%D0%9A")
+        assert page.title() == "Перешёл:e1cib/list/Справочник.К"
+        browser_.close()

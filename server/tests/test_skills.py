@@ -239,3 +239,88 @@ def test_bitrix24_read_without_webhook_explains_how_to_add_one(session, monkeypa
     user = _user(session, "nobx@example.com")
     result = bitrix.execute(session, user, None, "bitrix24_read", {"method": "crm.deal.list"})
     assert result.error == "no_credential" and "Входящий вебхук" in result.content
+
+
+def test_bitrix24_write_methods_are_separate_and_never_delete() -> None:
+    from app.agent import bitrix
+
+    assert bitrix.build_call({"method": "tasks.task.add", "params": {"fields": {"TITLE": "x"}}}, write=True)[0] == "tasks.task.add"
+    for method in ("crm.deal.add", "crm.deal.update", "crm.timeline.comment.add", "task.commentitem.add", "tasks.task.complete"):
+        assert bitrix.build_call({"method": method}, write=True)[0] == method
+    for method in ("crm.deal.delete", "tasks.task.delete", "crm.contact.delete", "batch", "crm.deal.list"):
+        with pytest.raises(bitrix.BxError):
+            bitrix.build_call({"method": method}, write=True)
+    assert not bitrix.WRITE_METHODS & bitrix.METHODS
+    assert not any(m.endswith(".delete") for m in bitrix.WRITE_METHODS)
+
+
+def test_bitrix24_write_only_on_a_training_portal(session, monkeypatch) -> None:
+    import httpx
+
+    from app.agent import bitrix
+
+    monkeypatch.setenv("VAULT_MASTER_KEY", KEY)
+    monkeypatch.setenv("HELI_BITRIX_SANDBOX_HOSTS", "demo.bitrix24.ru")
+    user = _user(session, "bxw@example.com")
+    store_credential(session, user, "romashka.bitrix24.ru", "webhook", "https://romashka.bitrix24.ru/rest/7/qwe789/")
+    store_credential(session, user, "demo.bitrix24.ru", "webhook", "https://demo.bitrix24.ru/rest/1/abc123/")
+    session.flush()
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, json={"result": {"task": {"id": "42", "title": "Пересчитать"}}})
+
+    args = {"method": "tasks.task.add", "params": {"fields": {"TITLE": "Пересчитать", "RESPONSIBLE_ID": 1}}}
+    live = bitrix.execute(session, user, None, "bitrix24_write", {**args, "portal": "romashka.bitrix24.ru"},
+                          transport=httpx.MockTransport(handler))
+    assert live.error == "write_forbidden" and "на экране" in live.content and seen == []
+    demo = bitrix.execute(session, user, None, "bitrix24_write", {**args, "portal": "demo.bitrix24.ru"},
+                          transport=httpx.MockTransport(handler))
+    assert demo.error is None and '"id": "42"' in demo.content and "bitrix24_read" in demo.content
+    assert seen == ["https://demo.bitrix24.ru/rest/1/abc123/tasks.task.add.json"]
+    # The read tool still refuses a write, so a live portal cannot be changed through it.
+    refused = bitrix.execute(session, user, None, "bitrix24_read", {**args, "portal": "romashka.bitrix24.ru"})
+    assert refused.error == "bad_method" and "bitrix24_write" in refused.content
+    assert bitrix.is_sandbox("https://b24-lvsc4f.bitrix24.ru/crm/") and not bitrix.is_sandbox("romashka.bitrix24.ru")
+
+
+def test_bitrix24_webhook_goes_before_the_sign_in(session, monkeypatch) -> None:
+    import uuid as _uuid
+
+    from app import cloud_browser as cb
+    from app.agent import credentials
+
+    monkeypatch.setenv("VAULT_MASTER_KEY", KEY)
+    user = _user(session, "bxc@example.com")
+    store_credential(session, user, "b24-lvsc4f.bitrix24.ru", "diggo@example.com", SECRET)
+    store_credential(session, user, "b24-lvsc4f.bitrix24.ru", "webhook", "https://b24-lvsc4f.bitrix24.ru/rest/1/abc123/")
+    session.flush()
+    found = credentials.execute(session, user, None, "find_credential", {"site": "b24-lvsc4f.bitrix24.ru"})
+    assert found.content.startswith("Для b24-lvsc4f.bitrix24.ru в «Доступах» есть вебхук")
+    assert "bitrix24_write" in found.content and "diggo@example.com" in found.content and "abc123" not in found.content
+
+    class Pool:
+        def reserve(self, *a, **kw):
+            return None
+
+        def call(self, *a, **kw):
+            return cb.Result("Вход", None, None)
+
+        def captcha(self, user_id):
+            return True
+
+        def url(self, user_id):
+            return "https://auth2.bitrix24.net/oauth/?captcha"
+
+        def frame_version(self, user_id):
+            return 1
+
+    asked = []
+    monkeypatch.setattr(cb, "pool", lambda: Pool())
+    monkeypatch.setattr(cb, "ask_for_captcha", lambda *a, **kw: asked.append(a) or False)
+    result = cb.execute(session, user, _uuid.uuid4(), "browser_open", {"url": "https://b24-lvsc4f.bitrix24.ru/"})
+    assert result.error == "captcha_use_rest" and "bitrix24_read" in result.content
+    assert asked == []
+    assert cb._bitrix_portal("https://auth2.bitrix24.net/x", "") == ""
+    assert cb._bitrix_portal("https://avito.ru/", "") is None

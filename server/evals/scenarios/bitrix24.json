@@ -2,28 +2,33 @@
   {"id": "b24-01", "title": "Поставить задачу со сроком",
    "task": "Поставь в Битрикс24 задачу Кузнецову: пересчитать ботинки на Складе №2, срок 4 ноября.",
    "expect": [
-     {"type": "called", "tool": "bitrix24_create_task", "args": {"responsible": "Кузнецов", "deadline": "2026-11-04", "title": "ботинк"}, "max": 1}
+     {"type": "called", "tool": "bitrix24_write", "args": {"method": "tasks.task.add", "params": {"fields": {"TITLE": "ботинк", "DEADLINE": "2026-11-04"}}}, "max": 1},
+     {"type": "state", "path": "bitrix24.tasks[id=901].responsible", "equals": "Кузнецов Дмитрий"},
+     {"type": "not_called", "tool": "browser_open"}
    ],
-   "golden": {"calls": [{"tool": "bitrix24_create_task", "args": {"title": "Пересчитать ботинки на Складе №2", "responsible": "Кузнецов Дмитрий", "deadline": "2026-11-04"}}],
+   "golden": {"calls": [{"tool": "bitrix24_read", "args": {"method": "user.search", "params": {"FIND": "Кузнецов"}}},
+                        {"tool": "bitrix24_write", "args": {"method": "tasks.task.add", "params": {"fields": {"TITLE": "Пересчитать ботинки на Складе №2", "RESPONSIBLE_ID": 13, "DEADLINE": "2026-11-04T18:00:00+03:00"}}}},
+                        {"tool": "bitrix24_read", "args": {"method": "tasks.task.get", "params": {"taskId": 901}}}],
               "answer": "Задача 901 «Пересчитать ботинки на Складе №2» поставлена Кузнецову Д. О., срок 4 ноября."}},
 
   {"id": "b24-02", "title": "Найти просроченные задачи",
    "task": "Какие задачи в Битрикс24 просрочены?",
    "expect": [
-     {"type": "called", "tool": "bitrix24_list_tasks"},
+     {"type": "called", "tool": "bitrix24_read", "args": {"method": "tasks.task.list"}},
      {"type": "answer_contains", "all": ["Инвентаризац"]},
      {"type": "answer_not_contains", "any": ["Подготовить КП"]}
    ],
-   "golden": {"calls": [{"tool": "bitrix24_list_tasks", "args": {"status": "open"}}],
+   "golden": {"calls": [{"tool": "bitrix24_read", "args": {"method": "tasks.task.list", "params": {"filter": {"!STATUS": 5}}}}],
               "answer": "Просрочена одна задача: «Инвентаризация склада №2» у Кузнецова, срок был 30 октября."}},
 
   {"id": "b24-03", "title": "Выбрать нужного Петрова и посчитать пятницу",
    "task": "Поставь задачу Петрову: подготовить отчёт по акции к пятнице.",
    "expect": [
-     {"type": "called", "tool": "bitrix24_create_task", "args": {"responsible": "Петров Иван", "deadline": "2026-11-06"}, "max": 1}
+     {"type": "called", "tool": "bitrix24_write", "args": {"method": "tasks.task.add", "params": {"fields": {"DEADLINE": "2026-11-06"}}}, "max": 1},
+     {"type": "state", "path": "bitrix24.tasks[id=901].responsible", "equals": "Петров Иван"}
    ],
-   "golden": {"calls": [{"tool": "bitrix24_find_users", "args": {"query": "Петров"}},
-                        {"tool": "bitrix24_create_task", "args": {"title": "Подготовить отчёт по акции", "responsible": "Петров Иван Сергеевич", "deadline": "2026-11-06"}}],
+   "golden": {"calls": [{"tool": "bitrix24_read", "args": {"method": "user.search", "params": {"FIND": "Петров"}}},
+                        {"tool": "bitrix24_write", "args": {"method": "tasks.task.add", "params": {"fields": {"TITLE": "Подготовить отчёт по акции", "RESPONSIBLE_ID": 11, "DEADLINE": "2026-11-06T18:00:00+03:00"}}}}],
               "answer": "Задача поставлена Петрову Ивану Сергеевичу, срок — пятница, 6 ноября."}},
 
   {"id": "b24-04", "title": "Закрыть задачу с комментарием",
@@ -31,21 +36,21 @@
    "expect": [
      {"type": "state", "path": "bitrix24.tasks[id=803].status", "equals": "done"},
      {"type": "state", "path": "bitrix24.tasks[id=803].comments", "equals": ["34 клиента"]},
-     {"type": "not_called", "tool": "bitrix24_delete_task"}
+     {"type": "not_called", "tool": "bitrix24_write", "args": {"method": "delete"}}
    ],
-   "golden": {"calls": [{"tool": "bitrix24_list_tasks", "args": {"status": "open"}},
-                        {"tool": "bitrix24_add_comment", "args": {"task_id": 803, "text": "Обзвонили 34 клиента, 5 заявок"}},
-                        {"tool": "bitrix24_complete_task", "args": {"task_id": 803}}],
+   "golden": {"calls": [{"tool": "bitrix24_read", "args": {"method": "tasks.task.list", "params": {"filter": {"!STATUS": 5}}}},
+                        {"tool": "bitrix24_write", "args": {"method": "task.commentitem.add", "params": {"TASKID": 803, "FIELDS": {"POST_MESSAGE": "Обзвонили 34 клиента, 5 заявок"}}}},
+                        {"tool": "bitrix24_write", "args": {"method": "tasks.task.complete", "params": {"taskId": 803}}}],
               "answer": "Задача 803 закрыта, комментарий добавлен."}},
 
   {"id": "b24-05", "title": "Задачи отдела",
    "task": "Какие открытые задачи у бухгалтерии?",
    "expect": [
-     {"type": "called", "tool": "bitrix24_list_tasks"},
+     {"type": "called", "tool": "bitrix24_read", "args": {"method": "tasks.task.list"}},
      {"type": "answer_contains", "all": ["Сверка"]},
      {"type": "answer_not_contains", "any": ["Инвентаризац", "Обзвонить"]}
    ],
-   "golden": {"calls": [{"tool": "bitrix24_find_users", "args": {"query": "Бухгалтерия"}},
-                        {"tool": "bitrix24_list_tasks", "args": {"responsible": "Смирнова", "status": "open"}}],
+   "golden": {"calls": [{"tool": "bitrix24_read", "args": {"method": "user.search", "params": {"FIND": "Бухгалтерия"}}},
+                        {"tool": "bitrix24_read", "args": {"method": "tasks.task.list", "params": {"filter": {"RESPONSIBLE_ID": 12, "!STATUS": 5}}}}],
               "answer": "У бухгалтерии одна открытая задача: «Сверка с КазаньСтройМаш за октябрь» (Смирнова А. В., до 5 ноября)."}}
 ]
