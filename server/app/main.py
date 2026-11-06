@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.agent.credentials import register as register_credentials
+from app.agent.google_analytics import register as register_ga4
 from app.agent.bitrix import register as register_bitrix
 from app.agent.moysklad import register as register_moysklad
 from app.agent.http_tool import register as register_http
@@ -42,6 +43,7 @@ def create_app() -> FastAPI:
     register_http()
     register_mail()
     register_direct()
+    register_ga4()
     register_knowledge()
     register_cloud_browser(background=True)
     return app

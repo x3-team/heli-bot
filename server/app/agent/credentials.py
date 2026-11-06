@@ -112,6 +112,14 @@ def execute(session, user, task_id, name: str, args: dict) -> ClientResult:
         username = str(args.get("username") or "").strip()
         if not username:
             return ClientResult("Ошибка: укажи логин или email", "bad_args")
+        from app.agent.google_analytics import _is_sandbox_site
+
+        if _is_sandbox_site(site):
+            # The training GA4 list is the user's call, not the model's: a page could ask to «whitelist» a live ID.
+            return ClientResult(
+                "Ошибка: учебный ресурс GA4 (ga4-sandbox) добавляет только пользователь в «Доступах» приложения.",
+                "write_forbidden",
+            )
         given = args.get("password")
         password = given.strip() if isinstance(given, str) and given.strip() and "<CREDENTIAL" not in given else ""
         made_up = not password

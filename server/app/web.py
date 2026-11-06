@@ -177,6 +177,22 @@ def _wikipedia(client: httpx.Client, query: str, limit: int) -> list[SearchHit]:
 # --- page reading -----------------------------------------------------------
 
 
+# Hit-collection endpoints of web analytics. A request there is not a read: it records a visit or an event in
+# someone's statistics (the getheli site, a client's site). Refused for every tool before DNS; the only way to
+# send a GA4 event is ga4_send_event, and only to a training Measurement ID.
+_TRACKING_HOSTS = ("google-analytics.com", "analytics-alv.google.com", "stats.g.doubleclick.net", "mc.webvisor.org", "mc.webvisor.com")
+_TRACKING_PATHS = re.compile(r"/(?:debug/)?(?:mp/|g/|j/|r/)?collect\b|/batch\b", re.I)
+
+
+def is_tracking_hit(host: str, path: str) -> bool:
+    host = (host or "").lower().rstrip(".")
+    if any(host == h or host.endswith("." + h) for h in _TRACKING_HOSTS):
+        return True
+    if re.fullmatch(r"mc\.yandex\.[a-z.]+", host):  # Метрика: /watch, /collect, /webvisor…
+        return True
+    return host in {"analytics.google.com", "www.googletagmanager.com"} and bool(_TRACKING_PATHS.search(path))
+
+
 def check_url(url: str, resolver=socket.getaddrinfo) -> str:
     """Allow only public http(s) addresses. Returns the normalised URL.
 
@@ -193,6 +209,8 @@ def check_url(url: str, resolver=socket.getaddrinfo) -> str:
     if parts.username or parts.password:
         raise WebError("bad_url")
     host = parts.hostname
+    if is_tracking_hit(host, parts.path or "/"):
+        raise WebError("tracking_hit")
     if host.lower() in {"localhost"} or host.lower().endswith((".localhost", ".local", ".internal")):
         raise WebError("blocked_address")
     try:

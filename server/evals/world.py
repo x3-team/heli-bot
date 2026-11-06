@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.agent import bitrix as _bx
+from app.agent import google_analytics as _ga
 
 BASE_WORLD_PATH = Path(__file__).with_name("base_world.json")
 
@@ -98,6 +99,8 @@ TOOLS: list[dict] = [
 # Битрикс24 — те же инструменты и те же списки методов, что в проде (app.agent.bitrix): REST через вебхук.
 # Портал мира учебный, поэтому bitrix24_write разрешён; удалений нет и здесь.
 TOOLS += [copy.deepcopy(_bx.TOOL), copy.deepcopy(_bx.WRITE_TOOL)]
+# GA4 — те же схемы и та же проверка учебного Measurement ID, что в проде (app.agent.google_analytics).
+TOOLS += [copy.deepcopy(_ga.READ_TOOL), copy.deepcopy(_ga.SEND_TOOL)]
 
 TOOL_NAMES = {t["function"]["name"] for t in TOOLS}
 
@@ -393,6 +396,54 @@ class World:
                 task["responsible"] = self._b24_user_name(fields["RESPONSIBLE_ID"])
             return {"result": {"task": self._b24_task_out(task)}}
         raise ToolError("not_in_world")
+
+    # --- Google Analytics 4 ------------------------------------------------
+    def _ga4(self) -> dict:
+        return self.state["ga4"]
+
+    def _t_ga4_read(self, report: str, property: Any = "", params: Any = None) -> dict:
+        try:
+            _ga.build_read({"report": report, "property": property, "params": params})
+        except _ga.GaError as exc:
+            raise ToolError(exc.code) from None
+        if report == "account_summaries":
+            return {"accountSummaries": [{"propertySummaries": [{"property": f"properties/{pid}", "displayName": p["name"]}
+                                                                 for pid, p in self._ga4()["properties"].items()]}]}
+        prop = self._ga4()["properties"].get(_digits(property))
+        if prop is None:
+            raise ToolError("403: нет доступа к ресурсу")
+        if report == "key_events":
+            return {"keyEvents": [{"eventName": name} for name in prop["key_events"]]}
+        if report == "data_streams":
+            return {"dataStreams": [{"type": "WEB_DATA_STREAM", "webStreamData": {"measurementId": prop["measurement_id"]}}]}
+        if report == "realtime_report":
+            counts: dict[str, int] = {}
+            for hit in self._ga4()["hits"]:
+                if hit["measurement_id"] == prop["measurement_id"]:
+                    counts[hit["name"]] = counts.get(hit["name"], 0) + 1
+            return {"rows": [{"dimensionValues": [{"value": n}], "metricValues": [{"value": str(c)}]} for n, c in counts.items()]}
+        if report == "metadata":
+            return {"dimensions": [{"apiName": "eventName"}, {"apiName": "date"}],
+                    "metrics": [{"apiName": m} for m in ("eventCount", "totalUsers", "activeUsers", "keyEvents", "sessions")]}
+        rows = prop["events"]
+        return {"dimensionHeaders": [{"name": "eventName"}],
+                "metricHeaders": [{"name": "eventCount"}, {"name": "totalUsers"}, {"name": "keyEvents"}],
+                "rows": [{"dimensionValues": [{"value": r["eventName"]}],
+                          "metricValues": [{"value": str(r["eventCount"])}, {"value": str(r["totalUsers"])},
+                                           {"value": str(r["keyEvents"])}]} for r in rows],
+                "totals": [{"metricValues": [{"value": str(prop["total_users"])}]}]}
+
+    def _t_ga4_send_event(self, measurement_id: str, events: Any, client_id: str = "", validate: bool = False) -> dict:
+        try:
+            mid, clean, _, check_only = _ga.check_send(
+                {"measurement_id": measurement_id, "events": events, "client_id": client_id, "validate": validate},
+                {_ga.normalize_id(i) for i in self._ga4()["sandbox_ids"]},
+            )
+        except _ga.GaError as exc:
+            raise ToolError(f"{exc.code}: {exc.text}") from None
+        if not check_only:
+            self._ga4()["hits"].extend({"measurement_id": mid, "name": e["name"]} for e in clean)
+        return {"ok": True, "measurement_id": mid, "sent": [e["name"] for e in clean], "validate_only": check_only}
 
     # --- 1С ---------------------------------------------------------------
     def _t_onec_stock(self, query: str, warehouse: str = "") -> dict:

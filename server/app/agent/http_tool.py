@@ -9,7 +9,8 @@ is cut out before the model sees it.
 
 Read-only. Live accounts are read only. GET and HEAD are reads. POST/PUT/PATCH/DELETE are allowed on
 a live host only for endpoints that read (READ_ENDPOINTS: Ozon …/list|info, Direct method «get» and
-reports, Metrika has no POST reads). Writes go only to sandboxes (SANDBOX_HOSTS plus
+reports, GA4 Data API runReport; Metrika has no POST reads). Hit-collection endpoints of GA4 and
+Метрика (Measurement Protocol, mc.yandex.ru/watch) are refused for every method, even GET. Writes go only to sandboxes (SANDBOX_HOSTS plus
 HELI_HTTP_SANDBOX_HOSTS). There is no switch that turns writes on for a live account.
 """
 
@@ -68,6 +69,12 @@ READ_ENDPOINTS: tuple[ReadRule, ...] = (
     ReadRule("api.direct.yandex.ru", re.compile(r"^/json/v5/(?!reports)[a-z]+/?$"), ("get", "checkCampaigns", "checkDictionaries", "check")),
     ReadRule("api.direct.yandex.com", re.compile(r"^/json/v5/reports/?$")),
     ReadRule("api.direct.yandex.ru", re.compile(r"^/json/v5/reports/?$")),
+    # Google Analytics Data API: reports are POST by protocol and only read. The Admin API has no POST read here:
+    # property settings are never changed. Measurement Protocol hits are refused in app.web.check_url.
+    ReadRule("analyticsdata.googleapis.com", re.compile(
+        r"^/v1(?:beta|alpha)/properties/\d+:(?:runReport|runPivotReport|batchRunReports|batchRunPivotReports"
+        r"|runRealtimeReport|checkCompatibility)$"
+    )),
     # Wildberries statistics and content: POST list/filter endpoints that only read.
     ReadRule("content-api.wildberries.ru", re.compile(r"^/content/v\d+/(?:get/cards/list|cards/limits|directory/[\w-]+)/?$")),
     ReadRule("seller-analytics-api.wildberries.ru", re.compile(r"^/api/v\d+/nm-report/(?:detail|grouped)(?:/history)?/?$")),
@@ -266,6 +273,13 @@ def prepare(args: dict, lookup, resolver=None) -> tuple[Prepared, list[str]]:
     try:
         url = check_url(raw_url, resolver) if resolver else check_url(raw_url)
     except WebError as exc:
+        if exc.code == "tracking_hit":
+            raise HttpToolError(
+                "tracking_forbidden",
+                "Ошибка: это адрес сбора статистики (хиты GA4 / Метрики). Запрос туда записывает визит или событие в "
+                "чужую статистику, поэтому не отправляется ни на боевой сайт, ни «для проверки». Читай отчёты "
+                "(ga4_read, metrika_read); тестовое событие — только ga4_send_event на учебный Measurement ID.",
+            ) from None
         raise HttpToolError(exc.code, f"Ошибка: адрес недоступен ({exc.code}).") from None
     host = (urlsplit(url).hostname or "").lower()
     mode = check_policy(method, url, body)
