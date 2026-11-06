@@ -45,6 +45,19 @@ def _tool(name: str, description: str, params: dict) -> dict:
     return {"type": "function", "function": {"name": name, "description": description, "parameters": params}}
 
 
+
+
+def _yandex_tools() -> list[dict]:
+    """direct_api и metrika_read — те же схемы, что в проде (app.agent.yandex_direct)."""
+    from app.agent import yandex_direct
+
+    return [copy.deepcopy(yandex_direct.DIRECT_TOOL), copy.deepcopy(yandex_direct.METRIKA_TOOL)]
+
+
+# Кабинеты, куда без API-токена ходить нельзя: вход в Яндекс ID с сервера упирается в капчу (dx-12, 06.11.2026).
+YANDEX_UI_HOSTS = ("direct.yandex.", "metrika.yandex.", "passport.yandex.", "getheli.ru")
+
+
 TOOLS: list[dict] = [
     _tool("web_search", "Поиск в интернете. Возвращает заголовки, ссылки и сниппеты.",
           _s(query=_str("Поисковый запрос"))),
@@ -90,6 +103,9 @@ TOOLS: list[dict] = [
           _s(message_id=_str("ID письма"))),
     _tool("mail_send", "Отправить письмо из Яндекс 360.",
           _s(to=_str("Адрес"), subject=_str("Тема"), body=_str("Текст"))),
+    _tool("browser_open", "Открыть адрес в облачном браузере «Компьютер агента» (вход в кабинеты, работа на экране).",
+          _s(url=_str("Адрес"))),
+    *_yandex_tools(),
     _tool("ask_confirmation", "Спросить пользователя перед необратимым или внешним действием.",
           _s(action=_str("Имя инструмента, который хочешь вызвать"), details=_str("Что именно будет сделано"))),
     _tool("ask_user", "Задать пользователю уточняющий вопрос, если без ответа задачу не решить.",
@@ -483,6 +499,34 @@ class World:
                "subject": subject, "body": body, "date": self.state["today"]}
         mail["messages"].append(msg)
         return {"ok": True, "id": msg["id"]}
+
+
+    # --- Яндекс Директ и Метрика ------------------------------------------
+    # В мире нет OAuth-токена: direct_api и metrika_read отвечают тем же текстом, что прод без записи в «Доступах».
+    def _yandex_no_token(self, text: str) -> None:
+        if self.state.get("yandex", {}).get("token"):
+            raise ToolError("not_in_world")
+        raise ToolError(f"no_credential: {text}")
+
+    def _t_direct_api(self, service: str, method: str = "get", params: Any = None, client_login: str = "",
+                      goals: Any = None, sandbox: bool = False) -> dict:
+        from app.agent import yandex_direct
+
+        self._yandex_no_token(yandex_direct.NO_TOKEN)
+        return {}
+
+    def _t_metrika_read(self, report: str, counter: Any = None, params: Any = None) -> dict:
+        from app.agent import yandex_direct
+
+        self._yandex_no_token(yandex_direct.NO_METRIKA_TOKEN)
+        return {}
+
+    def _t_browser_open(self, url: str) -> dict:
+        if any(host in url.lower() for host in YANDEX_UI_HOSTS):
+            from app.cloud_browser import CAPTCHA_TEXT
+
+            raise ToolError(f"captcha: {CAPTCHA_TEXT}")
+        return self._t_open_url(url)
 
     # --- человек ----------------------------------------------------------
     def _t_ask_confirmation(self, action: str, details: str = "") -> dict:

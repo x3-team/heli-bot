@@ -390,6 +390,29 @@ def test_direct_without_token_explains_how_to_add_it(session, monkeypatch) -> No
     user = _user(session)
     result = yandex_direct.execute(session, user, None, "direct_api", {"service": "campaigns"})
     assert result.error == "no_credential" and "oauth.yandex.ru" in result.content
+    metrika = yandex_direct.execute(session, user, None, "metrika_read", {"report": "stat", "params": {"ids": 1}})
+    assert metrika.error == "no_credential" and "metrika.yandex.ru" in metrika.content
+
+
+# dx-12, 06.11.2026: «пока его нет, данные можно смотреть в кабинете на экране» увело модель в UI и на капчу.
+UI_HINTS = ("на экране", "кабинет", "открой", "откройте", "зайди", "войди", "войдите", "http://", "https://",
+            "browser", "Компьютер агента")
+
+
+@pytest.mark.parametrize("text", [yandex_direct.NO_TOKEN, yandex_direct.NO_METRIKA_TOKEN])
+def test_no_token_text_points_only_to_dostupy(text: str) -> None:
+    low = text.lower()
+    assert "«Доступах»" in text and "логин token" in text and "пароль — OAuth-токен" in text
+    assert not [hint for hint in UI_HINTS if hint.lower() in low], text
+    assert "капч" in low and "остановись" in low
+
+
+def test_direct_playbook_stops_without_token_instead_of_opening_the_cabinet() -> None:
+    from app.skills.playbooks import playbook
+
+    guide = playbook("direct").guide
+    assert "Кабинет на экране — когда API-токена нет" not in guide
+    assert "BLOCKED: нет токена" in guide and "не открывай" in guide
 
 
 def test_metrika_is_get_only_with_oauth_header(session, monkeypatch) -> None:
