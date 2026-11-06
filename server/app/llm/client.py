@@ -7,7 +7,8 @@ import os
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from openai import OpenAI
+import httpx
+from openai import NOT_GIVEN, OpenAI
 
 from app.llm.catalog import CatalogError, upstream
 from app.llm.prices import cost_rub
@@ -32,7 +33,10 @@ def failure_detail(exc: BaseException) -> str:
     key = os.environ.get("HELI_API_KEY", "")
     if key and len(key) >= 8:
         text = text.replace(key, "<KEY>")
-    return " ".join(part for part in (str(status) if status else "", f"{type(exc).__name__}: {text}") if part)
+    cause = exc.__cause__ or exc.__context__
+    # APITimeoutError alone does not say whether the connection or the answer was slow.
+    why = f" ({type(cause).__name__})" if cause is not None and type(cause).__name__ != type(exc).__name__ else ""
+    return " ".join(part for part in (str(status) if status else "", f"{type(exc).__name__}{why}: {text}") if part)
 
 
 @dataclass
@@ -76,12 +80,13 @@ class HeliClient:
         self._client = client
 
     @classmethod
-    def from_env(cls) -> HeliClient:
+    def from_env(cls, max_retries: int = 0, timeout: float | httpx.Timeout | None = None) -> HeliClient:
         key = os.environ.get("HELI_API_KEY", "")
         if not key:
             raise HeliError("missing_api_key")
         base_url = os.environ.get("HELI_BASE_URL", "https://getheli.ru/v1")
-        return cls(OpenAI(api_key=key, base_url=base_url, max_retries=0))
+        return cls(OpenAI(api_key=key, base_url=base_url, max_retries=max_retries,
+                          timeout=NOT_GIVEN if timeout is None else timeout))
 
     def complete(
         self,

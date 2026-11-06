@@ -91,7 +91,11 @@ def test_getheli_router_smoke() -> None:
         if os.environ.get("CI"):
             pytest.fail("HELI_API_KEY is not set")
         pytest.skip("HELI_API_KEY is not set")
-    client = HeliClient.from_env()
+    import httpx
+
+    # A live call from a GitHub runner to getheli.ru: the network on the way, not only the gateway.
+    # Two retries and a longer connect, so one slow connection is not a red main; a real refusal still fails.
+    client = HeliClient.from_env(max_retries=2, timeout=httpx.Timeout(60.0, connect=20.0))
     try:
         completion = client.complete(
             "heli-fast",
