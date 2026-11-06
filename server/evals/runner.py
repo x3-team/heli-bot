@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from evals.checks import run_check
-from evals.world import TOOLS, World
+from evals.world import World
 
 SCENARIOS_DIR = Path(__file__).with_name("scenarios")
 DEFAULT_BUDGET = {"max_steps": 12, "max_rub": 3.0}
@@ -86,7 +86,10 @@ def run_scenario(scenario: dict, agent: Agent) -> Result:
             if not _accepts(agent, "history"):
                 raise TypeError("агент не принимает history, а сценарий — продолжение диалога")
             extra["history"] = scenario["history"]
-        out = agent(task_text(scenario, world), TOOLS, call_tool, budget, **extra) or {}
+        if scenario.get("study_first") and _accepts(agent, "study_first"):
+            # Как в проде, когда сервис незнакомый и в базе знаний о нём нет (task_run.needs_study).
+            extra["study_first"] = True
+        out = agent(task_text(scenario, world), world.tools(), call_tool, budget, **extra) or {}
         crash = None
     except Exception as exc:  # агент упал: это провал сценария, а не всего прогона
         out, crash = {}, f"агент упал: {type(exc).__name__}: {exc}"

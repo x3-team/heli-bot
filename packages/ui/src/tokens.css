@@ -750,3 +750,9 @@ button.link { background: none; border: 0; padding: 0; color: inherit; text-deco
   line-height: 1;
 }
 .update-later:hover { background: var(--soft); }
+
+.connect-help { display: flex; flex-direction: column; gap: 8px; }
+.connect-help summary { cursor: pointer; font-weight: 600; }
+.connect-help[open] summary { margin-bottom: 8px; }
+.connect-recipes { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.connect-recipes li { display: flex; flex-direction: column; gap: 2px; }

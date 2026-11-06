@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from app.agent.control import Control, NoControl, Stopped
+from app.agent import write_policy
 from app.agent.guard import Guard, describe
 from app.llm.client import Completion
 from app.llm.tools import parse_args
@@ -150,7 +151,7 @@ UNSAVED_NOTE = (
 # web_search / open_url. The loop asks twice at most; an answer given without any look is marked unverified.
 STUDY_TOOLS = {"knowledge_search", "web_search", "open_url", "fetch_page"}
 ACT_TOOLS = {
-    "http_request", "direct_api", "browser_click", "browser_type", "browser_press", "mail_send",
+    "http_request", "direct_api", "ga4_send_event", "browser_click", "browser_type", "browser_press", "mail_send",
     "save_credential", "save_file", "use_computer",
 }
 STUDY_MAX_NUDGES = 2
@@ -312,12 +313,23 @@ def _address(text: str) -> str | None:
     return None
 
 
+# http_tool.UA_REJECTED_CODE: the service refused the User-Agent, a new header fixes it, not a browser.
+UA_REJECTED = "user_agent_rejected"
+
+
 def repeat_key(name: str, args: dict) -> str | None:
-    """Identity of a call for the repeat check: the tool and its text arguments (limits and counts aside).
-    Browser tools and confirmations are left out: the page or the user's answer can change between calls."""
+    """Identity of a call for the repeat check: the tool and its text and object arguments (limits and
+    counts aside). Objects count: http_request with new headers (a User-Agent the service asked for) or a
+    new query is a different call, not a repeat. Browser tools and confirmations are left out: the page
+    or the user's answer can change between calls."""
     if name.startswith("browser_") or name == CONFIRM_TOOL:
         return None
-    texts = {k: v.strip().lower() for k, v in args.items() if isinstance(v, str)}
+    texts: dict[str, str] = {}
+    for k, v in args.items():
+        if isinstance(v, str):
+            texts[k] = v.strip().lower()
+        elif isinstance(v, (dict, list)) and v:
+            texts[k] = json.dumps(v, ensure_ascii=False, sort_keys=True, default=str).lower()
     return name + json.dumps(texts, ensure_ascii=False, sort_keys=True)
 
 
@@ -519,12 +531,17 @@ def run_agent(
                 key = repeat_key(call.name, args)
                 if key and key in failed:
                     # The model repeats a call that already failed the same way: don't spend a step on it.
+                    hint = (
+                        "Не повторяй его: передай в headers User-Agent, который требует документация API. "
+                        "Браузер для этого не нужен."
+                        if failed[key] == UA_REJECTED
+                        else "Не повторяй его, попробуй другие аргументы или другой инструмент."
+                    )
                     messages.append(
                         {
                             "role": "tool",
                             "tool_call_id": call.id,
-                            "content": f"Не выполнено: этот вызов уже вернул ошибку ({failed[key]}). "
-                            "Не повторяй его, попробуй другие аргументы или другой инструмент.",
+                            "content": f"Не выполнено: этот вызов уже вернул ошибку ({failed[key]}). {hint}",
                         }
                     )
                     continue
@@ -562,8 +579,12 @@ def run_agent(
                         messages.append({"role": "tool", "tool_call_id": call.id, "content": SCREENSHOT_LIMIT_TEXT})
                         continue
                 approved_here = False
+                policy_card = None
                 if guard.needs_approval(call.name, args):
-                    if guard.consume(call.name):
+                    # A live write shows the policy card (host, change, budget) even if the model asked
+                    # before: its own question may leave those out.
+                    policy_card = guard.card(call.name, args)
+                    if policy_card is None and guard.consume(call.name):
                         approved_here = True
                     elif not can_ask:
                         # The model skipped ask_confirmation: the loop asks, and never runs the tool unasked.
@@ -581,7 +602,7 @@ def run_agent(
                         label = None
                         if call.name == "browser_click" and isinstance(args.get("ref"), int):
                             label = guard.elements.get(args["ref"])
-                        ask_args = {"action": call.name, "details": describe(call.name, args, label)}
+                        ask_args = policy_card or {"action": call.name, "details": describe(call.name, args, label)}
                         answer = run_call(f"{call.id}_confirm{auto_ids}", CONFIRM_TOOL, ask_args)
                         calls_used += 1
                         if not approved(answer):
@@ -596,9 +617,10 @@ def run_agent(
                             continue
                         approved_here = True
                 run_args = {k: v for k, v in args.items() if not k.startswith("_")}
-                if approved_here and call.name == "browser_click":
-                    # The browser refuses a risky click by coordinates unless the loop says it was approved.
-                    run_args["_confirmed"] = True
+                if approved_here and (call.name == "browser_click" or policy_card is not None):
+                    # The browser refuses a risky click by coordinates, and a write tool a live write,
+                    # unless the loop says this very call was approved.
+                    run_args[write_policy.CONFIRMED_ARG] = True
                 result = run_call(call.id, call.name, run_args)
                 calls_used += 1
                 content = result.content

@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from app.agent import write_policy
+
 # Tool names that send, pay, delete or publish. Integrations may also mark a schema
 # with "x-heli-confirm": true.
 _RISKY_NAME = re.compile(
@@ -20,7 +22,15 @@ _RISKY_LABEL = re.compile(
     r"отправ|оплат|заплат|удал|опубликов|провест|перевест|перевод|списат|подписат|подтверд|выставить сч|send|pay|delete|remove|publish|submit",
     re.I,
 )
+_HTTP_WORDS = {"get", "head", "post", "put", "patch", "json", "api", "v"}
 _ELEMENT = re.compile(r"^\[(\d+)\]\s+(.*)$")
+
+
+def risky_verb(verb: str) -> bool:
+    """A dangerous API verb inside a method name: crm.deal.delete, POST /v1/send, keywordbids.set is not."""
+    words = re.split(r"[^a-zA-Z]+", re.sub(r"([a-z])([A-Z])", r"\1_\2", verb or ""))
+    # HTTP methods are not verbs here: POST is how most APIs write, DELETE stays risky.
+    return any(_RISKY_NAME.search(w.lower()) for w in words if w and w.lower() not in _HTTP_WORDS)
 
 
 def risky_tool(name: str, schema: dict | None = None) -> bool:
@@ -58,7 +68,19 @@ class Guard:
             return bool(label) and bool(_RISKY_LABEL.search(label))
         if name == "browser_type" and args.get("submit"):
             return False  # submitting a search box is fine; forms are sent with a button
+        decision = write_policy.classify(name, args)
+        if decision is not None:
+            # Tools with a write policy: live writes always ask, sandboxes ask only for dangerous verbs.
+            if decision.kind == write_policy.LIVE:
+                return True
+            if decision.kind == write_policy.SANDBOX:
+                return risky_verb(decision.verb) or risky_tool(name, self.schemas.get(name))
+            return False
         return risky_tool(name, self.schemas.get(name))
+
+    def card(self, name: str, args: dict) -> dict | None:
+        """The loop's own card for a live write. Such a write never uses the model's approvals."""
+        return write_policy.card(name, args)
 
     def record_approval(self, args: dict, approved_: bool) -> None:
         if not approved_:
