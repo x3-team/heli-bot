@@ -255,9 +255,22 @@ def admin_emails() -> set[str]:
     return {_normalize_email(part) for part in raw.split(",") if part.strip()}
 
 
+def training_emails() -> set[str]:
+    raw = get_settings().training_emails
+    return {_normalize_email(part) for part in raw.split(",") if part.strip()}
+
+
+def is_shared_account(user: User) -> bool:
+    return user.email == _normalize_email(get_settings().open_access_email)
+
+
+def is_training_account(user: User) -> bool:
+    return user.email in training_emails()
+
+
 def sync_admin(user: User) -> None:
-    """Admin rights follow HELI_ADMIN_EMAILS; the shared test account never has them."""
-    if user.email == _normalize_email(get_settings().open_access_email):
+    """Admin rights follow HELI_ADMIN_EMAILS; the shared and training accounts never have them."""
+    if is_shared_account(user) or is_training_account(user):
         should = False
     elif admin_emails():
         should = user.email in admin_emails()
@@ -265,6 +278,47 @@ def sync_admin(user: User) -> None:
         return  # not configured: keep whatever the database says
     if user.is_admin != should:
         user.is_admin = should
+
+
+def token_allowed(user: User, via: str | None) -> bool:
+    """Whether a token may act for this user under the current access settings.
+
+    With HELI_OPEN_ACCESS=0 a token handed out by /v1/auth/open never works, and neither do the shared
+    account's old tokens (they predate the `via` claim and could sit on anyone's PC). The shared
+    account stays usable only as a training account (HELI_TRAINING_EMAILS) with a fresh token from an
+    admin login code or the CLI, so its vault, tasks and quotas stay with it.
+    """
+    settings = get_settings()
+    if settings.open_access:
+        return True
+    if via == "open":
+        return False
+    if is_shared_account(user):
+        return is_training_account(user) and via is not None
+    return True
+
+
+def training_user(session: Session, email: str) -> User:
+    """Find or create an internal training account (only for HELI_TRAINING_EMAILS)."""
+    normalized = _normalize_email(email)
+    if normalized not in training_emails():
+        raise AuthError("not_training_account")
+    user = session.scalar(select(User).where(User.email == normalized))
+    if user is not None:
+        return user
+    now = datetime.now(timezone.utc)
+    user = User(
+        email=normalized,
+        consent_pdn=True,
+        consent_training=False,
+        is_admin=False,
+        monthly_limit_rub=get_settings().default_monthly_limit_rub,
+        trial_ends_at=now + TRIAL,
+        created_at=now,
+    )
+    session.add(user)
+    session.flush()
+    return user
 
 
 def open_access_user(session: Session, email: str) -> User:
@@ -305,12 +359,14 @@ def trial_active(user: User, now: datetime | None = None) -> bool:
     return moment < ends
 
 
-def issue_token(user_id: uuid.UUID) -> str:
+def issue_token(user_id: uuid.UUID, via: str = "login") -> str:
+    """`via` says how the token was obtained: login (password/code/reset), open, training."""
     secret = get_settings().jwt_secret
     if not secret:
         raise AuthError("auth_not_configured")
     payload = {
         "sub": str(user_id),
+        "via": via,
         "exp": datetime.now(timezone.utc) + TOKEN_TTL,
     }
     token = jwt.encode(payload, secret, algorithm="HS256")
@@ -319,12 +375,18 @@ def issue_token(user_id: uuid.UUID) -> str:
     return token
 
 
-def read_user_id(token: str) -> uuid.UUID:
+def read_token(token: str) -> tuple[uuid.UUID, str | None]:
+    """User id and the `via` claim (None for tokens issued before the claim existed)."""
     secret = get_settings().jwt_secret
     if not secret:
         raise AuthError("auth_not_configured")
     try:
         payload = jwt.decode(token, secret, algorithms=["HS256"])
-        return uuid.UUID(str(payload["sub"]))
+        via = payload.get("via")
+        return uuid.UUID(str(payload["sub"])), str(via) if via is not None else None
     except (jwt.PyJWTError, ValueError, KeyError) as exc:
         raise AuthError("token_invalid") from exc
+
+
+def read_user_id(token: str) -> uuid.UUID:
+    return read_token(token)[0]

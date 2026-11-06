@@ -509,6 +509,11 @@ export interface AdminUser {
   isAdmin: boolean;
   createdAt: string | null;
   trialActive: boolean;
+  isTraining: boolean;
+  weeklyLimitRub: string;
+  monthlyLimitRub: string;
+  weekPercent: number;
+  monthPercent: number;
 }
 
 function adminHeaders(token: string): Record<string, string> {
@@ -544,7 +549,17 @@ export async function adminListUsers(base: string, token: string): Promise<Admin
   const response = await send(base, "/v1/admin/users", { headers: adminHeaders(token) });
   if (!response.ok) throw new ApiError(await readError(response), response.status);
   const body = (await response.json()) as {
-    users: { id: string; email: string; is_admin: boolean; created_at: string | null; trial_active: boolean }[];
+    users: {
+      id: string;
+      email: string;
+      is_admin: boolean;
+      is_training?: boolean;
+      created_at: string | null;
+      trial_active: boolean;
+      weekly_limit_rub?: string;
+      monthly_limit_rub?: string;
+      usage?: { week_percent?: number; month_percent?: number };
+    }[];
   };
   return body.users.map((u) => ({
     id: u.id,
@@ -552,5 +567,28 @@ export async function adminListUsers(base: string, token: string): Promise<Admin
     isAdmin: u.is_admin,
     createdAt: u.created_at,
     trialActive: u.trial_active,
+    isTraining: Boolean(u.is_training),
+    weeklyLimitRub: u.weekly_limit_rub ?? "",
+    monthlyLimitRub: u.monthly_limit_rub ?? "",
+    weekPercent: Number(u.usage?.week_percent ?? 0),
+    monthPercent: Number(u.usage?.month_percent ?? 0),
   }));
+}
+
+/** Per-user limits in rubles. Omit a field to keep it; weekly 0 = automatic (monthly / 4 × 1.25). */
+export async function adminSetLimits(
+  base: string,
+  token: string,
+  userId: string,
+  limits: { weeklyRub?: number; monthlyRub?: number },
+): Promise<void> {
+  const body: Record<string, number> = {};
+  if (limits.monthlyRub !== undefined) body.monthly_limit_rub = limits.monthlyRub;
+  if (limits.weeklyRub !== undefined) body.weekly_limit_rub = limits.weeklyRub;
+  const response = await send(base, `/v1/admin/users/${encodeURIComponent(userId)}/limit`, {
+    method: "PATCH",
+    headers: adminHeaders(token),
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw new ApiError(await readError(response), response.status);
 }

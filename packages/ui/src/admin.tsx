@@ -4,6 +4,7 @@ import {
   adminCreateInvite,
   adminIssueCode,
   adminListUsers,
+  adminSetLimits,
   loadMe,
   type AdminUser,
 } from "./api";
@@ -17,6 +18,9 @@ export function AdminTesters({ apiBase, token }: { apiBase: string; token: strin
   const [code, setCode] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [limitUser, setLimitUser] = useState("");
+  const [weekly, setWeekly] = useState("");
+  const [monthly, setMonthly] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -106,10 +110,62 @@ export function AdminTesters({ apiBase, token }: { apiBase: string; token: strin
             <li key={user.id}>
               {user.email}
               {user.isAdmin ? " · админ" : ""}
+              {user.isTraining ? " · учебный" : ""}
               {user.trialActive ? " · пробная неделя" : ""}
+              {user.monthlyLimitRub
+                ? ` · неделя ${Math.round(Number(user.weeklyLimitRub))} ₽ (${user.weekPercent}%), месяц ${Math.round(
+                    Number(user.monthlyLimitRub),
+                  )} ₽ (${user.monthPercent}%)`
+                : ""}
             </li>
           ))}
         </ul>
+      ) : null}
+      {users.length ? (
+        <div className="stack" data-testid="admin-limits">
+          <label className="stack">
+            Лимиты пользователя
+            <select value={limitUser} onChange={(event) => setLimitUser(event.target.value)}>
+              <option value="">Выберите аккаунт</option>
+              {users.map((user) => (
+                <option key={user.id} value={user.id}>
+                  {user.email}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="row">
+            <input
+              value={weekly}
+              onChange={(event) => setWeekly(event.target.value)}
+              inputMode="decimal"
+              placeholder="Неделя, ₽ (0 — авто)"
+            />
+            <input
+              value={monthly}
+              onChange={(event) => setMonthly(event.target.value)}
+              inputMode="decimal"
+              placeholder="Месяц, ₽"
+            />
+            <button
+              type="button"
+              disabled={busy || !limitUser || (!weekly.trim() && !monthly.trim())}
+              onClick={() =>
+                void run(async () => {
+                  await adminSetLimits(apiBase, token, limitUser, {
+                    weeklyRub: weekly.trim() ? Number(weekly.replace(",", ".")) : undefined,
+                    monthlyRub: monthly.trim() ? Number(monthly.replace(",", ".")) : undefined,
+                  });
+                  setUsers(await adminListUsers(apiBase, token));
+                  setWeekly("");
+                  setMonthly("");
+                })
+              }
+            >
+              Сохранить лимиты
+            </button>
+          </div>
+        </div>
       ) : null}
     </section>
   );

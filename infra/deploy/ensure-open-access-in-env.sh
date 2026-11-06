@@ -2,6 +2,8 @@
 # Paid beta: every tester has an own account, so the shared test account is off.
 # Sets HELI_OPEN_ACCESS=0 and, when the deploy passes HELI_DEPLOY_ADMIN_EMAILS, writes HELI_ADMIN_EMAILS.
 # HELI_INVITE_ONLY is left as is (default on: new accounts need an invite from the admin).
+# The internal training account (the old shared owner@heli.local with its vault, tasks and quotas)
+# stays: HELI_TRAINING_EMAILS defaults to HELI_OPEN_ACCESS_EMAIL when the key is absent.
 set -euo pipefail
 
 ENV_FILE="${1:?env file path}"
@@ -31,6 +33,12 @@ set_key() {
 
 set_key HELI_OPEN_ACCESS 0
 log "set HELI_OPEN_ACCESS=0 (own accounts, sign-up by invite)"
+
+if ! grep -q '^HELI_TRAINING_EMAILS=' "$ENV_FILE"; then
+  shared="$(grep -E '^HELI_OPEN_ACCESS_EMAIL=' "$ENV_FILE" | tail -n1 | cut -d= -f2- || true)"
+  set_key HELI_TRAINING_EMAILS "${shared:-owner@heli.local}"
+  log "set HELI_TRAINING_EMAILS (training account kept)"
+fi
 
 if [ -n "$ADMIN_EMAILS" ]; then
   if ! printf '%s' "$ADMIN_EMAILS" | grep -Eq '^[A-Za-z0-9._%+@, -]+$'; then
