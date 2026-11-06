@@ -64,10 +64,11 @@ def test_service_a_answer_is_right_only_after_studying() -> None:
 
 def test_service_a_save_carries_the_source_and_the_date() -> None:
     world = World.build()
+    before = len(world.state.get("knowledge", []))
     saved = world.call("knowledge_save", {"topic": "t", "fact": "f", "source_url": "https://dev.lastochka-dostavka.example/api"})
     assert saved["checked"] == world.state["today"] and saved["source_url"].startswith("https://")
     refused = world.call("knowledge_save", {"topic": "t", "fact": "f", "source_url": "форум"})
-    assert "no_source" in refused["error"] and len(world.state["knowledge"]) == 1
+    assert "no_source" in refused["error"] and len(world.state["knowledge"]) == before + 1
 
 
 def test_repeat_question_uses_what_the_first_run_saved() -> None:
