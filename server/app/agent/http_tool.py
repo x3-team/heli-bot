@@ -7,10 +7,11 @@ page that talks the model into sending a token to another site gets a refusal, n
 model, the step stream and the trajectory see the placeholder; a secret echoed back in the response
 is cut out before the model sees it.
 
-Read-only. Live accounts are read only. GET and HEAD are reads. POST/PUT/PATCH/DELETE are allowed on
-a live host only for endpoints that read (READ_ENDPOINTS: Ozon …/list|info, Direct method «get» and
-reports, Metrika has no POST reads). Writes go only to sandboxes (SANDBOX_HOSTS plus
-HELI_HTTP_SANDBOX_HOSTS). There is no switch that turns writes on for a live account.
+Writes (app.agent.write_policy). GET and HEAD are reads, and so are POSTs to endpoints that read
+(READ_ENDPOINTS: Ozon …/list|info, Direct method «get» and reports; Metrika has no POST reads): they
+run freely. Writes to sandboxes (SANDBOX_HOSTS plus HELI_HTTP_SANDBOX_HOSTS) run as before. A write to
+any other host is a live write: the loop shows a card (method, host, path, body; for ads and payments
+a budget warning) and the request goes out only after the user's «да» for this very call.
 """
 
 from __future__ import annotations
@@ -111,22 +112,76 @@ def is_read(method: str, host: str, path: str, body) -> bool:
     return False
 
 
-def check_policy(method: str, url: str, body) -> str:
-    """'read' or 'sandbox'. Raises for a write to a live account."""
+# Hosts and paths where a write may spend money: ads, bids, payments.
+_BUDGET_HOST = re.compile(r"(^|\.)(direct\.yandex\.(com|ru)|api-performance\.ozon\.ru|ads?\.[\w.-]+|advert-api\.wildberries\.ru)$")
+_BUDGET_PATH = re.compile(r"(?i)pay|invoice|bid|budget|strateg|campaign|deposit|transfer|refund")
+
+
+def kind(method: str, url: str, body) -> str:
+    """'read', 'sandbox' or 'live' for one request. No network."""
     from urllib.parse import urlsplit
+
+    from app.agent import write_policy as wp
 
     parts = urlsplit(url)
     host = (parts.hostname or "").lower()
-    if is_sandbox(host):
-        return "sandbox"
     if is_read(method, host, parts.path or "/", body):
-        return "read"
-    raise HttpToolError(
-        "write_forbidden",
-        f"Ошибка: {method} {host}{parts.path} меняет данные боевого аккаунта, а боевые аккаунты только для "
-        "чтения. Запись можно проверить в песочнице (для Директа — api-sandbox.direct.yandex.com). "
-        "Если пользователю нужно изменение в бою, опиши, что и где поменять, и предложи сделать это ему.",
-    )
+        return wp.READ
+    if is_sandbox(host):
+        return wp.SANDBOX
+    return wp.LIVE
+
+
+def check_policy(method: str, url: str, body, confirmed: bool = False) -> str:
+    """'read', 'sandbox' or 'live'. Raises for a live write the user has not approved."""
+    from urllib.parse import urlsplit
+
+    from app.agent import write_policy as wp
+
+    mode = kind(method, url, body)
+    if mode == wp.READ and is_sandbox((urlsplit(url).hostname or "").lower()):
+        return wp.SANDBOX  # shown as «песочница» in the answer
+    if mode == wp.LIVE and not confirmed:
+        parts = urlsplit(url)
+        raise HttpToolError(
+            wp.REFUSED_CODE,
+            f"Не выполнено: {method} {(parts.hostname or '').lower()}{parts.path} меняет данные боевого аккаунта, "
+            "а пользователь это изменение не подтвердил. Запрос не отправлен. В песочнице (для Директа — "
+            "api-sandbox.direct.yandex.com) можно без подтверждения.",
+        )
+    return mode
+
+
+def classify(args: dict):
+    """write_policy rule for http_request. Uses the args as the model wrote them: secrets stay placeholders."""
+    from urllib.parse import urlsplit
+
+    from app.agent import write_policy as wp
+
+    method = str(args.get("method") or "GET").upper().strip()
+    url = str(args.get("url") or "").strip()
+    body = args.get("json")
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except ValueError:
+            pass
+    parts = urlsplit(url if "://" in url else f"https://{url}")
+    host = (parts.hostname or "").lower()
+    path = parts.path or "/"
+    mode = kind(method, url, body)
+    verb = f"{method} {path}"
+    if isinstance(body, dict) and isinstance(body.get("method"), str):
+        verb += f" {body['method']}"
+    if mode == wp.READ:
+        return wp.read(host)
+    if mode == wp.SANDBOX:
+        return wp.sandbox(host, verb, verb)
+    what = f"{method} {host}{path}"
+    if body is not None:
+        what += ", тело: " + wp.short(body)
+    budget = bool(_BUDGET_HOST.search(host) or _BUDGET_PATH.search(path) or _BUDGET_PATH.search(verb))
+    return wp.live(host, what, budget=budget, verb=verb)
 
 
 # --- secrets -----------------------------------------------------------------------
@@ -212,8 +267,9 @@ TOOL = _fn(
     "HTTP-запрос к API сервиса (Ozon, Wildberries, Яндекс Директ и Метрика, МойСклад и др.): метод, адрес, "
     "заголовки, JSON-тело. Ключи не печатай и не проси: пиши {{secret:ИМЯ}}, где ИМЯ — сайт записи в "
     "«Доступах» (например {{secret:api-seller.ozon.ru}}) или сайт/логин; сервер подставит ключ только для "
-    "запросов на этот сайт. Боевые аккаунты только для чтения: GET и читающие POST (Ozon …/list, …/info; "
-    "Директ method get и reports). Изменения — только в песочнице (api-sandbox.direct.yandex.com). "
+    "запросов на этот сайт. Чтение (GET и читающие POST: Ozon …/list, …/info; Директ method get и reports) — "
+    "свободно. Изменение в песочнице (api-sandbox.direct.yandex.com) — сразу; в боевом аккаунте сервер сам "
+    "покажет пользователю карточку подтверждения, сам ask_confirmation для этого не вызывай. "
     "Перед первым запросом к незнакомому API найди его документацию (web_search, open_url).",
     {
         "method": {"type": "string", "enum": sorted(METHODS)},
@@ -239,7 +295,9 @@ class Prepared:
 
 
 def prepare(args: dict, lookup, resolver=None) -> tuple[Prepared, list[str]]:
-    """Validate, apply the read-only policy and fill in secrets. Never makes a request."""
+    """Validate, apply the write policy and fill in secrets. Never makes a request."""
+    from app.agent import write_policy as wp
+
     from urllib.parse import urlsplit
 
     from app.web import WebError, check_url
@@ -268,7 +326,7 @@ def prepare(args: dict, lookup, resolver=None) -> tuple[Prepared, list[str]]:
     except WebError as exc:
         raise HttpToolError(exc.code, f"Ошибка: адрес недоступен ({exc.code}).") from None
     host = (urlsplit(url).hostname or "").lower()
-    mode = check_policy(method, url, body)
+    mode = check_policy(method, url, body, confirmed=wp.confirmed(args))
     used: list[str] = []
     url_filled, a = resolve_secrets(url, host, lookup)
     query, b = resolve_secrets(query, host, lookup)
@@ -300,7 +358,8 @@ def format_response(response: httpx.Response, mode: str, secrets: list[str]) -> 
             text = json.dumps(response.json(), ensure_ascii=False)
         except ValueError:
             pass
-    head = f"HTTP {response.status_code} ({'песочница' if mode == 'sandbox' else 'чтение'})"
+    label = {"sandbox": "песочница", "live": "боевой аккаунт, изменение подтверждено"}.get(mode, "чтение")
+    head = f"HTTP {response.status_code} ({label})"
     if shown:
         head += "\n" + "\n".join(shown)
     out = redact(f"{head}\n\n{text}", secrets)
@@ -348,3 +407,12 @@ def register() -> None:
 
     register_client_tool(TOOL)
     register_executor(TOOL_NAMES, execute)
+
+
+def _register_policy() -> None:
+    from app.agent import write_policy
+
+    write_policy.register("http_request", classify)
+
+
+_register_policy()

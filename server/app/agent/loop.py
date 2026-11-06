@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from app.agent.control import Control, NoControl, Stopped
+from app.agent import write_policy
 from app.agent.guard import Guard, describe
 from app.llm.client import Completion
 from app.llm.tools import parse_args
@@ -540,8 +541,12 @@ def run_agent(
                         messages.append({"role": "tool", "tool_call_id": call.id, "content": SCREENSHOT_LIMIT_TEXT})
                         continue
                 approved_here = False
+                policy_card = None
                 if guard.needs_approval(call.name, args):
-                    if guard.consume(call.name):
+                    # A live write shows the policy card (host, change, budget) even if the model asked
+                    # before: its own question may leave those out.
+                    policy_card = guard.card(call.name, args)
+                    if policy_card is None and guard.consume(call.name):
                         approved_here = True
                     elif not can_ask:
                         # The model skipped ask_confirmation: the loop asks, and never runs the tool unasked.
@@ -559,7 +564,7 @@ def run_agent(
                         label = None
                         if call.name == "browser_click" and isinstance(args.get("ref"), int):
                             label = guard.elements.get(args["ref"])
-                        ask_args = {"action": call.name, "details": describe(call.name, args, label)}
+                        ask_args = policy_card or {"action": call.name, "details": describe(call.name, args, label)}
                         answer = run_call(f"{call.id}_confirm{auto_ids}", CONFIRM_TOOL, ask_args)
                         calls_used += 1
                         if not approved(answer):
@@ -574,9 +579,10 @@ def run_agent(
                             continue
                         approved_here = True
                 run_args = {k: v for k, v in args.items() if not k.startswith("_")}
-                if approved_here and call.name == "browser_click":
-                    # The browser refuses a risky click by coordinates unless the loop says it was approved.
-                    run_args["_confirmed"] = True
+                if approved_here and (call.name == "browser_click" or policy_card is not None):
+                    # The browser refuses a risky click by coordinates, and a write tool a live write,
+                    # unless the loop says this very call was approved.
+                    run_args[write_policy.CONFIRMED_ARG] = True
                 result = run_call(call.id, call.name, run_args)
                 calls_used += 1
                 content = result.content

@@ -74,7 +74,7 @@ def test_http_policy_allows_reads_and_sandbox_writes(method, url, body) -> None:
 def test_http_policy_refuses_writes_to_live_accounts(method, url, body) -> None:
     with pytest.raises(http_tool.HttpToolError) as exc:
         http_tool.check_policy(method, url, body)
-    assert exc.value.code == "write_forbidden"
+    assert exc.value.code == "confirmation_required"
 
 
 def test_http_write_to_a_live_account_never_sends_a_request(session, monkeypatch) -> None:
@@ -87,7 +87,7 @@ def test_http_write_to_a_live_account_never_sends_a_request(session, monkeypatch
          "headers": {"Api-Key": "{{secret:api-seller.ozon.ru}}"}, "json": {"prices": []}},
         transport=httpx.MockTransport(_never), resolver=PUBLIC_DNS,
     )
-    assert result.error == "write_forbidden" and OZON_KEY not in result.content
+    assert result.error == "confirmation_required" and OZON_KEY not in result.content
 
 
 def test_http_secret_goes_only_to_its_host_and_never_back_to_the_model(session, monkeypatch) -> None:
@@ -242,7 +242,7 @@ def test_direct_live_account_is_read_only() -> None:
     for method in ("add", "update", "delete", "suspend", "resume", "archive", "set", "setAuto"):
         with pytest.raises(yandex_direct.DirectError) as exc:
             yandex_direct.build_direct({"service": "campaigns", "method": method})
-        assert exc.value.code == "write_forbidden"
+        assert exc.value.code == "confirmation_required"
     url, _, body, _ = yandex_direct.build_direct({"service": "campaigns", "method": "update", "sandbox": True})
     assert url.startswith("https://api-sandbox.direct.yandex.com/") and body["method"] == "update"
 
@@ -254,7 +254,7 @@ def test_direct_write_never_reaches_the_network(session, monkeypatch) -> None:
     result = yandex_direct.execute(session, user, None, "direct_api",
                                    {"service": "keywordbids", "method": "set", "params": {}},
                                    transport=httpx.MockTransport(_never))
-    assert result.error == "write_forbidden"
+    assert result.error == "confirmation_required"
 
 
 def test_direct_report_waits_for_201_202_and_returns_tsv(session, monkeypatch) -> None:
