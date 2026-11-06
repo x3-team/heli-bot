@@ -29,6 +29,8 @@ export interface AgentRunResult {
   reply: string;
   stopped: string | null;
   costRub: string;
+  /** The task wrote a letter: the rating card asks what happened to it. */
+  mail: boolean;
 }
 
 function auth(token: string): Record<string, string> {
@@ -117,6 +119,7 @@ export async function runAgentTask(
         reply: String(event.reply ?? ""),
         stopped: (event.stopped as string | null) ?? null,
         costRub: String(event.cost_rub ?? "0"),
+        mail: Boolean(event.mail),
       };
     } else if (event.type === "error") {
       failure = String(event.code ?? "run_failed");

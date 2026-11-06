@@ -100,6 +100,11 @@ class RunRegistry:
             return None
         return run
 
+    def running_for(self, user_id: uuid.UUID) -> set[uuid.UUID]:
+        """Tasks of this user whose run has not ended yet."""
+        with self._lock:
+            return {tid for tid, run in self._runs.items() if run.user_id == user_id and not run.finished}
+
     def start(
         self,
         *,
@@ -141,10 +146,11 @@ class RunRegistry:
                     autopause=autopause,
                 )
                 session.commit()
-                _close_task(session, task_id, "aborted" if turn.stopped else "success", turn.text)
+                _close_task(session, task_id, "aborted" if turn.stopped else "success", turn.text, turn.stopped)
                 run.publish(
                     {
                         "type": "done",
+                        "mail": task_has_mail(session, task_id),
                         "reply": turn.text,
                         "alias": turn.alias,
                         "task_type": turn.task_type,
@@ -156,12 +162,12 @@ class RunRegistry:
                 )
             except (QuotaError, TrajectoryError, HeliError) as exc:
                 session.rollback()
-                _close_task(session, task_id, "fail", None)
+                _close_task(session, task_id, "fail", None, "quota" if isinstance(exc, QuotaError) else "error")
                 run.publish({"type": "error", "code": exc.code})
             except Exception:  # noqa: BLE001
                 log.exception("agent run failed task=%s", task_id)
                 session.rollback()
-                _close_task(session, task_id, "fail", None)
+                _close_task(session, task_id, "fail", None, "error")
                 run.publish({"type": "error", "code": "run_failed"})
             finally:
                 session.close()
@@ -180,11 +186,36 @@ class RunRegistry:
 registry = RunRegistry()
 
 
-def _close_task(session: Session, task_id: uuid.UUID, outcome: str, final_answer: str | None) -> None:
-    """Give the task an outcome right after the run, so unrated tasks also become trajectories."""
+def _close_task(
+    session: Session,
+    task_id: uuid.UUID,
+    outcome: str,
+    final_answer: str | None,
+    stopped: str | None = None,
+) -> None:
+    """Give the task an outcome right after the run, so unrated tasks also become trajectories.
+
+    `stopped` is turn.stopped (confirm, budget, max_steps, loop, captcha, quota, stop…) or «error»;
+    it goes to the run journal (Task.stopped/finished_at/duration_ms) and the run signals.
+    """
     try:
-        auto_finish(session, task_id, outcome, final_answer)
+        auto_finish(session, task_id, outcome, final_answer, stopped=stopped)
         session.commit()
     except Exception:  # noqa: BLE001
         log.exception("could not close task=%s", task_id)
         session.rollback()
+
+
+def task_has_mail(session: Session, task_id: uuid.UUID) -> bool:
+    """The rating card asks about the letter only when the task wrote one."""
+    from sqlalchemy import select
+
+    from app.models import TaskStep
+    from app.signals import has_mail
+
+    try:
+        steps = list(session.scalars(select(TaskStep).where(TaskStep.task_id == task_id)))
+        return has_mail(steps)
+    except Exception:  # noqa: BLE001
+        session.rollback()
+        return False

@@ -22,7 +22,10 @@ import {
   finishTask,
   saveConsents,
   submitIncidentReport,
-  submitTaskFeedback,
+  sendTaskFeedback,
+  dismissTaskFeedback,
+  deleteTrainingCopy,
+  deleteTaskHistory,
   attachLocalBrowser,
   saveMemory,
   saveCredential,
@@ -68,6 +71,8 @@ import {
   uploadAttachment,
   type SavedFile,
 } from "./files";
+import { feedbackRequest, type FeedbackAction } from "./feedback";
+import { FeedbackCard } from "./feedbackCard";
 
 type View = "chat" | "limits" | "schedules" | "memory" | "settings";
 type Theme = "light" | "dark";
@@ -359,7 +364,7 @@ function SignIn({ apiBase, onAuth }: { apiBase: string; onAuth: (auth: AuthResul
             </label>
             <label className="check">
               <input type="checkbox" checked={training} onChange={(event) => setTraining(event.target.checked)} />
-              <span>Использовать мои задачи для улучшения модели</span>
+              <span>{TRAINING_CONSENT_TEXT}</span>
             </label>
           </>
         ) : null}
@@ -443,7 +448,7 @@ function Workspace({
   const [busy, setBusy] = useState(false);
   const [abort, setAbort] = useState<AbortController | null>(null);
   const [costHint, setCostHint] = useState<string | null>(null);
-  const [feedbackTask, setFeedbackTask] = useState<{ taskId: string; reply: string } | null>(null);
+  const [feedbackTask, setFeedbackTask] = useState<{ taskId: string; reply: string; mail: boolean } | null>(null);
   const [consents, setConsents] = useState({ pdn: true, training: false });
   const [consentsLoaded, setConsentsLoaded] = useState(false);
   const [trainingAsked, setTrainingAsked] = useState(readTrainingAsked);
@@ -671,7 +676,7 @@ function Workspace({
       );
       if (note && result.reply) setError(note);
       // Every task gets the rating card, stopped ones too: these ratings are the training signal.
-      setFeedbackTask({ taskId: result.taskId, reply: result.reply });
+      setFeedbackTask({ taskId: result.taskId, reply: result.reply, mail: result.mail });
       setMascot(result.stopped ? "waiting" : "done");
     } catch (err) {
       if (controller.signal.aborted) {
@@ -681,7 +686,7 @@ function Workspace({
         setError(err instanceof ApiError ? err.message : "Не получилось выполнить задачу.");
         setMascot("error");
       }
-      if (startedTaskId) setFeedbackTask({ taskId: startedTaskId, reply: "" });
+      if (startedTaskId) setFeedbackTask({ taskId: startedTaskId, reply: "", mail: false });
     } finally {
       setBusy(false);
       setAbort(null);
@@ -845,16 +850,23 @@ function Workspace({
             }}
             onReject={() => setPending(null)}
             feedback={feedbackTask}
-            onFeedback={async (worked, comment) => {
-              if (!feedbackTask) return;
+            onFeedback={async (action) => {
+              if (!feedbackTask) return false;
+              const { body, outcome } = feedbackRequest(action);
               try {
-                await submitTaskFeedback(apiBase, token, feedbackTask.taskId, worked, comment);
-                await finishTask(apiBase, token, feedbackTask.taskId, worked ? "success" : "fail", feedbackTask.reply);
-                setFeedbackTask(null);
-                setNotice("Спасибо, отзыв сохранён.");
+                await sendTaskFeedback(apiBase, token, feedbackTask.taskId, body);
+                // 👍 → success, 👎 → fail, as before; a reason or a comment keeps the outcome.
+                if (outcome) await finishTask(apiBase, token, feedbackTask.taskId, outcome, feedbackTask.reply);
+                return true;
               } catch (err) {
                 setError(err instanceof ApiError ? err.message : "Не получилось сохранить отзыв.");
+                return false;
               }
+            }}
+            onFeedbackClose={(rated) => {
+              const task = feedbackTask;
+              setFeedbackTask(null);
+              if (task && !rated) void dismissTaskFeedback(apiBase, token, task.taskId).catch(() => undefined);
             }}
             costHint={costHint}
             trainingAsk={trainingAsk}
@@ -984,6 +996,7 @@ function Chat({
   costHint,
   feedback,
   onFeedback,
+  onFeedbackClose,
   trainingAsk,
   onTrainingAnswer,
 }: {
@@ -1000,7 +1013,7 @@ function Chat({
   pending: string | null;
   trial: string | null;
   costHint: string | null;
-  feedback: { taskId: string; reply: string } | null;
+  feedback: { taskId: string; reply: string; mail: boolean } | null;
   onDraft: (value: string) => void;
   onSubmit: () => void;
   onApprove: () => void;
@@ -1012,11 +1025,11 @@ function Chat({
   notice: string;
   ask: { action: string; details: string } | null;
   onAnswer: (ok: boolean) => void;
-  onFeedback: (worked: boolean, comment: string) => Promise<void>;
+  onFeedback: (action: FeedbackAction) => Promise<boolean>;
+  onFeedbackClose: (rated: boolean) => void;
   trainingAsk: boolean;
   onTrainingAnswer: (yes: boolean) => void;
 }) {
-  const [comment, setComment] = useState("");
   const threadEnd = useRef<HTMLDivElement>(null);
   const filePicker = useRef<HTMLInputElement>(null);
   const empty = messages.length === 0 && !pending && !stopped;
@@ -1222,34 +1235,13 @@ function Chat({
           </article>
         ) : null}
         {feedback ? (
-          <article className="card">
-            <p className="muted">Как прошла задача?</p>
-            <textarea
-              aria-label="Комментарий"
-              placeholder="Комментарий (необязательно)"
-              value={comment}
-              onChange={(event) => setComment(event.target.value)}
-            />
-            <div className="row">
-              <button
-                type="button"
-                data-emphasis="primary"
-                onClick={() => void onFeedback(true, comment).then(() => setComment(""))}
-              >
-                Сработало
-              </button>
-              <button type="button" onClick={() => void onFeedback(false, comment).then(() => setComment(""))}>
-                Не сработало
-              </button>
-            </div>
-          </article>
+          <FeedbackCard key={feedback.taskId} mail={feedback.mail} onAction={onFeedback} onClose={onFeedbackClose} />
         ) : null}
         {trainingAsk && !busy && messages.length > 0 ? (
           <article className="card">
             <h2>Помочь Heli стать лучше?</h2>
             <p className="muted">
-              Разрешите использовать ваши задачи и оценки для обучения. Личные данные, пароли и ключи
-              перед этим скрываются. Передумать можно в настройках.
+              {TRAINING_CONSENT_TEXT}
             </p>
             <div className="row">
               <button type="button" data-emphasis="primary" onClick={() => onTrainingAnswer(true)}>
@@ -1648,6 +1640,7 @@ function Settings({
   const [links, setLinks] = useState<CredentialItem[]>([]);
   const [note, setNote] = useState("");
   const [reportBusy, setReportBusy] = useState(false);
+  const [privacyNote, setPrivacyNote] = useState("");
 
   useEffect(() => {
     void loadCredentials(apiBase, token).then(setLinks).catch(() => undefined);
@@ -1680,7 +1673,7 @@ function Settings({
               void onConsents({ ...consents, pdn: event.target.checked }).catch(() => undefined);
             }}
           />
-          <span>Согласие на обработку персональных данных</span>
+          <span>Согласие на обработку персональных данных (обязательно: без него Heli не выполняет задачи)</span>
         </label>
         <label className="check">
           <input
@@ -1690,8 +1683,33 @@ function Settings({
               void onConsents({ ...consents, training: event.target.checked }).catch(() => undefined);
             }}
           />
-          <span>Использовать мои задачи для улучшения модели</span>
+          <span>{TRAINING_CONSENT_TEXT}</span>
         </label>
+        <div className="row">
+          <button
+            type="button"
+            onClick={() => {
+              void deleteTrainingCopy(apiBase, token)
+                .then((count) => setPrivacyNote(count ? `Обучающая копия удалена: ${count}.` : "Обучающей копии нет."))
+                .catch(() => setPrivacyNote("Не получилось удалить. Попробуйте позже."));
+            }}
+          >
+            Удалить обучающую копию
+          </button>
+          <button
+            type="button"
+            data-emphasis="danger"
+            onClick={() => {
+              if (!window.confirm("Удалить историю задач? Доступы и память останутся.")) return;
+              void deleteTaskHistory(apiBase, token)
+                .then((count) => setPrivacyNote(`История задач удалена: ${count}.`))
+                .catch(() => setPrivacyNote("Не получилось удалить. Попробуйте позже."));
+            }}
+          >
+            Удалить историю задач
+          </button>
+        </div>
+        {privacyNote ? <p className="muted">{privacyNote}</p> : null}
       </section>
       <section className="card">
         <h2>Подключения</h2>
@@ -1801,6 +1819,8 @@ const AUTOPAUSE_KEY = "heli.autopause";
 const COMPUTER_WIDTH_KEY = "heli.computerWidth";
 
 const TRAINING_ASKED_KEY = "heli.trainingAsked";
+const TRAINING_CONSENT_TEXT =
+  "Разрешить использовать обезличенные задачи и оценки, чтобы Heli становился лучше. Пароли и личные данные скрываются. Можно выключить в настройках.";
 
 function readTrainingAsked(): boolean {
   try {
