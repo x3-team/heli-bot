@@ -106,3 +106,48 @@ def test_history_is_trimmed_and_starts_with_user() -> None:
 def test_persona_does_not_limit_to_work_tasks() -> None:
     assert "ассистент для рабочих задач" not in SYSTEM
     assert "личные" in SYSTEM
+
+
+def test_continue_picks_up_the_stopped_task(session) -> None:
+    from app.agent.loop import Outcome
+    from app.agent.task_run import save_checkpoint
+
+    user = User(
+        email="cont@example.com",
+        consent_pdn=True,
+        consent_training=True,
+        is_admin=False,
+        created_at=datetime.now(timezone.utc),
+    )
+    session.add(user)
+    session.flush()
+    first = start_task(session, user, "Сделай приёмку в МоёмСкладе: 10 перчаток от Ромашки", {})
+    save_checkpoint(
+        first,
+        Outcome("Сделано: открыл приёмку. Не сделано: добавить товар.", 30, Decimal("6"), "budget"),
+        "https://online.moysklad.ru/app/#supply/edit",
+    )
+    session.commit()
+    second = start_task(session, user, "продолжи", {})
+    script = _Scripted(['{"task_type":"ms","complexity":2}', "Добавил товар и сохранил."])
+    sdk = type("SDK", (), {})()
+    sdk.chat = type("Chat", (), {"completions": script})()
+    run_turn(session, user, second, HeliClient(sdk))
+    answer = script.calls[1]
+    assert [m["role"] for m in answer] == ["system", "user", "assistant", "user"]
+    assert answer[1]["content"].startswith("Сделай приёмку")
+    assert "Не сделано: добавить товар" in answer[2]["content"] and "#supply/edit" in answer[2]["content"]
+    assert answer[3]["content"].startswith("продолжи") and "не начинай заново" in answer[3]["content"]
+
+
+def test_finished_task_leaves_no_checkpoint(session) -> None:
+    from app.agent.loop import Outcome
+    from app.agent.task_run import save_checkpoint
+
+    user = User(email="done@example.com", consent_pdn=True, consent_training=True, is_admin=False,
+                created_at=datetime.now(timezone.utc))
+    session.add(user)
+    session.flush()
+    task = start_task(session, user, "Остаток на складе", {})
+    save_checkpoint(task, Outcome("37 шт.", 3, Decimal("0.3"), None), None)
+    assert "checkpoint" not in (task.context or {})
