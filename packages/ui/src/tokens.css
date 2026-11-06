@@ -549,6 +549,10 @@ h1, h2 { text-wrap: balance; }
 .card p { margin: 0; }
 .card.danger { border-color: color-mix(in srgb, var(--danger) 55%, var(--line)); }
 .card.warn { border-color: var(--signal); background: color-mix(in srgb, var(--signal) 14%, var(--panel)); }
+.feedback-card { position: relative; padding-right: 40px; }
+.feedback-card button.link { align-self: flex-start; font-size: 13px; color: var(--muted); }
+.feedback-close { position: absolute; top: 8px; right: 8px; border: 0; background: transparent; padding: 2px 8px; font-size: 18px; line-height: 1; color: var(--muted); cursor: pointer; }
+.feedback-reasons button[aria-pressed="true"] { border-color: var(--fg); font-weight: 600; }
 
 .thread .card { max-width: 640px; margin-left: 42px; }
 

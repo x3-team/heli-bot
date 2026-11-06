@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -334,3 +335,300 @@ def test_auto_finish_closes_unrated_task_and_rating_overrides(session) -> None:
     finish_task(session, user, task.id, "fail", "")
     assert task.outcome == "fail" and task.final_answer == "Терафeрма от 12 ₽/ч"
     assert session.scalar(select(Trajectory).where(Trajectory.task_id == task.id)).outcome == "fail"
+
+
+# --- self-learning signals (server/LEARNING.md) ------------------------------------------
+
+
+def _api_user(client, session, email: str, *, training: bool = True, admin: bool = False):
+    user = User(
+        email=email,
+        consent_pdn=True,
+        consent_training=training,
+        is_admin=admin,
+        created_at=datetime.now(timezone.utc),
+    )
+    session.add(user)
+    session.commit()
+    return user, {"Authorization": f"Bearer {issue_token(user.id)}"}
+
+
+def _doc(session, task_id):
+    session.expire_all()
+    row = session.scalar(select(Trajectory).where(Trajectory.task_id == task_id))
+    return row.payload if row is not None else None
+
+
+def _lines(text: str) -> list[dict]:
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+
+def test_feedback_reason_and_fixed_by_hand_reach_payload_and_dpo(client, session) -> None:
+    from app.trajectories import auto_finish, to_dpo
+
+    user, headers = _api_user(client, session, "fix@example.com")
+    task = start_task(session, user, "Посчитай остатки на складе, мой телефон +7 999 123-45-67", {})
+    add_step(session, user, task.id, model_alias="heli-fast", reply="Остаток 10 шт.", cost_rub="0.5")
+    add_step(session, user, task.id, model_alias="heli-fast", reply="ещё", cost_rub="0.25")
+    auto_finish(session, task.id, "success", "Остаток 10 шт.")
+    session.commit()
+
+    bad = client.post(f"/v1/tasks/{task.id}/feedback", headers=headers, json={"rating": -1, "reason_code": "nope"})
+    assert bad.status_code == 400 and bad.json()["detail"] == "bad_reason_code"
+    bad_mail = client.post(f"/v1/tasks/{task.id}/feedback", headers=headers, json={"mail_disposition": "lost"})
+    assert bad_mail.status_code == 400
+
+    # An old client: only rating/acceptance/comment still works.
+    old = client.post(f"/v1/tasks/{task.id}/feedback", headers=headers, json={"rating": -1, "acceptance": "rejected"})
+    assert old.status_code == 200
+    reason = client.post(f"/v1/tasks/{task.id}/feedback", headers=headers, json={"rating": -1, "reason_code": "wrong_fact"})
+    assert reason.json()["reason_code"] == "wrong_fact"
+    fixed = client.post(
+        f"/v1/tasks/{task.id}/feedback",
+        headers=headers,
+        json={"user_fixed": True, "user_edit": "Остаток 12 шт., звонить +7 999 123-45-67"},
+    )
+    assert fixed.status_code == 200
+    assert fixed.json()["acceptance"] == "edited" and fixed.json()["rating"] == -1
+
+    payload = _doc(session, task.id)
+    assert payload["feedback"]["reason_code"] == "wrong_fact"
+    assert payload["feedback"]["user_fixed"] is True
+    assert payload["cost_rub_total"] == "0.750000"
+    assert payload["stopped"] is None and payload["duration_ms"] is not None
+    assert "revision" in payload and payload["internal"] is False
+    blob = json.dumps(payload, ensure_ascii=False)
+    assert "999 123" not in blob and str(user.id) not in blob and user.email not in blob
+    pairs = to_dpo(payload)
+    assert [p["kind"] for p in pairs] == ["answer"]
+    assert "12 шт." in pairs[0]["chosen"] and pairs[0]["rejected"] == "Остаток 10 шт."
+
+
+def test_sft_skips_bare_auto_success_and_takes_confirmed_ones(client, session) -> None:
+    from app.trajectories import auto_finish
+
+    admin, headers = _api_user(client, session, "admin@example.com", training=False, admin=True)
+    user, user_headers = _api_user(client, session, "tester@example.com")
+    bare = start_task(session, user, "Найди аренду видеокарты", {})
+    auto_finish(session, bare.id, "success", "Терафeрма от 12 ₽/ч")
+    liked = start_task(session, user, "Составь план поста про скидки", {})
+    auto_finish(session, liked.id, "success", "План: …")
+    rate_task(session, user, liked.id, rating=1, acceptance="accepted")
+    checked = start_task(session, user, "Создай сделку в Битрикс24 и проверь", {})
+    add_step(session, user, checked.id, tool_name="bitrix24_write", tool_args={"method": "crm.deal.add"}, result_text="id 7")
+    add_step(session, user, checked.id, tool_name="bitrix24_read", tool_args={"method": "crm.deal.get"}, result_text="сделка 7")
+    auto_finish(session, checked.id, "success", "Сделка создана и проверена")
+    session.commit()
+
+    assert [s["kind"] for s in _doc(session, checked.id)["signals"]] == ["verify_ok"]
+    sft = _lines(client.get("/v1/admin/trajectories.jsonl?kind=sft", headers=headers).text)
+    assert {line["id"] for line in sft} == {str(liked.id), str(checked.id)}
+    raw = _lines(client.get("/v1/admin/trajectories.jsonl?kind=raw", headers=headers).text)
+    assert str(bare.id) in {line["id"] for line in raw}
+    thumbs = _lines(client.get("/v1/admin/trajectories.jsonl?kind=sft&thumbs_up_only=true", headers=headers).text)
+    assert {line["id"] for line in thumbs} == {str(liked.id)}
+
+
+def test_open_access_and_training_accounts_stay_out_of_sft_and_dpo(client, session, monkeypatch) -> None:
+    from app.trajectories import auto_finish
+
+    monkeypatch.setenv("HELI_TRAINING_EMAILS", "trainer@heli.local")
+    admin, headers = _api_user(client, session, "boss@example.com", training=False, admin=True)
+    for email in ("owner@heli.local", "trainer@heli.local"):
+        shared = User(email=email, consent_pdn=True, consent_training=True, created_at=datetime.now(timezone.utc))
+        session.add(shared)
+        session.flush()
+        task = start_task(session, shared, "Задача общего аккаунта", {})
+        auto_finish(session, task.id, "success", "Готово")
+        rate_task(session, shared, task.id, rating=1, acceptance="accepted")
+        other = start_task(session, shared, "Другая задача про рекламу", {})
+        auto_finish(session, other.id, "success", "Ответ бота")
+        rate_task(session, shared, other.id, user_fixed=True, user_edit="Правильный ответ")
+    session.commit()
+
+    assert client.get("/v1/admin/trajectories.jsonl?kind=sft", headers=headers).text == ""
+    assert client.get("/v1/admin/trajectories.jsonl?kind=dpo", headers=headers).text == ""
+    raw = _lines(client.get("/v1/admin/trajectories.jsonl?kind=raw", headers=headers).text)
+    assert len(raw) == 4 and all(line["internal"] is True for line in raw)
+
+
+def test_knowledge_candidate_hidden_until_approved(client, session) -> None:
+    from app import knowledge
+
+    admin, headers = _api_user(client, session, "kb-admin@example.com", training=False, admin=True)
+    author, _ = _api_user(client, session, "kb-author@example.com")
+    task = start_task(session, author, "Изучи API Ласточки", {})
+    saved = knowledge.execute(
+        session, author, task.id, "knowledge_save",
+        {"topic": "Ласточка API: тарифы", "fact": "До 1 кг — 410 руб., почта a@b.co", "source_url": "https://dev.lastochka.example/api"},
+    )
+    assert "на проверку" in saved.content
+    assert knowledge.search(session, "Ласточка тарифы") == []
+    assert knowledge.relevant_notes(session, "Ласточка тарифы") == []
+
+    pending = client.get("/v1/admin/knowledge/candidates", headers=headers).json()["candidates"]
+    assert len(pending) == 1 and "a@b.co" not in pending[0]["text"]
+    quality = client.get("/v1/admin/quality", headers=headers).json()
+    assert quality["knowledge_candidates_pending"] == 1
+    denied = client.post(f"/v1/admin/knowledge/{pending[0]['id']}/review", headers=_api_user(client, session, "x@example.com")[1], json={"decision": "approve"})
+    assert denied.status_code == 403
+    approved = client.post(f"/v1/admin/knowledge/{pending[0]['id']}/review", headers=headers, json={"decision": "approve"})
+    assert approved.status_code == 200 and approved.json()["approved_at"]
+    session.expire_all()
+    assert [n.topic for n in knowledge.search(session, "Ласточка тарифы")] == ["Ласточка API: тарифы"]
+    assert knowledge.relevant_notes(session, "Ласточка тарифы")
+
+    rejected = knowledge.save(session, author, "Ласточка API: лимиты", "60 запросов в минуту", "https://dev.lastochka.example/limits", candidate=True)
+    session.commit()
+    client.post(f"/v1/admin/knowledge/{rejected.id}/review", headers=headers, json={"decision": "reject"})
+    session.expire_all()
+    assert all(n.topic != "Ласточка API: лимиты" for n in knowledge.search(session, "Ласточка лимиты запросов"))
+    assert client.get("/v1/admin/knowledge/candidates", headers=headers).json()["candidates"] == []
+
+
+def test_withdraw_training_and_delete_history(client, session) -> None:
+    from app.models import Credential, MemoryFact, Task, TaskFeedback, TaskSignal, TaskStep
+    from app.trajectories import auto_finish
+
+    user, headers = _api_user(client, session, "history@example.com")
+    first = start_task(session, user, "Найди поставщика коробок", {})
+    add_step(session, user, first.id, model_alias="heli-fast", reply="нашёл")
+    auto_finish(session, first.id, "success", "нашёл")
+    second = start_task(session, user, "Найди поставщика коробок дешевле", {})
+    auto_finish(session, second.id, "success", "ещё")
+    rate_task(session, user, second.id, rating=1)
+    session.add(MemoryFact(user_id=user.id, text="склад в Казани", created_at=datetime.now(timezone.utc)))
+    session.add(Credential(user_id=user.id, site="b24", username="u", nonce=b"n", ciphertext=b"c", created_at=datetime.now(timezone.utc)))
+    session.commit()
+    assert session.scalar(select(TaskSignal).where(TaskSignal.task_id == first.id)) is not None
+
+    copy = client.delete("/v1/me/trajectories", headers=headers)
+    assert copy.status_code == 200 and copy.json()["deleted"] == 2
+    session.expire_all()
+    assert session.scalar(select(Task).where(Task.id == first.id)) is not None
+
+    client.put("/v1/me/consents", headers=headers, json={"consent_training": True})
+    assert _doc(session, first.id) is not None
+    client.put("/v1/me/consents", headers=headers, json={"consent_training": False})
+    assert _doc(session, first.id) is None
+
+    gone = client.delete("/v1/me/tasks", headers=headers)
+    assert gone.status_code == 200
+    assert gone.json()["deleted"]["tasks"] == 2 and gone.json()["deleted"]["signals"] >= 1
+    session.expire_all()
+    assert session.scalar(select(Task).where(Task.user_id == user.id)) is None
+    assert session.scalar(select(TaskSignal).where(TaskSignal.user_id == user.id)) is None
+    assert session.scalar(select(TaskStep)) is None and session.scalar(select(TaskFeedback)) is None
+    assert session.scalar(select(MemoryFact).where(MemoryFact.user_id == user.id)) is not None
+    assert session.scalar(select(Credential).where(Credential.user_id == user.id)) is not None
+
+
+def test_closing_the_card_and_the_next_message_leave_signals(client, session) -> None:
+    from app.models import Task, TaskSignal
+    from app.trajectories import auto_finish
+
+    user, headers = _api_user(client, session, "signals@example.com")
+
+    def kinds(task_id) -> list[str]:
+        session.expire_all()
+        return [row.kind for row in session.scalars(select(TaskSignal).where(TaskSignal.task_id == task_id))]
+
+    def task(text: str):
+        task_id = uuid.UUID(client.post("/v1/tasks", headers=headers, json={"request": text, "context": {}}).json()["id"])
+        auto_finish(session, task_id, "success", "ответ")
+        session.commit()
+        return task_id
+
+    a = task("Собери отчёт по продажам за октябрь")
+    assert client.post(f"/v1/tasks/{a}/dismiss", headers=headers).json()["noted"] is True
+    assert client.post(f"/v1/tasks/{a}/dismiss", headers=headers).json()["noted"] is False
+    assert kinds(a) == ["abandon"]
+
+    b = task("Собери отчёт по продажам за октябрь")  # the same again: a retry of a
+    assert "retry" in kinds(a)
+    c = task("а за ноябрь отчёт по продажам?")  # short, same topic: reformulate of b
+    assert kinds(b) == ["reformulate"]
+    session.expire_all()
+    assert session.get(Task, c).parent_task_id == b
+    task("Напиши пост про новую кофемашину")  # another topic, c not rated
+    assert kinds(c) == ["next_unrelated"]
+
+    payload = _doc(session, a)
+    assert {s["kind"] for s in payload["signals"]} == {"abandon", "retry"}
+
+    # A rated card does not get abandon on ✕.
+    d = task("Проверь остатки на складе")
+    client.post(f"/v1/tasks/{d}/feedback", headers=headers, json={"rating": 1})
+    assert client.post(f"/v1/tasks/{d}/dismiss", headers=headers).json()["noted"] is False
+
+
+def test_run_journal_stop_reason_confirmations_and_continue(session) -> None:
+    from app.agent import runs
+    from app.models import Task, TaskSignal
+
+    user = _user(session, training=True)
+    task = start_task(session, user, "Заполни карточки товаров на сайте", {})
+    add_step(session, user, task.id, tool_name="ask_confirmation", tool_args={"action": "сохранить"}, confirmation="approved")
+    add_step(session, user, task.id, tool_name="ask_confirmation", tool_args={"action": "удалить"}, confirmation="rejected")
+    task.context = {"checkpoint": {"request": task.request_text, "summary": "сделал 3 из 10", "stopped": "max_steps"}}
+    session.commit()
+    runs._close_task(session, task.id, "aborted", "Сделал 3 из 10", "max_steps")
+    session.expire_all()
+    task = session.get(Task, task.id)
+    assert task.stopped == "max_steps" and task.finished_at is not None and task.duration_ms is not None
+    kinds = sorted(row.kind for row in session.scalars(select(TaskSignal).where(TaskSignal.task_id == task.id)))
+    assert kinds == ["confirm_approved", "confirm_rejected", "max_steps"]
+    assert _doc(session, task.id)["stopped"] == "max_steps"
+    # A rating later does not move the end of the run or duplicate the run signals.
+    finish_task(session, user, task.id, "success", None)
+    assert len(list(session.scalars(select(TaskSignal).where(TaskSignal.task_id == task.id)))) == 3
+
+    follow = start_task(session, user, "продолжи", {})
+    assert follow.parent_task_id == task.id
+    assert "continue" in [row.kind for row in session.scalars(select(TaskSignal).where(TaskSignal.task_id == task.id))]
+
+
+def test_followup_classifier_and_mail_detection() -> None:
+    from datetime import timedelta
+
+    from app.models import TaskStep
+    from app.signals import classify_followup, has_mail, verify_results
+
+    minute = timedelta(minutes=1)
+    assert classify_followup("Найди аренду видеокарты", "продолжи", gap=minute, prev_rated=False) == "continue"
+    assert classify_followup("Найди аренду видеокарты", "найди аренду видеокарты", gap=minute, prev_rated=True) == "retry"
+    assert classify_followup("Найди аренду видеокарты в Москве", "а видеокарты подешевле?", gap=minute, prev_rated=False) == "reformulate"
+    assert classify_followup("Найди аренду видеокарты", "Напиши пост про кофе", gap=minute, prev_rated=False) == "next_unrelated"
+    assert classify_followup("Найди аренду видеокарты", "Напиши пост про кофе", gap=minute, prev_rated=True) is None
+    assert classify_followup("Найди аренду видеокарты", "Напиши пост про кофе", gap=timedelta(hours=2), prev_rated=False) is None
+
+    letter = TaskStep(position=1, tool_name="ask_confirmation", tool_args={"action": "Отправить письмо Ивану"})
+    assert has_mail([letter]) and has_mail([TaskStep(position=1, tool_name="mail_send", tool_args={})])
+    assert not has_mail([TaskStep(position=1, tool_name="browser_read", tool_args={})])
+    write = TaskStep(position=1, tool_name="http_request", tool_args={"method": "POST", "url": "https://api.moysklad.ru/x"}, result_text="ok")
+    read_fail = TaskStep(position=2, tool_name="moysklad_read", tool_args={}, result_text="Ошибка: 500", error="http_500")
+    assert [k for k, _ in verify_results([write, read_fail])] == ["verify_fail"]
+
+
+def test_admin_quality_and_feedback_fields(client, session) -> None:
+    from app.trajectories import auto_finish
+
+    admin, headers = _api_user(client, session, "q-admin@example.com", training=False, admin=True)
+    user, user_headers = _api_user(client, session, "q-user@example.com")
+    task = start_task(session, user, "Ответь на письмо клиента", {})
+    add_step(session, user, task.id, tool_name="mail_send", tool_args={"to": "x"}, cost_rub="1.5")
+    auto_finish(session, task.id, "aborted", "черновик", stopped="confirm")
+    session.commit()
+    client.post(f"/v1/tasks/{task.id}/feedback", headers=user_headers, json={"rating": -1, "reason_code": "slow", "mail_disposition": "declined"})
+    assert client.get("/v1/admin/quality", headers=user_headers).status_code == 403
+    quality = client.get("/v1/admin/quality?days=7", headers=headers).json()
+    assert quality["tasks"] == 1 and quality["rated"] == 1 and quality["thumbs_down"] == 1
+    assert quality["reason_codes"] == {"slow": 1} and quality["mail_disposition"] == {"declined": 1}
+    assert quality["stopped"] == {"confirm": 1}
+    assert quality["dataset"]["documents"] == 1 and quality["dataset"]["sft_ready"] == 0
+    assert quality["hash_pepper_set"] is True
+    feedback = client.get("/v1/admin/feedback", headers=headers).json()
+    row = feedback["tasks"][0]
+    assert row["stopped"] == "confirm" and row["feedback"]["reason_code"] == "slow"
+    assert row["feedback"]["mail_disposition"] == "declined" and isinstance(row["signals"], list)
+    assert feedback["totals"]["thumbs_down"] == 1

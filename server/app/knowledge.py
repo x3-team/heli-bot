@@ -10,6 +10,11 @@
 
 The base is shared by all accounts, so a note is a general rule, never client data: the text is masked
 (emails, phones, ИНН, secrets) before it is stored.
+
+A knowledge_save from a live client task (not an admin's run) is a candidate (origin="candidate"): it is
+not shown by search / relevant_notes to anyone until an admin approves it
+(GET /v1/admin/knowledge/candidates, POST /v1/admin/knowledge/{id}/review). One client's task cannot put
+text in front of another client before a person has looked at it.
 """
 
 from __future__ import annotations
@@ -33,6 +38,9 @@ SEARCH_LIMIT = 5
 TEXT_MAX = 1200
 PROMPT_CHARS = 3000
 HELI_SOURCE = "heli://rules"  # the owner's own rules: they do not age
+CANDIDATE = "candidate"
+REJECTED = "rejected"
+HIDDEN = (CANDIDATE, REJECTED)
 
 _WORD = re.compile(r"[a-zа-яё0-9]+", re.I)
 _STOP = {
@@ -148,7 +156,7 @@ def search(session: Session, query: str, limit: int = SEARCH_LIMIT) -> list[Know
     if not words:
         return []
     scored = []
-    for note in session.scalars(select(KnowledgeNote)):
+    for note in session.scalars(select(KnowledgeNote).where(KnowledgeNote.origin.not_in(HIDDEN))):
         topic_hits = len(words & _stems(note.topic))
         text_hits = len(words & _stems(note.text))
         score = topic_hits * 2 + text_hits
@@ -185,7 +193,10 @@ def with_knowledge(text: str, notes: list[str]) -> str:
     return f"{text}\n\nБаза знаний Heli (проверенные правила с источником; помеченное «устарело» — перепроверь):\n{block}"
 
 
-def save(session: Session, user, topic: str, text: str, source_url: str) -> KnowledgeNote:
+def save(
+    session: Session, user, topic: str, text: str, source_url: str, *, candidate: bool = False
+) -> KnowledgeNote:
+    """candidate=True: a note from a live client task, hidden until an admin approves it."""
     topic = mask_text(topic.strip())[:200]
     text = mask_text(text.strip())[:TEXT_MAX]
     source_url = source_url.strip()
@@ -196,17 +207,63 @@ def save(session: Session, user, topic: str, text: str, source_url: str) -> Know
     now = _now()
     same = session.scalars(select(KnowledgeNote).where(KnowledgeNote.topic == topic)).all()
     for note in same:
-        if _stems(note.text) == _stems(text):
+        if note.origin == REJECTED or _stems(note.text) != _stems(text):
+            continue
+        if candidate and note.origin != CANDIDATE:
+            # The same rule confirmed again from a client task: only the check date moves.
+            note.checked_at, note.stale, note.stale_reason = now, False, None
+        else:
             note.checked_at, note.stale, note.stale_reason, note.source_url = now, False, None, source_url[:1000]
-            session.flush()
-            return note
+        session.flush()
+        return note
     note = KnowledgeNote(
-        topic=topic, text=text, source_url=source_url[:1000], origin="agent", checked_at=now,
-        created_by=getattr(user, "id", None), created_at=now,
+        topic=topic, text=text, source_url=source_url[:1000], origin=CANDIDATE if candidate else "agent",
+        checked_at=now, created_by=getattr(user, "id", None), created_at=now,
     )
     session.add(note)
     session.flush()
     return note
+
+
+def is_candidate_run(user, task_id) -> bool:
+    """A save from a live task of a non-admin account is a candidate; a run without a task or an admin's is not."""
+    return task_id is not None and not bool(getattr(user, "is_admin", False))
+
+
+def candidates(session: Session, limit: int = 100) -> list[KnowledgeNote]:
+    return list(
+        session.scalars(
+            select(KnowledgeNote)
+            .where(KnowledgeNote.origin == CANDIDATE)
+            .order_by(KnowledgeNote.created_at.desc())
+            .limit(limit)
+        )
+    )
+
+
+def review(session: Session, note_id: uuid.UUID, decision: str, reviewer) -> KnowledgeNote | None:
+    note = session.get(KnowledgeNote, note_id)
+    if note is None or note.origin != CANDIDATE:
+        return None
+    now = _now()
+    note.origin = "agent" if decision == "approve" else REJECTED
+    note.approved_at = now if decision == "approve" else None
+    note.reviewed_by = getattr(reviewer, "id", None)
+    session.flush()
+    return note
+
+
+def public_note(note: KnowledgeNote) -> dict:
+    return {
+        "id": str(note.id),
+        "topic": note.topic,
+        "text": note.text,
+        "source_url": note.source_url,
+        "origin": note.origin,
+        "checked_at": note.checked_at.isoformat() if note.checked_at else None,
+        "approved_at": note.approved_at.isoformat() if note.approved_at else None,
+        "created_at": note.created_at.isoformat() if note.created_at else None,
+    }
 
 
 def mark_stale(session: Session, note_id: str, reason: str) -> KnowledgeNote | None:
@@ -289,14 +346,23 @@ def execute(session, user, task_id, name: str, args: dict) -> ClientResult:
             )
         return ClientResult("\n".join(render(n) for n in notes))
     if name == "knowledge_save":
+        candidate = is_candidate_run(user, task_id)
         try:
-            note = save(session, user, str(args.get("topic") or ""), str(args.get("fact") or ""), str(args.get("source_url") or ""))
+            note = save(
+                session, user, str(args.get("topic") or ""), str(args.get("fact") or ""),
+                str(args.get("source_url") or ""), candidate=candidate,
+            )
             session.commit()
         except ValueError as exc:
             session.rollback()
             if str(exc) == "source":
                 return ClientResult("Ошибка: нужен адрес источника https://… — без источника вывод не сохраняется.", "no_source")
             return ClientResult("Ошибка: укажи тему и вывод.", "bad_args")
+        if note.origin == CANDIDATE:
+            return ClientResult(
+                f"Вывод принят на проверку: [{note.id}] {note.topic} (проверено {note.checked_at:%d.%m.%Y}). "
+                "В базе знаний он появится после проверки; в этой задаче опирайся на сам источник."
+            )
         return ClientResult(f"Сохранено в базу знаний: [{note.id}] {note.topic} (проверено {note.checked_at:%d.%m.%Y}).")
     if name == "knowledge_mark_stale":
         note = mark_stale(session, str(args.get("id") or ""), str(args.get("reason") or ""))

@@ -58,6 +58,7 @@ from app.support import SupportError, create_incident
 from app.trajectories import (
     TrajectoryError,
     add_step,
+    delete_my_tasks,
     delete_my_trajectories,
     finish_task,
     list_documents,
@@ -86,6 +87,8 @@ _STATUS = {
     "bad_outcome": 400,
     "bad_rating": 400,
     "bad_acceptance": 400,
+    "bad_reason_code": 400,
+    "bad_mail_disposition": 400,
     "bad_screenshot": 400,
     "limit_reached": 403,
     "local_browser_required": 409,
@@ -207,6 +210,10 @@ class FeedbackBody(BaseModel):
     acceptance: str | None = None
     comment: str | None = None
     user_edit: str | None = None
+    # Optional, newer apps only: one-tap reason after 👎, «Исправил сам», what happened to the letter.
+    reason_code: str | None = None
+    user_fixed: bool | None = None
+    mail_disposition: str | None = None
 
 
 @router.post("/auth/register", status_code=201)
@@ -334,11 +341,33 @@ def update_consents(
 
 @router.delete("/me/trajectories")
 def delete_trajectories(
+    include_tasks: bool = False,
     user: User = Depends(get_current_user),
     session: Session = Depends(get_db),
 ) -> dict:
+    """The training copy only. include_tasks=true also deletes the task history (DELETE /v1/me/tasks)."""
+    if include_tasks:
+        return _delete_history(session, user)
     removed = delete_my_trajectories(session, user)
     return {"deleted": removed}
+
+
+def _delete_history(session: Session, user: User) -> dict:
+    running = runs.registry.running_for(user.id)
+    counts = delete_my_tasks(session, user, keep=running)
+    return {"deleted": counts, "kept_running": len(running)}
+
+
+@router.delete("/me/tasks")
+def delete_tasks(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    """Delete my task history: tasks, steps, ratings, signals and training documents.
+
+    Saved logins (credentials) and memory stay.
+    """
+    return _delete_history(session, user)
 
 
 @router.post("/tasks/estimate")
@@ -712,6 +741,14 @@ def admin_feedback(
         ).all()
     ) if ids else {}
     stored = set(session.scalars(select(Trajectory.task_id).where(Trajectory.task_id.in_(ids)))) if ids else set()
+    from app.models import TaskSignal
+
+    signal_kinds: dict = {}
+    if ids:
+        for task_id, kind in session.execute(
+            select(TaskSignal.task_id, TaskSignal.kind).where(TaskSignal.task_id.in_(ids)).order_by(TaskSignal.created_at)
+        ):
+            signal_kinds.setdefault(task_id, []).append(kind)
     tasks = []
     for task, fb, email in rows:
         tasks.append(
@@ -725,12 +762,18 @@ def admin_feedback(
                 "steps": int(steps.get(task.id, 0)),
                 "cost_rub": str(costs.get(task.id) or 0),
                 "in_training_set": task.id in stored,
+                "stopped": task.stopped,
+                "duration_ms": task.duration_ms,
+                "signals": signal_kinds.get(task.id, []),
                 "feedback": (
                     {
                         "rating": fb.rating,
                         "acceptance": fb.acceptance,
                         "comment": fb.comment,
                         "user_edit": fb.user_edit,
+                        "reason_code": fb.reason_code,
+                        "user_fixed": fb.user_fixed,
+                        "mail_disposition": fb.mail_disposition,
                         "created_at": _iso_utc(fb.created_at),
                     }
                     if fb is not None
@@ -746,6 +789,52 @@ def admin_feedback(
         "trajectories": session.scalar(select(func.count()).select_from(Trajectory)) or 0,
     }
     return {"totals": totals, "tasks": tasks}
+
+
+@router.get("/admin/quality")
+def admin_quality(
+    days: int = 7,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    """Quality over the last `days`: ratings, reasons, signals, stops, cost and the dataset funnel."""
+    _require_admin(user)
+    from app.quality import quality_summary
+
+    return quality_summary(session, days=max(1, min(days, 365)))
+
+
+class KnowledgeReviewBody(BaseModel):
+    decision: str = Field(pattern="^(approve|reject)$")
+
+
+@router.get("/admin/knowledge/candidates")
+def admin_knowledge_candidates(
+    limit: int = 100,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    """Notes saved from live client tasks, hidden from search until approved."""
+    _require_admin(user)
+    from app import knowledge
+
+    return {"candidates": [knowledge.public_note(n) for n in knowledge.candidates(session, limit=max(1, min(limit, 500)))]}
+
+
+@router.post("/admin/knowledge/{note_id}/review")
+def admin_knowledge_review(
+    note_id: uuid.UUID,
+    body: KnowledgeReviewBody,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    _require_admin(user)
+    from app import knowledge
+
+    note = knowledge.review(session, note_id, body.decision, user)
+    if note is None:
+        raise HTTPException(status_code=404, detail="not_found")
+    return knowledge.public_note(note)
 
 
 @router.get("/admin/incidents")
@@ -861,19 +950,20 @@ def run(
         _fail(exc)
     except HeliError as exc:
         session.rollback()
-        runs._close_task(session, task.id, "fail", None)
+        runs._close_task(session, task.id, "fail", None, "error")
         status = 503 if exc.code == "missing_api_key" else 502
         raise HTTPException(status_code=status, detail=exc.code) from None
     # A JSON run is over here: give the task its outcome so it reaches the trajectories too
     # (the SSE path does the same in app.agent.runs). A later rating overrides it.
     session.commit()
-    runs._close_task(session, task.id, "aborted" if turn.stopped else "success", turn.text)
+    runs._close_task(session, task.id, "aborted" if turn.stopped else "success", turn.text, turn.stopped)
     return {
         "alias": turn.alias,
         "reply": turn.text,
         "task_type": turn.task_type,
         "complexity": turn.complexity,
         "stopped": turn.stopped,
+        "mail": runs.task_has_mail(session, task.id),
     }
 
 
@@ -1037,10 +1127,37 @@ def feedback(
             acceptance=body.acceptance,
             comment=body.comment,
             user_edit=body.user_edit,
+            reason_code=body.reason_code,
+            user_fixed=body.user_fixed,
+            mail_disposition=body.mail_disposition,
         )
     except TrajectoryError as exc:
         _fail(exc)
-    return {"rating": row.rating, "acceptance": row.acceptance}
+    return {
+        "rating": row.rating,
+        "acceptance": row.acceptance,
+        "reason_code": row.reason_code,
+        "user_fixed": row.user_fixed,
+        "mail_disposition": row.mail_disposition,
+    }
+
+
+@router.post("/tasks/{task_id}/dismiss")
+def dismiss_feedback(
+    task_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    """The rating card closed with ✕: no rating is required, the server only notes it (abandon)."""
+    from app import signals
+    from app.trajectories import _own_task
+
+    try:
+        task = _own_task(session, user, task_id)
+    except TrajectoryError as exc:
+        _fail(exc)
+    noted = signals.safe(signals.on_dismiss, session, user, task)
+    return {"ok": True, "noted": bool(noted)}
 
 
 class IncidentBody(BaseModel):
@@ -1114,10 +1231,14 @@ def export_trajectories(
     if success_only is None:
         success_only = kind == "sft"
     try:
+        # SFT wants a confirmed «good» (👍, accepted or verify_ok), not a bare auto «success».
+        # The shared open-access / training accounts stay out of SFT and DPO (raw keeps them, internal=true).
         documents = list_documents(
             session,
             success_only=success_only,
             thumbs_up_only=thumbs_up_only,
+            confirmed_only=kind == "sft",
+            exclude_internal=kind in {"sft", "dpo"},
         )
     except TrajectoryError as exc:
         _fail(exc)

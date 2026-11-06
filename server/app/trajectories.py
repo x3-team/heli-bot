@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -20,7 +21,7 @@ from sqlalchemy.orm import Session
 from app.aliases import PUBLIC_MODEL_ALIASES
 from app.config import get_settings
 from app.masking import mask_text, mask_value, redact_secrets, redact_secrets_text
-from app.models import Task, TaskFeedback, TaskStep, Trajectory, User
+from app.models import Task, TaskFeedback, TaskSignal, TaskStep, Trajectory, UsageLedger, User
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +29,9 @@ OUTCOMES = {"success", "fail", "aborted"}
 ACCEPTANCE = {"accepted", "edited", "rejected"}
 OBSERVATIONS = {"dom", "screenshot", "none"}
 CONFIRMATIONS = {"approved", "edited", "rejected"}
+# One-tap reasons after 👎 (UI labels in packages/ui: «Неверные данные», «Сделал не всё», …).
+REASON_CODES = {"wrong_fact", "incomplete", "wrong_system", "refused_needed", "dangerous", "slow", "other"}
+MAIL_DISPOSITIONS = {"sent_as_is", "edited_then_sent", "declined"}
 SCREENSHOT_LIMIT = 2_000_000
 
 
@@ -61,6 +65,48 @@ def _money(value: Decimal | int | float | str) -> Decimal:
     return Decimal(str(value)).quantize(Decimal("0.000001"))
 
 
+def _norm_email(value: str) -> str:
+    return (value or "").strip().lower()
+
+
+def internal_emails() -> set[str]:
+    """Accounts whose tasks never go into the SFT/DPO sets: the shared open-access account and the
+    internal training accounts. Works with HELI_OPEN_ACCESS_EMAIL alone and with HELI_TRAINING_EMAILS."""
+    settings = get_settings()
+    emails = {_norm_email(settings.open_access_email)}
+    raw = getattr(settings, "training_emails", "") or os.environ.get("HELI_TRAINING_EMAILS", "")
+    emails |= {_norm_email(part) for part in str(raw).split(",") if part.strip()}
+    emails.discard("")
+    return emails
+
+
+def is_internal(user: User | None) -> bool:
+    return user is not None and _norm_email(user.email) in internal_emails()
+
+
+def revision() -> str | None:
+    for name in ("APP_REVISION", "GIT_SHA", "GIT_COMMIT", "SOURCE_COMMIT"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value[:64]
+    return None
+
+
+def _aware(moment: datetime) -> datetime:
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def _mark_finished(task: Task, stopped: str | None) -> None:
+    """Run journal: the first finish wins (a later rating does not move the end of the run)."""
+    if task.finished_at is not None:
+        return
+    now = _now()
+    task.finished_at = now
+    task.stopped = (stopped or None) and str(stopped)[:32]
+    if task.created_at is not None:
+        task.duration_ms = max(0, int((now - _aware(task.created_at)).total_seconds() * 1000))
+
+
 def start_task(session: Session, user: User, request_text: str, context: dict | None) -> Task:
     if not user.consent_pdn:
         raise TrajectoryError("pdn_consent_required")
@@ -74,6 +120,9 @@ def start_task(session: Session, user: User, request_text: str, context: dict | 
     )
     session.add(task)
     session.flush()
+    from app import signals
+
+    signals.safe(signals.on_task_start, session, user, task)
     log.info("task started id=%s", task.id)
     return task
 
@@ -159,6 +208,11 @@ def finish_task(
     if final_answer:
         # A rating after a stopped or failed run sends no answer: keep the one the run left.
         task.final_answer = final_answer
+    if task.finished_at is None:
+        _mark_finished(task, "stop" if outcome == "aborted" else None)
+        from app import signals
+
+        signals.safe(signals.on_run_end, session, task)
     session.flush()
     refresh_document(session, task)
     log.info("task finished id=%s outcome=%s", task.id, outcome)
@@ -170,15 +224,30 @@ def auto_finish(
     task_id: uuid.UUID,
     outcome: str,
     final_answer: str | None,
+    *,
+    stopped: str | None = None,
 ) -> Task | None:
-    """Close a run the user has not rated yet, so every task reaches the training set.
+    """Close a run the user has not rated yet, so every task reaches the dataset.
 
-    A later rating from the user (finish_task) overrides this outcome.
+    A later rating from the user (finish_task) overrides this outcome. An auto «success» alone is not a
+    training example: the SFT export also wants 👍, «принято» or a verify_ok signal (list_documents).
     """
     if outcome not in OUTCOMES:
         raise TrajectoryError("bad_outcome")
     task = session.get(Task, task_id)
-    if task is None or task.outcome is not None:
+    if task is None:
+        return task
+    from app import signals
+
+    if task.finished_at is None:
+        _mark_finished(task, stopped)
+        signals.safe(signals.on_run_end, session, task)
+    if task.outcome is not None:
+        session.flush()
+        try:
+            refresh_document(session, task)
+        except TrajectoryError as exc:
+            log.error("trajectory not written task=%s code=%s", task.id, exc.code)
         return task
     task.outcome = outcome
     if final_answer:
@@ -202,11 +271,22 @@ def rate_task(
     acceptance: str | None = None,
     comment: str | None = None,
     user_edit: str | None = None,
+    reason_code: str | None = None,
+    user_fixed: bool | None = None,
+    mail_disposition: str | None = None,
 ) -> TaskFeedback:
     if rating is not None and rating not in {1, -1}:
         raise TrajectoryError("bad_rating")
     if acceptance is not None and acceptance not in ACCEPTANCE:
         raise TrajectoryError("bad_acceptance")
+    if reason_code is not None and reason_code not in REASON_CODES:
+        raise TrajectoryError("bad_reason_code")
+    if mail_disposition is not None and mail_disposition not in MAIL_DISPOSITIONS:
+        raise TrajectoryError("bad_mail_disposition")
+    if user_fixed:
+        # «Исправил сам»: the bot's answer was not it; user_edit is how it should be (a DPO pair).
+        acceptance = acceptance or "edited"
+        rating = -1 if rating is None else rating
     task = _own_task(session, user, task_id)
     row = task.feedback
     if row is None:
@@ -220,7 +300,13 @@ def rate_task(
     if comment is not None:
         row.comment = comment
     if user_edit is not None:
-        row.user_edit = user_edit
+        row.user_edit = redact_secrets_text(user_edit)
+    if reason_code is not None:
+        row.reason_code = reason_code
+    if user_fixed is not None:
+        row.user_fixed = user_fixed
+    if mail_disposition is not None:
+        row.mail_disposition = mail_disposition
     session.flush()
     refresh_document(session, task)
     return row
@@ -250,6 +336,42 @@ def delete_my_trajectories(session: Session, user: User) -> int:
     return len(rows)
 
 
+def delete_my_tasks(session: Session, user: User, *, keep: set[uuid.UUID] | None = None) -> dict[str, int]:
+    """Delete the user's task journal: tasks, steps, ratings, signals and training documents.
+
+    Credentials and memory stay. Spend rows stay for billing, without the link to the task.
+    `keep`: tasks still running (their run would fail on a missing row).
+    """
+    keep = keep or set()
+    ids = [tid for tid in session.scalars(select(Task.id).where(Task.user_id == user.id)) if tid not in keep]
+    counts = {"tasks": 0, "steps": 0, "feedback": 0, "signals": 0, "trajectories": 0}
+    for row in session.scalars(select(TaskSignal).where(TaskSignal.user_id == user.id)):
+        if row.task_id is None or row.task_id not in keep:
+            session.delete(row)
+            counts["signals"] += 1
+    if ids:
+        for row in session.scalars(select(Trajectory).where(Trajectory.task_id.in_(ids))):
+            session.delete(row)
+            counts["trajectories"] += 1
+        for row in session.scalars(select(TaskFeedback).where(TaskFeedback.task_id.in_(ids))):
+            session.delete(row)
+            counts["feedback"] += 1
+        for row in session.scalars(select(TaskStep).where(TaskStep.task_id.in_(ids))):
+            session.delete(row)
+            counts["steps"] += 1
+        for row in session.scalars(select(UsageLedger).where(UsageLedger.task_id.in_(ids))):
+            row.task_id = None
+        for row in session.scalars(select(Task).where(Task.parent_task_id.in_(ids))):
+            row.parent_task_id = None
+        session.flush()
+        for row in session.scalars(select(Task).where(Task.id.in_(ids))):
+            session.delete(row)
+            counts["tasks"] += 1
+    session.flush()
+    log.info("task history deleted tasks=%s", counts["tasks"])
+    return counts
+
+
 def refresh_document(session: Session, task: Task) -> Trajectory | None:
     user = session.get(User, task.user_id)
     steps = list(
@@ -258,6 +380,9 @@ def refresh_document(session: Session, task: Task) -> Trajectory | None:
         )
     )
     feedback_row = session.scalar(select(TaskFeedback).where(TaskFeedback.task_id == task.id))
+    signal_rows = list(
+        session.scalars(select(TaskSignal).where(TaskSignal.task_id == task.id).order_by(TaskSignal.created_at))
+    )
     if user is None or not user.consent_training:
         if user is not None and task.outcome is not None:
             log.info("trajectory skipped task=%s: no training consent", task.id)
@@ -267,7 +392,7 @@ def refresh_document(session: Session, task: Task) -> Trajectory | None:
         return None
     if task.outcome is None:
         return None
-    payload = build_payload(task, user, steps, feedback_row)
+    payload = build_payload(task, user, steps, feedback_row, signal_rows)
     now = _now()
     row = session.scalar(select(Trajectory).where(Trajectory.task_id == task.id))
     if row is None:
@@ -297,6 +422,7 @@ def build_payload(
     user: User,
     steps_in: list[TaskStep] | None = None,
     feedback_row: TaskFeedback | None = None,
+    signal_rows: list[TaskSignal] | None = None,
 ) -> dict[str, Any]:
     feedback_row = task.feedback if feedback_row is None else feedback_row
     feedback = None
@@ -306,10 +432,15 @@ def build_payload(
             "acceptance": feedback_row.acceptance,
             "comment": mask_text(feedback_row.comment or "") or None,
             "user_edit": mask_text(feedback_row.user_edit or "") or None,
+            "reason_code": feedback_row.reason_code,
+            "user_fixed": feedback_row.user_fixed,
+            "mail_disposition": feedback_row.mail_disposition,
         }
     steps = []
     confirmations = []
+    total = Decimal("0")
     for step in steps_in if steps_in is not None else task.steps:
+        total += Decimal(step.cost_rub or 0)
         observation = None
         if step.observation_type:
             observation = {
@@ -358,6 +489,38 @@ def build_payload(
         "final_answer": mask_text(task.final_answer or "") or None,
         "feedback": feedback,
         "confirmations": confirmations,
+        "signals": [
+            {"kind": row.kind, "payload": mask_value(row.payload or {})} for row in (signal_rows or [])
+        ],
+        "stopped": task.stopped,
+        "duration_ms": task.duration_ms,
+        "cost_rub_total": format(_money(total), "f"),
+        "parent_id": str(task.parent_task_id) if task.parent_task_id else None,
+        "revision": revision(),
+        # The shared open-access / training account: raw export only, never SFT or DPO.
+        "internal": is_internal(user),
+    }
+
+
+def confirmed_good(payload: dict[str, Any]) -> bool:
+    """A training example needs a real «good»: 👍, «принято» or a passed check (verify_ok).
+
+    An auto_finish «success» alone (the run simply did not stop) does not count.
+    """
+    feedback = payload.get("feedback") or {}
+    if feedback.get("rating") == -1:
+        return False
+    if feedback.get("rating") == 1 or feedback.get("acceptance") == "accepted":
+        return True
+    return any(s.get("kind") == "verify_ok" for s in payload.get("signals") or [])
+
+
+def _internal_user_ids(session: Session) -> set[uuid.UUID]:
+    emails = internal_emails()
+    if not emails:
+        return set()
+    return {
+        uid for uid, email in session.execute(select(User.id, User.email)) if _norm_email(email) in emails
     }
 
 
@@ -366,17 +529,24 @@ def list_documents(
     *,
     success_only: bool = False,
     thumbs_up_only: bool = False,
+    confirmed_only: bool = False,
+    exclude_internal: bool = False,
 ) -> list[dict[str, Any]]:
     rows = session.scalars(select(Trajectory).where(Trajectory.consent.is_(True))).all()
+    internal_ids = _internal_user_ids(session) if exclude_internal else set()
     documents = []
     for row in rows:
         payload = row.payload
+        if exclude_internal and (payload.get("internal") or row.user_id in internal_ids):
+            continue
         if success_only and payload.get("result") != "success":
             continue
         if thumbs_up_only:
             feedback = payload.get("feedback") or {}
             if feedback.get("rating") != 1:
                 continue
+        if confirmed_only and not confirmed_good(payload):
+            continue
         documents.append(payload)
     return documents
 
