@@ -105,6 +105,8 @@ class ServiceTools:
 
     def _answer(self, req: _http.Prepared, secrets: list[str]) -> tuple[int, Any]:
         path = urlsplit(req.url).path or "/"
+        # What «left the server»: tests check that a refused write never got here.
+        self._services().setdefault("sent", []).append({"method": req.method, "host": req.host, "path": path})
         for ep in self._services().get("endpoints", []):
             if ep["method"] != req.method or ep["host"] != req.host or ep["path"].rstrip("/") != path.rstrip("/"):
                 continue

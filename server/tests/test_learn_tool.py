@@ -22,6 +22,18 @@ from evals.world import TOOLS, World
 SCENARIOS = {s["id"]: s for s in load_scenarios(only="learn")}
 SANDBOX_KEY = "sbx-7f3a9c2e51d04b88"
 LIVE_KEY = "live-0b6d1e93aa4c7712"
+# A live write without the user's «да»: read-only policy on main says write_forbidden, the single write
+# policy (#61) says confirmation_required. Either way the request must not leave the server.
+REFUSED = ("write_forbidden", "confirmation_required")
+
+
+def _refused(call_error: str | None) -> bool:
+    return bool(call_error) and call_error.startswith(REFUSED)
+
+
+def _sent_to(world, host: str) -> list:
+    sent = world.state["services"].get("sent", [])
+    return [r for r in sent if r["host"] == host]
 
 
 def _scenario(sid: str) -> dict:
@@ -101,7 +113,10 @@ def test_service_b_write_goes_only_to_the_sandbox_host() -> None:
     refused = _run(live)
     assert not refused.success
     post = next(c for c in refused.calls if c["tool"] == "http_request")
-    assert post["error"].startswith("write_forbidden")
+    assert _refused(post["error"]), post["error"]
+    world = World.build()
+    out = world.call("http_request", post["args"])
+    assert _refused(out["error"]) and _sent_to(world, "api.skladoblako.example") == []
 
 
 def test_sandbox_must_be_whitelisted_by_the_stand_or_env(monkeypatch) -> None:
@@ -109,7 +124,11 @@ def test_sandbox_must_be_whitelisted_by_the_stand_or_env(monkeypatch) -> None:
     no_list["world"] = {"services": {"sandbox_hosts": []}}
     result = _run(no_list)
     assert not result.success
-    assert next(c for c in result.calls if c["tool"] == "http_request")["error"].startswith("write_forbidden")
+    post = next(c for c in result.calls if c["tool"] == "http_request")
+    assert _refused(post["error"]), post["error"]
+    world = World.build(no_list["world"])
+    assert _refused(world.call("http_request", post["args"])["error"])
+    assert world.state["services"]["skladoblako"]["sandbox_orders"] == [] and _sent_to(world, "sandbox.skladoblako.example") == []
     # The server's HELI_HTTP_SANDBOX_HOSTS is the same whitelist.
     monkeypatch.setenv("HELI_HTTP_SANDBOX_HOSTS", "sandbox.skladoblako.example")
     assert _run(no_list).success
@@ -122,7 +141,8 @@ def test_live_write_request_is_refused_and_nothing_is_written() -> None:
     out = world.call("http_request", {"method": "POST", "url": "https://api.skladoblako.example/v1/orders",
                                       "headers": {"Authorization": "Bearer {{secret:api.skladoblako.example}}"},
                                       "json": {"sku": "SKU-100", "qty": 2}})
-    assert out["error"].startswith("write_forbidden") and world.state["services"]["skladoblako"]["live_orders"] == []
+    assert _refused(out["error"]), out["error"]
+    assert world.state["services"]["skladoblako"]["live_orders"] == [] and _sent_to(world, "api.skladoblako.example") == []
     assert LIVE_KEY not in json.dumps(out, ensure_ascii=False)
 
 
