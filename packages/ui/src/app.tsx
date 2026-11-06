@@ -38,6 +38,7 @@ import {
 } from "./api";
 import { AdminTesters } from "./admin";
 import { resolveApiBase } from "./apiBase";
+import { ConnectHelp } from "./connectHelp";
 import { trialLabel } from "./authSession";
 import { clampComputerWidth as clampWidth, clampPercent, confirmationNeeded, limitTone } from "./behavior";
 import { ComputerConfirmCard } from "./computerCard";
@@ -1695,6 +1696,7 @@ function Settings({
       <section className="card">
         <h2>Подключения</h2>
         <p className="muted">Сайт и имя видны вам. Секрет шифруется и в ответы не попадает.</p>
+        <ConnectHelp />
         <ul className="integration-logos" aria-label="Поддерживаемые сервисы">
           {INTEGRATION_LOGOS.map((logo) => (
             <li key={logo.id}>
@@ -1725,11 +1727,11 @@ function Settings({
               });
           }}
         >
-          <input aria-label="Сайт" placeholder="Сайт" value={site} onChange={(event) => setSite(event.target.value)} />
-          <input aria-label="Имя" placeholder="Имя" value={username} onChange={(event) => setUsername(event.target.value)} />
+          <input aria-label="Сайт" placeholder="Сайт: imap.company.ru, yandex.ru, company.bitrix24.ru" value={site} onChange={(event) => setSite(event.target.value)} />
+          <input aria-label="Имя" placeholder="Имя: адрес почты, webhook или token" value={username} onChange={(event) => setUsername(event.target.value)} />
           <input
             aria-label="Секрет"
-            placeholder="Секрет"
+            placeholder="Секрет: пароль приложения, адрес вебхука или токен"
             type="password"
             value={secret}
             autoComplete="new-password"

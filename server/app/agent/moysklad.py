@@ -218,7 +218,8 @@ def execute(session, user, task_id, name: str, args: dict, transport: httpx.Base
             raise MsError(
                 "no_credential",
                 "Нет доступа к МоемуСкладу в «Доступах». Читай данные с экрана, а пользователю скажи, что для "
-                "проверки через API нужно сохранить логин и пароль МоегоСклада.",
+                "проверки через API нужно сохранить доступ в «Доступах»: сайт online.moysklad.ru, логин и пароль "
+                "МоегоСклада (или логин token и токен доступа к API). Пароль не пишите в чат.",
             )
         try:
             secret = secret_for_browser(session, user, uuid.UUID(cred["id"]))
