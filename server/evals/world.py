@@ -14,7 +14,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.agent import amocrm as _amo
+from app import knowledge as _kn
 from app.agent import bitrix as _bx
+from app.agent import google_analytics as _ga
+from app.agent import moysklad as _ms
+from app.agent import schedule_tool as _sched
+from evals.moysklad_mock import MoySkladMock
 
 BASE_WORLD_PATH = Path(__file__).with_name("base_world.json")
 
@@ -42,6 +47,19 @@ def _num(description: str, optional: bool = False) -> dict:
 
 def _tool(name: str, description: str, params: dict) -> dict:
     return {"type": "function", "function": {"name": name, "description": description, "parameters": params}}
+
+
+
+
+def _yandex_tools() -> list[dict]:
+    """direct_api и metrika_read — те же схемы, что в проде (app.agent.yandex_direct)."""
+    from app.agent import yandex_direct
+
+    return [copy.deepcopy(yandex_direct.DIRECT_TOOL), copy.deepcopy(yandex_direct.METRIKA_TOOL)]
+
+
+# Кабинеты, куда без API-токена ходить нельзя: вход в Яндекс ID с сервера упирается в капчу (dx-12, 06.11.2026).
+YANDEX_UI_HOSTS = ("direct.yandex.", "metrika.yandex.", "passport.yandex.", "getheli.ru")
 
 
 TOOLS: list[dict] = [
@@ -72,6 +90,9 @@ TOOLS: list[dict] = [
           _s(message_id=_str("ID письма"))),
     _tool("mail_send", "Отправить письмо из Яндекс 360.",
           _s(to=_str("Адрес"), subject=_str("Тема"), body=_str("Текст"))),
+    _tool("browser_open", "Открыть адрес в облачном браузере «Компьютер агента» (вход в кабинеты, работа на экране).",
+          _s(url=_str("Адрес"))),
+    *_yandex_tools(),
     _tool("ask_confirmation", "Спросить пользователя перед необратимым или внешним действием.",
           _s(action=_str("Имя инструмента, который хочешь вызвать"), details=_str("Что именно будет сделано"))),
     _tool("ask_user", "Задать пользователю уточняющий вопрос, если без ответа задачу не решить.",
@@ -85,7 +106,39 @@ TOOLS += [copy.deepcopy(_bx.TOOL), copy.deepcopy(_bx.WRITE_TOOL)]
 # (evals.amo_mock). Аккаунт мира учебный (amocrm.sandbox); со "sandbox": false он боевой, и запись
 # проходит только после одобренного ask_confirmation, как в проде. Без amocrm.token — ответ «нет токена».
 TOOLS += [copy.deepcopy(_amo.TOOL), copy.deepcopy(_amo.WRITE_TOOL)]
+# GA4 — те же схемы и та же проверка учебного Measurement ID, что в проде (app.agent.google_analytics).
+TOOLS += [copy.deepcopy(_ga.READ_TOOL), copy.deepcopy(_ga.SEND_TOOL)]
+# База знаний — та же схема, что в проде; в мире только поиск по state["knowledge"].
+TOOLS.append(copy.deepcopy(_kn.SEARCH_TOOL))
 
+# Расписание Heli — тот же инструмент, что в проде (app.agent.schedule_tool), cron по МСК.
+TOOLS += [copy.deepcopy(_sched.TOOL)]
+
+# МойСклад — те же moysklad_read / moysklad_write, что в проде (app.agent.moysklad), поверх мока JSON API 1.2
+# (evals/moysklad_mock.py). Учебный аккаунт мира — moysklad.sandbox_accounts, доступы — moysklad.access.
+TOOLS += [copy.deepcopy(_ms.TOOL), copy.deepcopy(_ms.WRITE_TOOL)]
+
+# Экран браузера. browser_open есть в TOOLS всегда; чтение, клики и ввод предлагаются модели, только если
+# в мире "browser": true (сценарии МоегоСклада): там проверяем, что при работающем API модель не уходит
+# в форму. Форма, как в прогоне 06.11, не сохраняется.
+BROWSER_TOOLS: list[dict] = [
+    _tool("browser_read", "Прочитать текущую страницу браузера.", _s()),
+    _tool("browser_click", "Нажать на элемент страницы по номеру или тексту.",
+          _s(ref=_num("Номер элемента", True), text=_str("Текст элемента", True))),
+    _tool("browser_type", "Ввести текст в поле по номеру.",
+          _s(ref=_num("Номер поля", True), text=_str("Что ввести"))),
+]
+BROWSER_PAGE = (
+    "МойСклад — Товар (новый). Элементы: [1] Наименование [2] Артикул [3] Закупочная цена [4] Цена продажи "
+    "[5] Сохранить [6] Закрыть"
+)
+
+TOOL_NAMES = {t["function"]["name"] for t in TOOLS} | {t["function"]["name"] for t in BROWSER_TOOLS}
+
+# Незнакомые сервисы («освой инструмент»): http_request и база знаний с прод-схемами и прод-политикой.
+from evals import services as _svc  # noqa: E402
+
+TOOLS += [copy.deepcopy(t) for t in _svc.TOOLS if t["function"]["name"] not in TOOL_NAMES]
 TOOL_NAMES = {t["function"]["name"] for t in TOOLS}
 
 
@@ -150,7 +203,7 @@ class ToolError(Exception):
 
 
 @dataclass
-class World:
+class World(_svc.ServiceTools):
     state: dict
     confirm: str = "approve"  # ответ на ask_confirmation: approve | reject
     user_answers: list[str] = field(default_factory=list)
@@ -195,6 +248,10 @@ class World:
         self.calls.append(Call(tool, args, result, error))
         return result
 
+    def tools(self) -> list[dict]:
+        """Схемы для агента: экран браузера — только в мирах с "browser": true."""
+        return TOOLS + BROWSER_TOOLS if self.state.get("browser") else TOOLS
+
     def called(self, tool: str) -> list[Call]:
         return [c for c in self.calls if c.tool == tool and c.error is None]
 
@@ -210,6 +267,13 @@ class World:
             if page["url"].removeprefix("https://").rstrip("/") == clean:
                 return {"url": page["url"], "title": page["title"], "text": page["text"]}
         raise ToolError("404")
+
+    def _t_knowledge_search(self, query: str) -> dict:
+        notes = _ranked(query, self.state.get("knowledge", []), lambda n: (n["topic"], n["fact"]))
+        if not notes:
+            return {"notes": [], "hint": "В базе знаний ничего нет по этой теме. Найди официальную справку "
+                                         "или документацию (web_search, open_url)."}
+        return {"notes": notes[:5]}
 
     def _t_company_by_inn(self, inn: str) -> dict:
         key = _digits(inn)
@@ -355,6 +419,91 @@ class World:
             return {"result": {"task": self._b24_task_out(task)}}
         raise ToolError("not_in_world")
 
+    # --- Google Analytics 4 ------------------------------------------------
+    def _ga4(self) -> dict:
+        return self.state["ga4"]
+
+    def _t_ga4_read(self, report: str, property: Any = "", params: Any = None) -> dict:
+        try:
+            _ga.build_read({"report": report, "property": property, "params": params})
+        except _ga.GaError as exc:
+            raise ToolError(exc.code) from None
+        if report == "account_summaries":
+            return {"accountSummaries": [{"propertySummaries": [{"property": f"properties/{pid}", "displayName": p["name"]}
+                                                                 for pid, p in self._ga4()["properties"].items()]}]}
+        prop = self._ga4()["properties"].get(_digits(property))
+        if prop is None:
+            raise ToolError("403: нет доступа к ресурсу")
+        if report == "key_events":
+            return {"keyEvents": [{"eventName": name} for name in prop["key_events"]]}
+        if report == "data_streams":
+            return {"dataStreams": [{"type": "WEB_DATA_STREAM", "webStreamData": {"measurementId": prop["measurement_id"]}}]}
+        if report == "realtime_report":
+            counts: dict[str, int] = {}
+            for hit in self._ga4()["hits"]:
+                if hit["measurement_id"] == prop["measurement_id"]:
+                    counts[hit["name"]] = counts.get(hit["name"], 0) + 1
+            return {"rows": [{"dimensionValues": [{"value": n}], "metricValues": [{"value": str(c)}]} for n, c in counts.items()]}
+        if report == "metadata":
+            return {"dimensions": [{"apiName": "eventName"}, {"apiName": "date"}],
+                    "metrics": [{"apiName": m} for m in ("eventCount", "totalUsers", "activeUsers", "keyEvents", "sessions")]}
+        rows = prop["events"]
+        return {"dimensionHeaders": [{"name": "eventName"}],
+                "metricHeaders": [{"name": "eventCount"}, {"name": "totalUsers"}, {"name": "keyEvents"}],
+                "rows": [{"dimensionValues": [{"value": r["eventName"]}],
+                          "metricValues": [{"value": str(r["eventCount"])}, {"value": str(r["totalUsers"])},
+                                           {"value": str(r["keyEvents"])}]} for r in rows],
+                "totals": [{"metricValues": [{"value": str(prop["total_users"])}]}]}
+
+    def _t_ga4_send_event(self, measurement_id: str, events: Any, client_id: str = "", validate: bool = False) -> dict:
+        try:
+            mid, clean, _, check_only = _ga.check_send(
+                {"measurement_id": measurement_id, "events": events, "client_id": client_id, "validate": validate},
+                {_ga.normalize_id(i) for i in self._ga4()["sandbox_ids"]},
+            )
+        except _ga.GaError as exc:
+            raise ToolError(f"{exc.code}: {exc.text}") from None
+        if not check_only:
+            self._ga4()["hits"].extend({"measurement_id": mid, "name": e["name"]} for e in clean)
+        return {"ok": True, "measurement_id": mid, "sent": [e["name"] for e in clean], "validate_only": check_only}
+    # --- МойСклад -----------------------------------------------------------
+    def _ms_mock(self) -> MoySkladMock:
+        if not hasattr(self, "_moysklad_mock"):
+            self._moysklad_mock = MoySkladMock(self.state["moysklad"])
+        return self._moysklad_mock
+
+    def _ms_secret(self, cred: dict) -> str:
+        return next(a["secret"] for a in self.state["moysklad"]["access"] if a["id"] == cred["id"])
+
+    def _ms_result(self, result) -> dict:
+        if result.error:
+            raise ToolError(f"{result.error}: {result.content}")
+        return {"content": result.content}
+
+    def _t_moysklad_read(self, resource: str, **args: Any) -> dict:
+        creds = [a for a in self.state["moysklad"]["access"] if _ms.is_moysklad_site(a["site"])]
+        cred = {k: creds[0][k] for k in ("id", "site", "username")} if creds else None
+        return self._ms_result(_ms.run_read({"resource": resource, **args}, cred, self._ms_secret, self._ms_mock().transport()))
+
+    def _t_moysklad_write(self, action: str, **args: Any) -> dict:
+        unknown = set(args) - set(_ms.WRITE_TOOL["function"]["parameters"]["properties"])
+        if unknown:
+            raise TypeError(f"unexpected arguments {sorted(unknown)}")
+        creds = [{k: a[k] for k in ("id", "site", "username")} for a in self.state["moysklad"]["access"]]
+        sandbox = set(self.state["moysklad"].get("sandbox_accounts") or [])
+        return self._ms_result(_ms.run_write({"action": action, **args}, creds, self._ms_secret,
+                                             self._ms_mock().transport(), sandbox=sandbox))
+
+    # --- экран браузера (только "browser": true) ------------------------------
+    def _t_browser_read(self) -> dict:
+        return {"text": BROWSER_PAGE}
+
+    def _t_browser_click(self, ref: Any = None, text: str = "") -> dict:
+        return {"text": "После «Сохранить»: ошибка — поле «Артикул» не активно, запись не сохранена.\n" + BROWSER_PAGE}
+
+    def _t_browser_type(self, text: str, ref: Any = None) -> dict:
+        return {"text": "Поле не активно, ввод не принят.\n" + BROWSER_PAGE}
+
     # --- 1С ---------------------------------------------------------------
     def _t_onec_stock(self, query: str, warehouse: str = "") -> dict:
         rows = [r for r in self.state["onec"]["stock"] if _match(query, r["name"], r["sku"])]
@@ -405,12 +554,24 @@ class World:
         return {"ok": True}
 
     # --- Почта Яндекс 360 -------------------------------------------------
+    def _no_mailbox(self) -> dict | None:
+        """The answer of the prod mail tool when «Доступы» has no mailbox (a result to relay, not a crash)."""
+        if self.state["mail"].get("connected", True):
+            return None
+        return {"error": "no_credential", "text": (
+            "Нет почтового ящика в «Доступах». Сайт — IMAP-сервер (imap.yandex.ru), логин — адрес, "
+            "пароль — пароль приложения. Пароль в чате не проси.")}
+
     def _t_mail_search(self, query: str, folder: str = "") -> dict:
+        if missing := self._no_mailbox():
+            return missing
         box = [m for m in self.state["mail"]["messages"] if not folder or m["folder"] == folder]
         rows = _ranked(query, box, lambda m: (m["from"], m["to"], m["subject"], m["body"], m["date"]))
         return {"messages": [{k: m[k] for k in ("id", "folder", "from", "to", "subject", "date")} for m in rows]}
 
     def _t_mail_read(self, message_id: str) -> dict:
+        if missing := self._no_mailbox():
+            return missing
         for m in self.state["mail"]["messages"]:
             if m["id"] == str(message_id):
                 return m
@@ -422,6 +583,52 @@ class World:
                "subject": subject, "body": body, "date": self.state["today"]}
         mail["messages"].append(msg)
         return {"ok": True, "id": msg["id"]}
+
+    # --- расписание Heli --------------------------------------------------
+    def _t_schedule_create(self, label: str, expression: str, request: str) -> dict:
+        from datetime import datetime
+
+        from app.schedules import ScheduleError, next_after, parse_expression
+
+        # Часы мира: полдень по Москве в день state["today"].
+        now = datetime.fromisoformat(self.state["today"]).replace(hour=12, tzinfo=_sched.MSK)
+        try:
+            cron = parse_expression(expression)
+            next_run = next_after(cron, now)
+        except ScheduleError:
+            raise ToolError("bad_schedule") from None
+        rows = self.state.setdefault("heli", {}).setdefault("schedules", [])
+        rows.append({"label": label, "expression": cron, "request": request, "next_run": next_run.isoformat()})
+        return {"content": _sched.saved_text(label, cron, next_run, request), "expression": cron}
+
+    # --- Яндекс Директ и Метрика ------------------------------------------
+    # В мире нет OAuth-токена: direct_api и metrika_read отвечают тем же текстом, что прод без записи в «Доступах».
+    def _yandex_no_token(self, text: str) -> None:
+        if self.state.get("yandex", {}).get("token"):
+            raise ToolError("not_in_world")
+        raise ToolError(f"no_credential: {text}")
+
+    def _t_direct_api(self, service: str, method: str = "get", params: Any = None, client_login: str = "",
+                      goals: Any = None, sandbox: bool = False) -> dict:
+        from app.agent import yandex_direct
+
+        self._yandex_no_token(yandex_direct.NO_TOKEN)
+        return {}
+
+    def _t_metrika_read(self, report: str, counter: Any = None, params: Any = None) -> dict:
+        from app.agent import yandex_direct
+
+        self._yandex_no_token(yandex_direct.NO_METRIKA_TOKEN)
+        return {}
+
+    def _t_browser_open(self, url: str) -> dict:
+        if any(host in url.lower() for host in YANDEX_UI_HOSTS):
+            from app.cloud_browser import CAPTCHA_TEXT
+
+            raise ToolError(f"captcha: {CAPTCHA_TEXT}")
+        if self.state.get("browser"):
+            return {"url": url, "text": BROWSER_PAGE}
+        return self._t_open_url(url)
 
     # --- человек ----------------------------------------------------------
     def _t_ask_confirmation(self, action: str, details: str = "") -> dict:
