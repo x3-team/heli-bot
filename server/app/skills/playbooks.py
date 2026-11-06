@@ -225,6 +225,44 @@ PLAYBOOKS = (
 )
 
 
+_DIRECT_GUIDE = """\
+Яндекс Директ (кабинет direct.yandex.ru, API v5) и Метрика. Боевой кабинет — только чтение.
+
+Как читать
+- Точные цифры бери через API: direct_api (service campaigns/adgroups/keywords/bids, method get) и отчёты (service reports, TSV, сервер дождётся 201/202). Метрика — metrika_read (stat, goals). Кабинет на экране — когда API-токена нет; вход сохраняется в «Компьютере агента».
+- Отчёт за период: CAMPAIGN_PERFORMANCE_REPORT с полями CampaignName, Impressions, Clicks, Ctr, AvgCpc, Cost, Conversions, CostPerConversion и Goals (id целей Метрики). Для минус-слов — SEARCH_QUERY_PERFORMANCE_REPORT.
+- Агентский аккаунт: client_login клиента.
+
+Правила советов
+- Конверсионные стратегии (оплата за конверсии, оптимизация конверсий) — только при ≥10 конверсий в неделю по цели. Меньше — ручные ставки или «Максимум кликов» с ограничением цены клика, сначала накопить данные. Перед советом посчитай конверсии за 7 и 28 дней и покажи расчёт.
+- Не меняй ничего в боевом кабинете: ни ставки, ни стратегию, ни статус кампаний. Изменение проверяй в песочнице (direct_api sandbox=true), а пользователю дай список: что, где и почему поменять.
+- Новые правила и ограничения Директа сверяй с официальной справкой (yandex.ru/support/direct, yandex.ru/dev/direct) и сохраняй через knowledge_save.
+
+Капча, SMS или второй фактор при входе в Яндекс ID — не решай: остановись и попроси пользователя пройти её на экране «Компьютер агента»."""
+
+
+PLAYBOOKS = (
+    *PLAYBOOKS,
+    Playbook(
+        id="direct",
+        name="Яндекс Директ",
+        keywords=(r"директ\w*", r"yandex\s?direct", r"direct\.yandex", r"яндекс\W?метрик\w*", r"рекламн\w* кампани\w*", r"контекстн\w* реклам\w*"),
+        host_suffixes=("direct.yandex.ru", "direct.yandex.com", "metrika.yandex.ru"),
+        url_markers=("direct.yandex.", "metrika.yandex."),
+        guide=_DIRECT_GUIDE,
+        login=LoginForm(
+            username_selectors=("input#passp-field-login", "input[name='login']", "input[type='text']"),
+            password_selectors=("input#passp-field-passwd", "input[name='passwd']", "input[type='password']"),
+            submit_selectors=("button[type='submit']", "text=Войти"),
+            two_step=True,
+            next_selectors=("button[type='submit']", "text=Войти"),
+        ),
+        confirm_before=("сохранить", "запустить", "остановить", "удалить", "оплатить", "применить"),
+        auth_hosts=("passport.yandex.ru", "passport.yandex.com"),
+    ),
+)
+
+
 def playbook(app_id: str) -> Playbook | None:
     return next((book for book in PLAYBOOKS if book.id == app_id), None)
 

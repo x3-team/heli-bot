@@ -37,6 +37,8 @@ class Budget:
     autopause: bool = True
     # Rounds added once when the step limit comes while the run still makes progress (no loop, money left).
     extend_steps: int = 0
+    # Unfamiliar service or topic: study it (knowledge base, official help) before acting or answering.
+    study_first: bool = False
 
 
 @dataclass
@@ -142,6 +144,23 @@ UNSAVED_NOTE = (
     "Ты заполнял поля формы, но не нажал «Сохранить» после последнего ввода: без этого запись не появится. "
     "Нажми «Сохранить», проверь, что ошибок нет и запись сохранилась, и только потом отвечай. "
     "Если сохранять не нужно по задаче, так и напиши."
+)
+# «Изучи предмет»: in an unfamiliar service the first action or the answer waits for a look at the
+# knowledge base or the official help. Once per run, so a topic that needs no study costs one round.
+STUDY_TOOLS = {"knowledge_search", "web_search", "open_url", "fetch_page"}
+ACT_TOOLS = {
+    "http_request", "direct_api", "browser_click", "browser_type", "browser_press", "mail_send",
+    "save_credential", "save_file", "use_computer",
+}
+STUDY_GATE = (
+    "Не выполнено: сначала изучи предмет. Сервис или тема незнакомые и в базе знаний их нет: вызови "
+    "knowledge_search, затем найди официальную справку или документацию API (web_search, open_url), выпиши "
+    "ключевые правила и ограничения со ссылкой на источник — и только потом действуй."
+)
+STUDY_NOTE = (
+    "Прежде чем отвечать, изучи предмет: тема незнакомая и в базе знаний её нет. Вызови knowledge_search, "
+    "найди официальную справку или документацию (web_search, open_url) и сверь с ней ответ; в ответе сошлись "
+    "на источник. Если вопрос не про сервис и не про факты, которые могли измениться, ответь как есть."
 )
 # Looking does not change the page; an action in between makes looking again worthwhile.
 _LOOK_TOOLS = ("browser_read", "browser_screenshot")
@@ -320,6 +339,8 @@ def run_agent(
     halfway_done = budget.max_steps < 10
     typed_unsaved = False  # typed into a form on a _FORM_HOSTS page after the last save
     unsaved_nudged = False
+    studied = not budget.study_first
+    study_nudged = False
 
     def safe_args(name: str, args: dict) -> dict:
         """Arguments as they go to the step stream and the trajectory: no passwords, no internals."""
@@ -438,6 +459,12 @@ def run_agent(
                     messages.append({"role": "user", "content": BROKEN_NOTE})
                 continue
             if not completion.tool_calls:
+                if not studied and not study_nudged:
+                    study_nudged = True
+                    messages.append({"role": "assistant", "content": text or "…"})
+                    messages.append({"role": "user", "content": STUDY_NOTE})
+                    emit({"type": "step", "kind": "study_nudge"})
+                    continue
                 if typed_unsaved and not unsaved_nudged:
                     unsaved_nudged = True
                     messages.append({"role": "assistant", "content": text or "…"})
@@ -502,6 +529,11 @@ def run_agent(
                             seen.clear()
                     messages.append({"role": "tool", "tool_call_id": call.id, "content": REPEAT_BLOCKED + note})
                     continue
+                if not studied and not study_nudged and call.name in ACT_TOOLS:
+                    study_nudged = True
+                    emit({"type": "step", "kind": "study_gate", "tool": call.name})
+                    messages.append({"role": "tool", "tool_call_id": call.id, "content": STUDY_GATE})
+                    continue
                 if call.name == "browser_screenshot":
                     screenshots += 1
                     if screenshots > MAX_SCREENSHOTS:
@@ -559,6 +591,8 @@ def run_agent(
                             seen.pop(other)
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": content})
                 if not result.error:
+                    if call.name in STUDY_TOOLS:
+                        studied = True
                     if call.name == "browser_open" and isinstance(args.get("url"), str):
                         last_url = args["url"]
                     last_url = _address(result.content) or last_url
