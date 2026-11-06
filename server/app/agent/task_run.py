@@ -248,6 +248,10 @@ def system_prompt(tools: list[dict], guide: str | None = None, today: str | None
         from app.agent.credentials import CREDENTIALS_HINT
 
         text += CREDENTIALS_HINT
+    if "knowledge_search" in names:
+        from app.knowledge import STUDY_HINT
+
+        text += STUDY_HINT
     if "save_file" in names:
         from app.files import FILES_HINT
 
@@ -301,6 +305,20 @@ def _guide(request: str, url: str | None) -> str | None:
         return None
 
 
+# A request about a service, an API or rules that change: worth studying when nothing is known about it.
+_STUDY_TOPIC = re.compile(
+    r"(?<![\w])(?:api|апи|сервис\w*|кабинет\w*|маркетплейс\w*|интеграц\w*|подключ\w*|настро\w*|тариф\w*|"
+    r"правил\w*|лимит\w*|ограничен\w*|требован\w*|закон\w*|налог\w*|отчёт\w*|отчет\w*|реклам\w*|"
+    r"стратеги\w*|ставк\w*|комисси\w*|модерац\w*)|https?://|\.(?:ru|com|рф)(?![\w])",
+    re.I,
+)
+
+
+def needs_study(request: str, complexity: int, guide: str | None, notes: list[str]) -> bool:
+    """«Изучи предмет»: an unfamiliar service or topic (no playbook, nothing in the knowledge base)."""
+    return complexity >= 2 and not guide and not notes and bool(_STUDY_TOPIC.search(request or ""))
+
+
 class SecretError(Exception):
     def __init__(self, code: str) -> None:
         super().__init__(code)
@@ -346,6 +364,13 @@ def execute_task(
     attached = (task.context or {}).get("files") if isinstance(task.context, dict) else None
     request = task.request_text + attachments_note(user.id, attached if isinstance(attached, list) else [])
     prompt = with_memory(request, relevant(session, user, task.request_text))
+    knowledge_on = executor_for("knowledge_search") is not None
+    notes: list[str] = []
+    if knowledge_on:
+        from app.knowledge import relevant_notes, with_knowledge
+
+        notes = relevant_notes(session, task.request_text)
+        prompt = with_knowledge(prompt, notes)
     history = history_messages(task.context)
     resumed = continuation(session, user, task, history)
     if resumed:
@@ -529,6 +554,7 @@ def execute_task(
             max_rub=run_max_rub(),
             estimate_rub=estimate_rub if estimate_rub is not None else estimate_turn_reserve(task.request_text),
             autopause=autopause,
+            study_first=knowledge_on and needs_study(task.request_text, complexity, _guide(task.request_text, None), notes),
         ),
         control=control,
         on_event=on_event,

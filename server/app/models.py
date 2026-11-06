@@ -250,3 +250,22 @@ class CredentialAccess(Base):
     credential_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("credentials.id"), nullable=False)
     action: Mapped[str] = mapped_column(String(16), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class KnowledgeNote(Base):
+    """Heli's own knowledge base: checked rules about services and topics, each with a source and a date.
+
+    Shared by all accounts, so only general facts go here (no client data: the text is masked on save)."""
+
+    __tablename__ = "knowledge_notes"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    topic: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    source_url: Mapped[str] = mapped_column(String(1000), nullable=False)
+    origin: Mapped[str] = mapped_column(String(20), nullable=False, default="agent")
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    stale: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    stale_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

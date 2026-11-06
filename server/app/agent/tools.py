@@ -6,6 +6,7 @@ POST /v1/tasks/{id}/tool-results. The app tells the server which client tools it
 
 from __future__ import annotations
 
+from app.llm.tools import ALIASES as SERVER_ALIASES
 from app.llm.tools import TOOLS as SERVER_TOOLS
 
 
@@ -98,7 +99,7 @@ try:  # PC actions live in another module; the loop works without it.
 except Exception:  # noqa: BLE001
     pass
 
-SERVER_TOOL_NAMES = {tool["function"]["name"] for tool in SERVER_TOOLS}
+SERVER_TOOL_NAMES = {tool["function"]["name"] for tool in SERVER_TOOLS} | set(SERVER_ALIASES)
 
 
 def client_tool_names() -> set[str]:
