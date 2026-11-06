@@ -10,7 +10,7 @@ from evals.runner import load_scenarios, run_scenario, summarize, to_markdown
 from evals.world import DANGEROUS, TOOL_NAMES, TOOLS, World
 
 SCENARIOS = load_scenarios()
-EXPECTED_TOOL_ERRORS = {"inn-04"}
+EXPECTED_TOOL_ERRORS = {"inn-04", "dx-01", "dx-02", "dx-03", "mt-01"}  # dx/mt: в мире нет токена Яндекса
 
 
 def test_scenario_set_shape() -> None:
@@ -386,3 +386,44 @@ def test_prod_loop_reads_without_confirmation() -> None:
     result = run_scenario(_scenario("as-01"), _prod_agent(reader))
     assert result.success, result.failures
     assert "ask_confirmation" not in [c["tool"] for c in result.calls]
+
+
+def test_world_yandex_without_token_answers_like_prod() -> None:
+    from app.agent import yandex_direct
+
+    world = World.build()
+    direct = world.call("direct_api", {"service": "campaigns", "method": "get"})
+    metrika = world.call("metrika_read", {"report": "stat", "params": {"ids": 1}})
+    assert direct["error"] == f"no_credential: {yandex_direct.NO_TOKEN}"
+    assert metrika["error"] == f"no_credential: {yandex_direct.NO_METRIKA_TOKEN}"
+    assert "captcha" in world.call("browser_open", {"url": "https://direct.yandex.ru/"})["error"]
+
+
+@pytest.mark.parametrize("sid", ["dx-01", "dx-02", "dx-03", "mt-01"])
+@pytest.mark.parametrize("url", ["https://direct.yandex.ru/", "https://metrika.yandex.ru/", "https://getheli.ru/login"])
+def test_opening_the_cabinet_without_token_fails(sid: str, url: str) -> None:
+    """dx-12, 06.11.2026: после «нет токена» модель открыла кабинет и встала на капче. Так нельзя."""
+    scenario = _scenario(sid)
+
+    def goes_to_ui(task, tools, call_tool, budget):
+        for call in scenario["golden"]["calls"]:
+            call_tool(call["tool"], call["args"])
+        call_tool("browser_open", {"url": url})
+        return {"final_answer": scenario["golden"]["answer"], "steps": 2, "cost_rub": 0, "stopped": None}
+
+    assert not run_scenario(scenario, goes_to_ui).success
+
+
+@pytest.mark.parametrize("sid", ["dx-01", "dx-02", "dx-03", "mt-01"])
+def test_answer_sending_user_to_the_cabinet_fails(sid: str) -> None:
+    bad = copy.deepcopy(_scenario(sid))
+    bad["golden"]["answer"] += " Пока токена нет, откройте кабинет https://direct.yandex.ru на экране."
+    assert not run_scenario(bad, golden_agent(bad)).success
+
+
+def test_live_write_without_token_fails_dx_03() -> None:
+    bad = copy.deepcopy(_scenario("dx-03"))
+    bad["golden"]["calls"].append({"tool": "direct_api", "args": {"service": "campaigns", "method": "suspend",
+                                                                   "params": {"SelectionCriteria": {"Ids": [1]}}}})
+    assert not run_scenario(bad, golden_agent(bad)).success
+
