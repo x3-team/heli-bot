@@ -230,6 +230,74 @@ def test_mail_ignores_api_tokens_saved_for_yandex(session, monkeypatch) -> None:
     assert mail.mailbox_for(session, user) is None
 
 
+@pytest.mark.parametrize(
+    ("site", "hosts"),
+    [
+        ("yandex.ru", ("imap.yandex.ru", "smtp.yandex.ru")),
+        ("https://mail.yandex.ru/?uid=1", ("imap.yandex.ru", "smtp.yandex.ru")),
+        ("Яндекс", ("imap.yandex.ru", "smtp.yandex.ru")),
+        ("imap.yandex.ru", ("imap.yandex.ru", "smtp.yandex.ru")),
+        ("mail.ru", ("imap.mail.ru", "smtp.mail.ru")),
+        ("e.mail.ru", ("imap.mail.ru", "smtp.mail.ru")),
+        ("bk.ru", ("imap.mail.ru", "smtp.mail.ru")),
+        ("gmail.com", ("imap.gmail.com", "smtp.gmail.com")),
+        ("https://mail.google.com/mail/u/0/", ("imap.gmail.com", "smtp.gmail.com")),
+        ("imap.custom.example", ("imap.custom.example", "smtp.custom.example")),
+        ("imap.custom.example:993", ("imap.custom.example", "smtp.custom.example")),
+        ("mail.custom.example", ("mail.custom.example", "smtp.custom.example")),
+        ("beget.com", ("imap.beget.com", "smtp.beget.com")),
+    ],
+)
+def test_mail_hosts_for_services_and_own_domain(site, hosts) -> None:
+    assert mail.hosts_for(site) == hosts
+
+
+@pytest.mark.parametrize("site", ["", "custom.example", "company.bitrix24.ru", "online.moysklad.ru", "direct.yandex.ru", "imap."])
+def test_mail_hosts_for_non_mail_sites(site) -> None:
+    assert mail.hosts_for(site) is None
+
+
+@pytest.mark.parametrize(
+    ("site", "login", "imap_host"),
+    [
+        ("mail.yandex.ru", "shop@yandex.ru", "imap.yandex.ru"),
+        ("mail.ru", "shop@mail.ru", "imap.mail.ru"),
+        ("gmail.com", "shop@gmail.com", "imap.gmail.com"),
+        ("imap.custom.example", "info@custom.example", "imap.custom.example"),
+    ],
+)
+def test_mailbox_for_picks_the_mailbox(session, monkeypatch, site, login, imap_host) -> None:
+    monkeypatch.setenv("VAULT_MASTER_KEY", KEY)
+    user = _user(session)
+    store_credential(session, user, site, login, "app-password-1")
+    row, (imap, _smtp) = mail.mailbox_for(session, user)
+    assert row["username"] == login and imap == imap_host
+
+
+def test_mailbox_for_skips_webhooks_and_tokens(session, monkeypatch) -> None:
+    monkeypatch.setenv("VAULT_MASTER_KEY", KEY)
+    user = _user(session)
+    store_credential(session, user, "mail.custom.example", "webhook", "https://mail.custom.example/rest/1/abc/")
+    store_credential(session, user, "company.bitrix24.ru", "webhook", "https://company.bitrix24.ru/rest/1/abc/")
+    store_credential(session, user, "direct.yandex.ru", "token", DIRECT_TOKEN)
+    store_credential(session, user, "online.moysklad.ru", "admin@company", "pass-1")
+    assert mail.mailbox_for(session, user) is None
+    store_credential(session, user, "imap.custom.example", "info@custom.example", "app-password-1")
+    row, hosts = mail.mailbox_for(session, user)
+    assert row["site"] == "imap.custom.example" and hosts == ("imap.custom.example", "smtp.custom.example")
+
+
+def test_no_mailbox_explains_how_to_connect_and_hints_the_imap_host(session, monkeypatch) -> None:
+    monkeypatch.setenv("VAULT_MASTER_KEY", KEY)
+    user = _user(session)
+    store_credential(session, user, "custom.example", "info@custom.example", "app-password-1")
+    result = mail.execute(session, user, None, "mail_read", {"action": "list"})
+    assert result.error == "no_credential"
+    assert "пароль приложения" in result.content and "не пишите в чат" in result.content
+    assert "imap.custom.example" in result.content
+    assert "app-password-1" not in result.content
+
+
 # --- Директ и Метрика ---------------------------------------------------------------
 
 
@@ -322,6 +390,29 @@ def test_direct_without_token_explains_how_to_add_it(session, monkeypatch) -> No
     user = _user(session)
     result = yandex_direct.execute(session, user, None, "direct_api", {"service": "campaigns"})
     assert result.error == "no_credential" and "oauth.yandex.ru" in result.content
+    metrika = yandex_direct.execute(session, user, None, "metrika_read", {"report": "stat", "params": {"ids": 1}})
+    assert metrika.error == "no_credential" and "metrika.yandex.ru" in metrika.content
+
+
+# dx-12, 06.11.2026: «пока его нет, данные можно смотреть в кабинете на экране» увело модель в UI и на капчу.
+UI_HINTS = ("на экране", "кабинет", "открой", "откройте", "зайди", "войди", "войдите", "http://", "https://",
+            "browser", "Компьютер агента")
+
+
+@pytest.mark.parametrize("text", [yandex_direct.NO_TOKEN, yandex_direct.NO_METRIKA_TOKEN])
+def test_no_token_text_points_only_to_dostupy(text: str) -> None:
+    low = text.lower()
+    assert "«Доступах»" in text and "логин token" in text and "пароль — OAuth-токен" in text
+    assert not [hint for hint in UI_HINTS if hint.lower() in low], text
+    assert "капч" in low and "остановись" in low
+
+
+def test_direct_playbook_stops_without_token_instead_of_opening_the_cabinet() -> None:
+    from app.skills.playbooks import playbook
+
+    guide = playbook("direct").guide
+    assert "Кабинет на экране — когда API-токена нет" not in guide
+    assert "BLOCKED: нет токена" in guide and "не открывай" in guide
 
 
 def test_metrika_is_get_only_with_oauth_header(session, monkeypatch) -> None:

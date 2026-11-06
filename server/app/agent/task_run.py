@@ -248,6 +248,10 @@ def system_prompt(tools: list[dict], guide: str | None = None, today: str | None
         text += CLOUD_HINT if "browser_open" in server_executed() else BROWSER_HINT
     if CONFIRM_TOOL in names:
         text += CONFIRM_HINT
+    if names & {"mail_read", "mail_search", "mail_send"}:
+        from app.agent.mail import MAIL_HINT
+
+        text += MAIL_HINT
     if "save_credential" in names:
         from app.agent.credentials import CREDENTIALS_HINT
 

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from app import knowledge as _kn
 from app.agent import bitrix as _bx
 
 BASE_WORLD_PATH = Path(__file__).with_name("base_world.json")
@@ -42,6 +43,19 @@ def _num(description: str, optional: bool = False) -> dict:
 
 def _tool(name: str, description: str, params: dict) -> dict:
     return {"type": "function", "function": {"name": name, "description": description, "parameters": params}}
+
+
+
+
+def _yandex_tools() -> list[dict]:
+    """direct_api и metrika_read — те же схемы, что в проде (app.agent.yandex_direct)."""
+    from app.agent import yandex_direct
+
+    return [copy.deepcopy(yandex_direct.DIRECT_TOOL), copy.deepcopy(yandex_direct.METRIKA_TOOL)]
+
+
+# Кабинеты, куда без API-токена ходить нельзя: вход в Яндекс ID с сервера упирается в капчу (dx-12, 06.11.2026).
+YANDEX_UI_HOSTS = ("direct.yandex.", "metrika.yandex.", "passport.yandex.", "getheli.ru")
 
 
 TOOLS: list[dict] = [
@@ -89,6 +103,9 @@ TOOLS: list[dict] = [
           _s(message_id=_str("ID письма"))),
     _tool("mail_send", "Отправить письмо из Яндекс 360.",
           _s(to=_str("Адрес"), subject=_str("Тема"), body=_str("Текст"))),
+    _tool("browser_open", "Открыть адрес в облачном браузере «Компьютер агента» (вход в кабинеты, работа на экране).",
+          _s(url=_str("Адрес"))),
+    *_yandex_tools(),
     _tool("ask_confirmation", "Спросить пользователя перед необратимым или внешним действием.",
           _s(action=_str("Имя инструмента, который хочешь вызвать"), details=_str("Что именно будет сделано"))),
     _tool("ask_user", "Задать пользователю уточняющий вопрос, если без ответа задачу не решить.",
@@ -98,6 +115,8 @@ TOOLS: list[dict] = [
 # Битрикс24 — те же инструменты и те же списки методов, что в проде (app.agent.bitrix): REST через вебхук.
 # Портал мира учебный, поэтому bitrix24_write разрешён; удалений нет и здесь.
 TOOLS += [copy.deepcopy(_bx.TOOL), copy.deepcopy(_bx.WRITE_TOOL)]
+# База знаний — та же схема, что в проде; в мире только поиск по state["knowledge"].
+TOOLS.append(copy.deepcopy(_kn.SEARCH_TOOL))
 
 TOOL_NAMES = {t["function"]["name"] for t in TOOLS}
 
@@ -212,6 +231,13 @@ class World:
             if page["url"].removeprefix("https://").rstrip("/") == clean:
                 return {"url": page["url"], "title": page["title"], "text": page["text"]}
         raise ToolError("404")
+
+    def _t_knowledge_search(self, query: str) -> dict:
+        notes = _ranked(query, self.state.get("knowledge", []), lambda n: (n["topic"], n["fact"]))
+        if not notes:
+            return {"notes": [], "hint": "В базе знаний ничего нет по этой теме. Найди официальную справку "
+                                         "или документацию (web_search, open_url)."}
+        return {"notes": notes[:5]}
 
     def _t_company_by_inn(self, inn: str) -> dict:
         key = _digits(inn)
@@ -444,12 +470,24 @@ class World:
         return {"ok": True}
 
     # --- Почта Яндекс 360 -------------------------------------------------
+    def _no_mailbox(self) -> dict | None:
+        """The answer of the prod mail tool when «Доступы» has no mailbox (a result to relay, not a crash)."""
+        if self.state["mail"].get("connected", True):
+            return None
+        return {"error": "no_credential", "text": (
+            "Нет почтового ящика в «Доступах». Сайт — IMAP-сервер (imap.yandex.ru), логин — адрес, "
+            "пароль — пароль приложения. Пароль в чате не проси.")}
+
     def _t_mail_search(self, query: str, folder: str = "") -> dict:
+        if missing := self._no_mailbox():
+            return missing
         box = [m for m in self.state["mail"]["messages"] if not folder or m["folder"] == folder]
         rows = _ranked(query, box, lambda m: (m["from"], m["to"], m["subject"], m["body"], m["date"]))
         return {"messages": [{k: m[k] for k in ("id", "folder", "from", "to", "subject", "date")} for m in rows]}
 
     def _t_mail_read(self, message_id: str) -> dict:
+        if missing := self._no_mailbox():
+            return missing
         for m in self.state["mail"]["messages"]:
             if m["id"] == str(message_id):
                 return m
@@ -461,6 +499,34 @@ class World:
                "subject": subject, "body": body, "date": self.state["today"]}
         mail["messages"].append(msg)
         return {"ok": True, "id": msg["id"]}
+
+
+    # --- Яндекс Директ и Метрика ------------------------------------------
+    # В мире нет OAuth-токена: direct_api и metrika_read отвечают тем же текстом, что прод без записи в «Доступах».
+    def _yandex_no_token(self, text: str) -> None:
+        if self.state.get("yandex", {}).get("token"):
+            raise ToolError("not_in_world")
+        raise ToolError(f"no_credential: {text}")
+
+    def _t_direct_api(self, service: str, method: str = "get", params: Any = None, client_login: str = "",
+                      goals: Any = None, sandbox: bool = False) -> dict:
+        from app.agent import yandex_direct
+
+        self._yandex_no_token(yandex_direct.NO_TOKEN)
+        return {}
+
+    def _t_metrika_read(self, report: str, counter: Any = None, params: Any = None) -> dict:
+        from app.agent import yandex_direct
+
+        self._yandex_no_token(yandex_direct.NO_METRIKA_TOKEN)
+        return {}
+
+    def _t_browser_open(self, url: str) -> dict:
+        if any(host in url.lower() for host in YANDEX_UI_HOSTS):
+            from app.cloud_browser import CAPTCHA_TEXT
+
+            raise ToolError(f"captcha: {CAPTCHA_TEXT}")
+        return self._t_open_url(url)
 
     # --- человек ----------------------------------------------------------
     def _t_ask_confirmation(self, action: str, details: str = "") -> dict:

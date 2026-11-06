@@ -24,10 +24,12 @@ def run(
     estimate_rub: Decimal | None = None,
     today: str | None = None,
     history: list[dict] | None = None,
+    study_first: bool = False,
 ) -> dict:
     """`today` (ДД.ММ.ГГГГ or ISO) is the mock world's date; the prompt uses it instead of the real one.
 
     `history` is the earlier chat ([{role, text}]), passed the same way the app sends it in task.context.
+    `study_first` is the «изучи предмет» step, on in prod for an unfamiliar service (task_run.needs_study).
     """
     budget = budget or {}
     client = client or HeliClient.from_env()
@@ -67,6 +69,7 @@ def run(
             max_tool_calls=int(budget.get("max_steps", 15)),
             max_rub=Decimal(str(max_rub)) if max_rub is not None else None,
             estimate_rub=estimate_rub,
+            study_first=study_first,
         ),
     )
     return {

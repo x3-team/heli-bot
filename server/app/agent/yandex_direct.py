@@ -293,10 +293,23 @@ def token_for(session, user, sites: tuple[str, ...]) -> str | None:
     return None
 
 
+# Without a token the only way forward is «Доступы». The text must not suggest the web UI: after
+# «можно смотреть в кабинете на экране» the model opened direct.yandex.ru and stopped on a captcha (dx-12, 06.11).
+_NO_TOKEN_TAIL = (
+    "Без токена данных из {what} у тебя нет, и браузер их не заменит: вход в Яндекс ID с сервера просит капчу, "
+    "а капчу и второй фактор Heli не проходит. Ответь по тому, что есть в задаче (условие, цифры пользователя, "
+    "справка), или напиши, что данных нет и нужен токен, — и остановись."
+)
 NO_TOKEN = (
-    "Нет OAuth-токена Яндекса в «Доступах». Пользователю: получите токен на oauth.yandex.ru для приложения с "
-    "доступом к API Директа (и Метрики), сохраните его в «Доступах»: сайт direct.yandex.ru, логин token, "
-    "пароль — токен. Пока его нет, данные можно смотреть в кабинете direct.yandex.ru на экране."
+    "Нет OAuth-токена Яндекса в «Доступах». Пользователю: получите OAuth-токен на oauth.yandex.ru "
+    "для приложения с доступом к API Директа и сохраните его в «Доступах»: сайт direct.yandex.ru (или "
+    "api.direct.yandex.com), логин token, пароль — OAuth-токен. " + _NO_TOKEN_TAIL.format(what="Директа")
+)
+NO_METRIKA_TOKEN = (
+    "Нет OAuth-токена Яндекса для Метрики в «Доступах». Пользователю: получите OAuth-токен на "
+    "oauth.yandex.ru с доступом metrika:read и сохраните его в «Доступах»: сайт metrika.yandex.ru (или "
+    "api-metrika.yandex.net; подойдёт и запись direct.yandex.ru, если токен выдан и на Метрику), логин token, "
+    "пароль — OAuth-токен. " + _NO_TOKEN_TAIL.format(what="Метрики")
 )
 
 
@@ -309,7 +322,7 @@ def execute(session, user, task_id, name: str, args: dict,
             url, params = build_metrika(args)
             token = token_for(session, user, METRIKA_SITES + TOKEN_SITES) or ""
             if not token:
-                raise DirectError("no_credential", NO_TOKEN)
+                raise DirectError("no_credential", NO_METRIKA_TOKEN)
             return ClientResult(call_metrika(url, params, token, transport).replace(token, "<CREDENTIAL>"))
         url, headers, body, is_report = build_direct(args)
         token = token_for(session, user, TOKEN_SITES) or ""
