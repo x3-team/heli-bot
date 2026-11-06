@@ -24,7 +24,7 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-USER_AGENT = "HeliBot/0.1 (+https://getheli.ru)"
+USER_AGENT = "HeliBot/1.0 (+https://getheli.ru)"
 TIMEOUT = httpx.Timeout(15.0, connect=8.0)
 MAX_BYTES = 2_000_000
 MAX_REDIRECTS = 5

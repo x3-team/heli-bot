@@ -7,7 +7,8 @@ import os
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from openai import OpenAI
+import httpx
+from openai import NOT_GIVEN, OpenAI
 
 from app.llm.catalog import CatalogError, upstream
 from app.llm.prices import cost_rub
@@ -18,9 +19,24 @@ logging.getLogger("openai").setLevel(logging.WARNING)
 
 
 class HeliError(Exception):
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, detail: str = "") -> None:
         super().__init__(code)
         self.code = code
+        # Why the gateway refused (HTTP status, error type, short message). Never contains the key.
+        self.detail = detail
+
+
+def failure_detail(exc: BaseException) -> str:
+    """«402 PermissionDeniedError: …» for logs and the CI smoke: the code alone hides the reason."""
+    status = getattr(exc, "status_code", None)
+    text = " ".join(str(exc).split())[:200]
+    key = os.environ.get("HELI_API_KEY", "")
+    if key and len(key) >= 8:
+        text = text.replace(key, "<KEY>")
+    cause = exc.__cause__ or exc.__context__
+    # APITimeoutError alone does not say whether the connection or the answer was slow.
+    why = f" ({type(cause).__name__})" if cause is not None and type(cause).__name__ != type(exc).__name__ else ""
+    return " ".join(part for part in (str(status) if status else "", f"{type(exc).__name__}{why}: {text}") if part)
 
 
 @dataclass
@@ -64,12 +80,13 @@ class HeliClient:
         self._client = client
 
     @classmethod
-    def from_env(cls) -> HeliClient:
+    def from_env(cls, max_retries: int = 0, timeout: float | httpx.Timeout | None = None) -> HeliClient:
         key = os.environ.get("HELI_API_KEY", "")
         if not key:
             raise HeliError("missing_api_key")
         base_url = os.environ.get("HELI_BASE_URL", "https://getheli.ru/v1")
-        return cls(OpenAI(api_key=key, base_url=base_url, max_retries=0))
+        return cls(OpenAI(api_key=key, base_url=base_url, max_retries=max_retries,
+                          timeout=NOT_GIVEN if timeout is None else timeout))
 
     def complete(
         self,
@@ -93,9 +110,10 @@ class HeliClient:
                 temperature=0,
                 **kwargs,
             )
-        except Exception:
-            log.info("model request failed alias=%s", alias)
-            raise HeliError("request_failed") from None
+        except Exception as exc:
+            detail = failure_detail(exc)
+            log.info("model request failed alias=%s %s", alias, detail)
+            raise HeliError("request_failed", detail) from None
         usage = response.usage
         input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
         output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
@@ -140,9 +158,10 @@ class HeliClient:
             raise HeliError(exc.code) from None
         try:
             response = self._client.embeddings.create(model=model, input=text)
-        except Exception:
-            log.info("embedding request failed")
-            raise HeliError("request_failed") from None
+        except Exception as exc:
+            detail = failure_detail(exc)
+            log.info("embedding request failed %s", detail)
+            raise HeliError("request_failed", detail) from None
         data = getattr(response, "data", None) or []
         if not data:
             raise HeliError("request_failed")

@@ -26,6 +26,7 @@ import uuid
 
 import httpx
 
+from app.agent import write_policy
 from app.agent.control import ClientResult
 
 log = logging.getLogger(__name__)
@@ -79,10 +80,11 @@ def _fn(name: str, description: str, properties: dict, required: list[str]) -> d
 
 DIRECT_TOOL = _fn(
     "direct_api",
-    "Яндекс Директ API v5 под OAuth-токеном пользователя из «Доступов». В боевом аккаунте только чтение: "
-    "method get у campaigns, adgroups, ads, keywords, bids, dictionaries и др., и отчёты (service reports, "
-    "TSV; сервер сам дождётся готовности). Методы add, update, delete, suspend, resume, set — только с "
-    "sandbox=true (песочница api-sandbox.direct.yandex.com). Пример: service campaigns, method get, params "
+    "Яндекс Директ API v5 под OAuth-токеном пользователя из «Доступов». Чтение свободно: method get у "
+    "campaigns, adgroups, ads, keywords, bids, dictionaries и др., и отчёты (service reports, TSV; сервер сам "
+    "дождётся готовности). Методы add, update, delete, suspend, resume, set: с sandbox=true (песочница "
+    "api-sandbox.direct.yandex.com) — сразу; в боевом аккаунте сервер сам покажет пользователю карточку "
+    "(что меняется и предупреждение о бюджете) и выполнит только после «да», сам ask_confirmation не вызывай. Пример: service campaigns, method get, params "
     "{\"SelectionCriteria\": {}, \"FieldNames\": [\"Id\", \"Name\", \"State\", \"Statistics\"]}. Отчёт: service "
     "reports, params {\"SelectionCriteria\": {\"DateFrom\": \"2026-10-01\", \"DateTo\": \"2026-10-31\"}, "
     "\"FieldNames\": [\"CampaignName\", \"Impressions\", \"Clicks\", \"Cost\", \"Conversions\"], \"ReportName\": "
@@ -149,13 +151,28 @@ def build_direct(args: dict) -> tuple[str, dict, dict, bool]:
         })
         return base + "reports", headers, {"params": params}, True
     method = str(args.get("method") or "get").strip()
-    if method not in READ_METHODS and not sandbox:
+    if method not in READ_METHODS and not sandbox and not write_policy.confirmed(args):
         raise DirectError(
-            "write_forbidden",
-            f"Ошибка: {service}.{method} меняет боевой аккаунт Директа, а он только для чтения. "
-            "Проверь изменение в песочнице (sandbox=true) и опиши пользователю, что поменять в кабинете.",
+            write_policy.REFUSED_CODE,
+            f"Не выполнено: {service}.{method} меняет боевой аккаунт Директа, а пользователь это не подтвердил. "
+            "Запрос не отправлен. В песочнице (sandbox=true) можно без подтверждения.",
         )
     return base + service, headers, {"method": method, "params": params}, False
+
+
+def classify(args: dict):
+    """write_policy rule for direct_api: get and reports read, sandbox=true writes freely, the rest is live."""
+    service = str(args.get("service") or "").strip().lower()
+    method = str(args.get("method") or "get").strip()
+    sandbox = bool(args.get("sandbox"))
+    host = "api-sandbox.direct.yandex.com" if sandbox else "api.direct.yandex.com"
+    if service == "reports" or method in READ_METHODS:
+        return write_policy.read(host)
+    if sandbox:
+        return write_policy.sandbox(host, f"{service}.{method}", method)
+    where = host + (f", клиент {args['client_login']}" if args.get("client_login") else "")
+    what = f"{service}.{method} — " + write_policy.short(args.get("params") or {}, 400)
+    return write_policy.live(where, what, budget=True, verb=method)
 
 
 def build_metrika(args: dict) -> tuple[str, dict]:
@@ -276,10 +293,23 @@ def token_for(session, user, sites: tuple[str, ...]) -> str | None:
     return None
 
 
+# Without a token the only way forward is «Доступы». The text must not suggest the web UI: after
+# «можно смотреть в кабинете на экране» the model opened direct.yandex.ru and stopped on a captcha (dx-12, 06.11).
+_NO_TOKEN_TAIL = (
+    "Без токена данных из {what} у тебя нет, и браузер их не заменит: вход в Яндекс ID с сервера просит капчу, "
+    "а капчу и второй фактор Heli не проходит. Ответь по тому, что есть в задаче (условие, цифры пользователя, "
+    "справка), или напиши, что данных нет и нужен токен, — и остановись."
+)
 NO_TOKEN = (
-    "Нет OAuth-токена Яндекса в «Доступах». Пользователю: получите токен на oauth.yandex.ru для приложения с "
-    "доступом к API Директа (и Метрики), сохраните его в «Доступах»: сайт direct.yandex.ru, логин token, "
-    "пароль — токен. Пока его нет, данные можно смотреть в кабинете direct.yandex.ru на экране."
+    "Нет OAuth-токена Яндекса в «Доступах». Пользователю: получите OAuth-токен на oauth.yandex.ru "
+    "для приложения с доступом к API Директа и сохраните его в «Доступах»: сайт direct.yandex.ru (или "
+    "api.direct.yandex.com), логин token, пароль — OAuth-токен. " + _NO_TOKEN_TAIL.format(what="Директа")
+)
+NO_METRIKA_TOKEN = (
+    "Нет OAuth-токена Яндекса для Метрики в «Доступах». Пользователю: получите OAuth-токен на "
+    "oauth.yandex.ru с доступом metrika:read и сохраните его в «Доступах»: сайт metrika.yandex.ru (или "
+    "api-metrika.yandex.net; подойдёт и запись direct.yandex.ru, если токен выдан и на Метрику), логин token, "
+    "пароль — OAuth-токен. " + _NO_TOKEN_TAIL.format(what="Метрики")
 )
 
 
@@ -292,7 +322,7 @@ def execute(session, user, task_id, name: str, args: dict,
             url, params = build_metrika(args)
             token = token_for(session, user, METRIKA_SITES + TOKEN_SITES) or ""
             if not token:
-                raise DirectError("no_credential", NO_TOKEN)
+                raise DirectError("no_credential", NO_METRIKA_TOKEN)
             return ClientResult(call_metrika(url, params, token, transport).replace(token, "<CREDENTIAL>"))
         url, headers, body, is_report = build_direct(args)
         token = token_for(session, user, TOKEN_SITES) or ""
@@ -300,6 +330,9 @@ def execute(session, user, task_id, name: str, args: dict,
             raise DirectError("no_credential", NO_TOKEN)
         text = call_direct(url, headers, body, is_report, token, transport, sleep)
         prefix = "Песочница Директа. " if "sandbox" in url else ""
+        if not prefix and body.get("method") not in READ_METHODS and not is_report:
+            prefix = "Боевой аккаунт Директа, изменение подтверждено пользователем. "
+            log.info("direct live write %s", body.get("method"))
         return ClientResult(prefix + text.replace(token, "<CREDENTIAL>"))
     except DirectError as exc:
         text = exc.text.replace(token, "<CREDENTIAL>") if token else exc.text
@@ -316,3 +349,6 @@ def register() -> None:
     register_client_tool(DIRECT_TOOL)
     register_client_tool(METRIKA_TOOL)
     register_executor(TOOL_NAMES, execute)
+
+
+write_policy.register("direct_api", classify)

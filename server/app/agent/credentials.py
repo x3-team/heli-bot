@@ -90,6 +90,32 @@ def _bitrix_rest_note(session, user, site: str) -> str:
     )
 
 
+def _moysklad_api_note(session, user, site: str) -> str:
+    """МойСклад in «Доступах»: create through moysklad_write on a training account, say so plainly on a live one."""
+    from app.agent import moysklad
+    from app.vault import list_credentials
+
+    if not moysklad.is_moysklad_site(site):
+        return ""
+    try:
+        rows = [r for r in list_credentials(session, user) if moysklad.is_moysklad_site(r.get("site"))]
+    except Exception:  # noqa: BLE001
+        return ""
+    accounts = {moysklad.account_of(r.get("username")) for r in rows} - {""}
+    training = sorted(accounts & moysklad.sandbox_accounts())
+    if training:
+        return (
+            f"МойСклад: учебный аккаунт {training[0]} — товары, приёмки, заказы и счета создавай через moysklad_write "
+            "(API), форму на экране не открывай. Читай через moysklad_read.\n"
+        )
+    if accounts:
+        return (
+            f"МойСклад: аккаунт {', '.join(sorted(accounts))} боевой — через API только чтение (moysklad_read), "
+            "moysklad_write его отклонит.\n"
+        )
+    return ""
+
+
 def execute(session, user, task_id, name: str, args: dict) -> ClientResult:
     """app.agent.executors contract."""
     from app.skills.hosts import host_of
@@ -100,7 +126,7 @@ def execute(session, user, task_id, name: str, args: dict) -> ClientResult:
     if not site:
         return ClientResult("Ошибка: укажи адрес сайта", "bad_args")
     if name == "find_credential":
-        rest = _bitrix_rest_note(session, user, site)
+        rest = _bitrix_rest_note(session, user, site) or _moysklad_api_note(session, user, site)
         found = credential_for(session, user, url=f"https://{site}")
         if found is None:
             return ClientResult(rest or f"Сохранённого доступа для {site} нет.")

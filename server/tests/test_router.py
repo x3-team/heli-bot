@@ -91,7 +91,11 @@ def test_getheli_router_smoke() -> None:
         if os.environ.get("CI"):
             pytest.fail("HELI_API_KEY is not set")
         pytest.skip("HELI_API_KEY is not set")
-    client = HeliClient.from_env()
+    import httpx
+
+    # A live call from a GitHub runner to getheli.ru: the network on the way, not only the gateway.
+    # Two retries and a longer connect, so one slow connection is not a red main; a real refusal still fails.
+    client = HeliClient.from_env(max_retries=2, timeout=httpx.Timeout(60.0, connect=20.0))
     try:
         completion = client.complete(
             "heli-fast",
@@ -99,7 +103,7 @@ def test_getheli_router_smoke() -> None:
             max_tokens=16,
         )
     except HeliError as exc:
-        pytest.fail(exc.code)
+        pytest.fail(f"{exc.code}: {exc.detail}")
     assert completion.alias == "heli-fast"
     assert completion.input_tokens >= 0
     blob = json.dumps(
@@ -115,3 +119,15 @@ def test_getheli_router_smoke() -> None:
         raise AssertionError("credential appeared in the model result")
     if secret and secret in repr(completion):
         raise AssertionError("credential appeared in the model result")
+
+
+def test_failure_detail_names_the_status_and_hides_the_key(monkeypatch) -> None:
+    from app.llm.client import failure_detail
+
+    monkeypatch.setenv("HELI_API_KEY", "sk-heli-secret-123456")
+
+    class PaymentRequired(Exception):
+        status_code = 402
+
+    detail = failure_detail(PaymentRequired("Недостаточно средств для ключа sk-heli-secret-123456"))
+    assert detail.startswith("402 PaymentRequired:") and "sk-heli-secret" not in detail and "<KEY>" in detail
