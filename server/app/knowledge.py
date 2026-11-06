@@ -104,6 +104,53 @@ SEEDS: tuple[tuple[str, str, str], ...] = (
         "https://yandex.ru/dev/metrika/ru/",
     ),
     (
+        "Аналитика: событие GA4, ключевое событие GA4 и цель Метрики",
+        "Событие GA4 (event) — любое действие, которое ресурс собирает: page_view, click, form_submit, "
+        "heli_train_ping. Ключевое событие (key event, раньше «конверсия») — событие, которое владелец ресурса "
+        "отметил как важное для бизнеса в Администратор → Ключевые события; отмечать можно до 30 событий (в 360 — "
+        "до 50), в отчётах это метрика keyEvents. Цель Яндекс Метрики — условие на визит (посещение страницы, "
+        "JavaScript-событие reachGoal, клик по телефону, отправка формы, «Параметры»), его достижения считаются "
+        "в ym:s:goal<ID>reaches; Директ берёт конверсии по целям Метрики. Это разные системы: событие GA4 не "
+        "становится целью Метрики, считать их надо отдельно. Отвечая, что такое key event, ссылайся на справку "
+        "Google, не на память.",
+        "https://support.google.com/analytics/answer/9267568",
+    ),
+    (
+        "Google Analytics 4: события и отметка ключевых",
+        "О событиях GA4: https://support.google.com/analytics/answer/9322688. Как отметить событие ключевым и "
+        "лимиты: https://support.google.com/analytics/answer/13128484. Список ключевых событий ресурса — Admin API "
+        "properties/<id>/keyEvents (ga4_read key_events), число — метрика keyEvents в runReport.",
+        "https://support.google.com/analytics/answer/13128484",
+    ),
+    (
+        "Google Analytics Data API: отчёты",
+        "POST https://analyticsdata.googleapis.com/v1beta/properties/<id>:runReport, тело {dateRanges, dimensions, "
+        "metrics, dimensionFilter, limit}: это чтение. Метрики eventCount, totalUsers, activeUsers, sessions, "
+        "keyEvents; измерения eventName, date, sessionSource. Реальное время — :runRealtimeReport, список полей — "
+        "GET properties/<id>/metadata. Доступ: OAuth с областью analytics.readonly или сервисный аккаунт с ролью "
+        "«Читатель».",
+        "https://developers.google.com/analytics/devguides/reporting/data/v1",
+    ),
+    (
+        "GA4 Measurement Protocol: только учебный ресурс",
+        "Measurement Protocol: POST https://www.google-analytics.com/mp/collect?measurement_id=G-…&api_secret=…, "
+        "тело {client_id, events: [{name, params}]}; ответ 2xx всегда, ошибки видны только на "
+        "/debug/mp/collect. Хит записывается в статистику ресурса навсегда. Heli шлёт хиты только на учебный "
+        "Measurement ID (ga4_send_event). Не предлагать «отправить тестовый хит на боевой сайт, чтобы "
+        "проверить»: это портит статистику и ключевые события клиента. Проверка боевого сайта — чтение отчётов "
+        "(runReport, realtime) или DebugView/Tag Assistant самим владельцем.",
+        HELI_SOURCE,
+    ),
+    (
+        "Яндекс Метрика: цели",
+        "Цель Метрики задаётся в настройках счётчика: посещение страниц, JavaScript-событие (ym(<счётчик>, "
+        "'reachGoal', '<идентификатор>')), автоматические цели, «Параметры», составная. Какую выбрать: "
+        "https://yandex.ru/support/metrica/ru/general/choose-goal.html. Heli цели в боевом счётчике не создаёт и "
+        "не меняет и хиты в mc.yandex.ru не шлёт: только читает (metrika_read goals, stat), а пользователю "
+        "описывает, какую цель завести.",
+        "https://yandex.ru/support/metrica/ru/general/goal-js-event",
+    ),
+    (
         "Ozon Seller API: доступ",
         "Адрес https://api-seller.ozon.ru, почти все методы POST с JSON-телом, даже чтение (…/list, …/info). "
         "Заголовки Client-Id и Api-Key (ключ в личном кабинете продавца: Настройки → API-ключи). Изменяющие "
@@ -325,12 +372,16 @@ STALE_TOOL = _fn(
 TOOL_NAMES = ("knowledge_search", "knowledge_save", "knowledge_mark_stale")
 
 STUDY_HINT = (
-    " Изучай предмет перед действием: если задача про сервис, API, кабинет или тему, которых нет в «Базе знаний "
-    "Heli» ниже, сначала knowledge_search, потом найди официальную справку или документацию API (web_search, "
-    "open_url; официальный сайт сервиса важнее форумов и статей), выпиши ключевые правила и ограничения со "
-    "ссылкой на источник и только потом действуй и отвечай. После удачной задачи сохрани проверенные выводы "
-    "через knowledge_save (с источником). Если запись базы противоречит источнику или помечена «устарело», "
-    "перепроверь, пометь knowledge_mark_stale и сохрани новую."
+    " Осваивай незнакомый инструмент сам, прежде чем действовать или отвечать фактами о нём. Незнакомый — "
+    "сервис, API, кабинет или тема, которых нет в «Базе знаний Heli» ниже и в инструкциях. Цикл «освой "
+    "инструмент»: 1) knowledge_search; 2) официальная справка или документация API (web_search, open_url; "
+    "официальный сайт сервиса важнее форумов, отзывов и статей); 3) выпиши авторизацию (какой ключ или токен "
+    "и в каком заголовке), лимиты и что у сервиса песочница (отдельный хост или тестовый режим); 4) проверь на "
+    "деле через http_request: публичный GET-метод или запись только в песочнице, боевые кабинеты — только "
+    "чтение; ключ — только {{secret:ИМЯ}} и только на хост этого ключа; 5) после проверки сохрани вывод через "
+    "knowledge_save с адресом источника (дата проверки ставится сама). Ответ API с ошибкой авторизации "
+    "(401/403, нет ключа) — это не данные: так и скажи и попроси ключ, ответ и цифры не выдумывай. Если запись "
+    "базы противоречит источнику или помечена «устарело», перепроверь, пометь knowledge_mark_stale и сохрани новую."
 )
 
 

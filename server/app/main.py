@@ -3,10 +3,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.agent.credentials import register as register_credentials
+from app.agent.amocrm import register as register_amocrm
+from app.agent.google_analytics import register as register_ga4
 from app.agent.bitrix import register as register_bitrix
 from app.agent.moysklad import register as register_moysklad
 from app.agent.http_tool import register as register_http
 from app.agent.mail import register as register_mail
+from app.agent.schedule_tool import register as register_schedule
 from app.agent.yandex_direct import register as register_direct
 from app.knowledge import register as register_knowledge
 from app.api import router
@@ -39,9 +42,12 @@ def create_app() -> FastAPI:
     register_credentials()
     register_moysklad()
     register_bitrix()
+    register_amocrm()
     register_http()
     register_mail()
+    register_schedule()
     register_direct()
+    register_ga4()
     register_knowledge()
     register_cloud_browser(background=True)
     return app

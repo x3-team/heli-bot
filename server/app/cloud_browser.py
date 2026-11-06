@@ -1727,6 +1727,15 @@ def execute(session, user, task_id, name: str, args: dict):
                     + ". Капчу не решай.",
                     "captcha_use_rest",
                 )
+            amo = _amo_token(session, user, browser.url(user.id), str(args.get("url") or "") if name == "browser_open" else "")
+            if amo is not None:
+                for info in result.files:
+                    publish(heli_files.published(info))
+                return ClientResult(
+                    f"Вход в amoCRM просит капчу. Для {amo['site']} в «Доступах» есть токен: не входи на экране, "
+                    "делай задачу через amocrm_read и amocrm_write. Капчу не решай.",
+                    "captcha_use_rest",
+                )
             text = BITRIX_CAPTCHA_TEXT if portal is not None else CAPTCHA_TEXT
             if ask_for_captcha(browser, user.id, agent_run, text):
                 after = browser.call(user.id, "browser_read", {}, task_id=task_id)
@@ -1766,6 +1775,19 @@ def _bitrix_portal(current: str, opened: str) -> str | None:
             return host
         if host_matches(host, "bitrix24.net"):
             return ""
+    return None
+
+
+def _amo_token(session, user, current: str, opened: str) -> dict | None:
+    """The «Доступы» token of the amoCRM account behind a captcha, or None (not amoCRM, no token)."""
+    from app.agent import amocrm
+
+    for url in (opened, current):
+        if amocrm.account_host(url):
+            try:
+                return amocrm.token_entry_for(session, user, url)
+            except Exception:  # noqa: BLE001
+                return None
     return None
 
 

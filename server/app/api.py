@@ -13,13 +13,17 @@ from sqlalchemy.orm import Session
 
 from app.auth import (
     AuthError,
+    create_invite,
     issue_login_code,
     issue_login_code_for_user,
     issue_recovery_code,
     issue_token,
     login_with_password,
     open_access_user,
-    read_user_id,
+    sync_admin,
+    is_training_account,
+    read_token,
+    token_allowed,
     register_user,
     reset_password,
     trial_active,
@@ -52,7 +56,14 @@ from app.agent.control import ClientResult
 from app.agent.task_run import decode_screenshot
 from app.llm.run import run_turn
 from app.memory import MemoryError, delete_memory, list_memory, remember
-from app.quota import QuotaError, estimate_turn_reserve, public_usage, snapshot
+from app.quota import (
+    QuotaError,
+    estimate_turn_reserve,
+    monthly_limit_of,
+    public_usage,
+    snapshot,
+    weekly_limit_of,
+)
 from app.schedules import ScheduleError, create_schedule, delete_schedule, list_schedules, run_due
 from app.support import SupportError, create_incident
 from app.trajectories import (
@@ -75,6 +86,7 @@ router = APIRouter(prefix="/v1")
 _STATUS = {
     "auth_not_configured": 503,
     "invite_invalid": 400,
+    "invite_required": 403,
     "code_invalid": 401,
     "token_invalid": 401,
     "pdn_consent_required": 403,
@@ -99,6 +111,7 @@ _STATUS = {
     "credentials_invalid": 401,
     "password_weak": 400,
     "user_not_found": 404,
+    "not_training_account": 400,
     "bad_message": 400,
     "bad_goal": 400,
     "too_many_steps": 409,
@@ -127,12 +140,16 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="token_invalid")
     token = authorization.split(" ", 1)[1].strip()
     try:
-        user_id = read_user_id(token)
+        user_id, via = read_token(token)
     except AuthError as exc:
         _fail(exc)
     user = session.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=401, detail="token_invalid")
+    if not token_allowed(user, via):
+        # HELI_OPEN_ACCESS=0: shared-account tokens stop working (training accounts get fresh ones).
+        raise HTTPException(status_code=401, detail="token_invalid")
+    sync_admin(user)
     return user
 
 
@@ -151,6 +168,7 @@ class RegisterBody(BaseModel):
     password: str = Field(min_length=8, max_length=256)
     consent_pdn: bool = False
     consent_training: bool = False
+    invite_code: str | None = Field(default=None, max_length=128)
 
 
 class PasswordLoginBody(BaseModel):
@@ -225,6 +243,7 @@ def register(body: RegisterBody, session: Session = Depends(get_db)) -> dict:
             body.password,
             consent_pdn=body.consent_pdn,
             consent_training=body.consent_training,
+            invite_code=(body.invite_code or "").strip() or None,
         )
         token = issue_token(user.id)
     except AuthError as exc:
@@ -253,7 +272,7 @@ def open_access(session: Session = Depends(get_db)) -> dict:
         raise HTTPException(status_code=404, detail="open_access_disabled")
     try:
         user = open_access_user(session, settings.open_access_email)
-        token = issue_token(user.id)
+        token = issue_token(user.id, via="open")
     except AuthError as exc:
         _fail(exc)
     return {"access_token": token, "token_type": "bearer", "trial_active": trial_active(user)}
@@ -321,8 +340,82 @@ def verify_code(body: CodeVerify, session: Session = Depends(get_db)) -> dict:
 def me(user: User = Depends(get_current_user)) -> dict:
     return {
         "id": str(user.id),
+        "email": user.email,
+        "is_admin": user.is_admin,
         "consent_pdn": user.consent_pdn,
         "consent_training": user.consent_training,
+    }
+
+
+@router.get("/auth/config")
+def auth_config() -> dict:
+    return {"invite_only": get_settings().invite_only}
+
+
+class AdminInviteBody(BaseModel):
+    max_uses: int = Field(default=1, ge=1, le=50)
+
+
+class AdminCodeBody(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    purpose: str = Field(default="login", pattern="^(login|reset)$")
+
+
+@router.post("/admin/invites", status_code=201)
+def admin_create_invite(
+    body: AdminInviteBody,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    _require_admin(user)
+    code = create_invite(session, max_uses=body.max_uses)
+    log.info("invite created by admin max_uses=%s", body.max_uses)
+    return {"invite_code": code, "max_uses": body.max_uses}
+
+
+@router.post("/admin/codes", status_code=201)
+def admin_issue_code(
+    body: AdminCodeBody,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    """Login or password-reset code for a tester while mail is not wired."""
+    _require_admin(user)
+    try:
+        if body.purpose == "reset":
+            code = issue_recovery_code(session, body.email)
+        else:
+            code = issue_login_code_for_user(session, body.email)
+    except AuthError as exc:
+        _fail(exc)
+    log.info("%s code issued by admin", body.purpose)
+    return {"code": code, "purpose": body.purpose, "expires_in_minutes": 10}
+
+
+@router.get("/admin/users")
+def admin_users(
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    _require_admin(user)
+    from sqlalchemy import select
+
+    people = session.scalars(select(User).order_by(User.created_at)).all()
+    return {
+        "users": [
+            {
+                "id": str(person.id),
+                "email": person.email,
+                "is_admin": person.is_admin,
+                "is_training": is_training_account(person),
+                "created_at": _iso_utc(person.created_at),
+                "trial_active": trial_active(person),
+                "weekly_limit_rub": str(weekly_limit_of(person)),
+                "monthly_limit_rub": str(monthly_limit_of(person)),
+                "usage": public_usage(snapshot(session, person), trial_active=trial_active(person)),
+            }
+            for person in people
+        ]
     }
 
 
@@ -437,8 +530,10 @@ def create_step(
 
 
 class LimitBody(BaseModel):
-    monthly_limit_rub: Decimal = Field(gt=0, le=Decimal("1000000"))
-    weekly_limit_rub: Decimal | None = Field(default=None, gt=0, le=Decimal("1000000"))
+    """Per-user limits in rubles. Leave a field out to keep it; weekly 0 = back to monthly/4×1.25."""
+
+    monthly_limit_rub: Decimal | None = Field(default=None, gt=0, le=Decimal("1000000"))
+    weekly_limit_rub: Decimal | None = Field(default=None, ge=0, le=Decimal("1000000"))
 
 
 @router.get("/browser")
@@ -900,11 +995,17 @@ def set_user_limit(
     target = session.get(User, user_id)
     if target is None:
         raise HTTPException(status_code=404, detail="not_found")
-    target.monthly_limit_rub = body.monthly_limit_rub
+    if body.monthly_limit_rub is not None:
+        target.monthly_limit_rub = body.monthly_limit_rub
     if body.weekly_limit_rub is not None:
-        target.weekly_limit_rub = body.weekly_limit_rub
+        target.weekly_limit_rub = body.weekly_limit_rub if body.weekly_limit_rub > 0 else None
     session.flush()
-    return public_usage(snapshot(session, target), trial_active=trial_active(target))
+    log.info("limits changed by admin")
+    return {
+        **public_usage(snapshot(session, target), trial_active=trial_active(target)),
+        "weekly_limit_rub": str(weekly_limit_of(target)),
+        "monthly_limit_rub": str(monthly_limit_of(target)),
+    }
 
 
 class RunBody(BaseModel):

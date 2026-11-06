@@ -7,6 +7,7 @@ import {
   deleteMemory,
   loadBrowser,
   loadCredentials,
+  loadAuthConfig,
   loadMe,
   openAccess,
   loadMemory,
@@ -38,7 +39,9 @@ import {
   type ScheduleItem,
   type Usage,
 } from "./api";
+import { AdminTesters } from "./admin";
 import { resolveApiBase } from "./apiBase";
+import { ConnectHelp } from "./connectHelp";
 import { trialLabel } from "./authSession";
 import { clampComputerWidth as clampWidth, clampPercent, confirmationNeeded, limitTone } from "./behavior";
 import { ComputerConfirmCard } from "./computerCard";
@@ -164,7 +167,7 @@ export function Shell({ apiBase: apiBaseProp }: { apiBase?: string }) {
 
 type AuthScreen = "register" | "signin" | "recover";
 
-const OPERATOR_CODE_NOTICE = "Почта ещё не подключена. Введите код, который выдал оператор.";
+const OPERATOR_CODE_NOTICE = "Почта ещё не подключена. Введите код, который выдал администратор.";
 
 function SignIn({ apiBase, onAuth }: { apiBase: string; onAuth: (auth: AuthResult) => void }) {
   const [screen, setScreen] = useState<AuthScreen>("signin");
@@ -176,6 +179,11 @@ function SignIn({ apiBase, onAuth }: { apiBase: string; onAuth: (auth: AuthResul
   const [sent, setSent] = useState(false);
   const [pdn, setPdn] = useState(false);
   const [training, setTraining] = useState(false);
+  const [inviteOnly, setInviteOnly] = useState(false);
+
+  useEffect(() => {
+    void loadAuthConfig(apiBase).then((config) => setInviteOnly(config.inviteOnly));
+  }, [apiBase]);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
@@ -229,7 +237,7 @@ function SignIn({ apiBase, onAuth }: { apiBase: string; onAuth: (auth: AuthResul
     setBusy(true);
     try {
       if (screen === "register") {
-        onAuth(await registerAccount(apiBase, email.trim(), password, pdn, training));
+        onAuth(await registerAccount(apiBase, email.trim(), password, pdn, training, invite));
         return;
       }
       if (screen === "recover") {
@@ -328,6 +336,12 @@ function SignIn({ apiBase, onAuth }: { apiBase: string; onAuth: (auth: AuthResul
               minLength={8}
               required={screen === "register" || (screen === "recover" && sent)}
             />
+          </label>
+        ) : null}
+        {screen === "register" ? (
+          <label className="stack">
+            {inviteOnly ? "Код приглашения" : "Код приглашения (если есть)"}
+            <input value={invite} onChange={(event) => setInvite(event.target.value)} />
           </label>
         ) : null}
         {screen === "signin" && useCode ? (
@@ -1700,6 +1714,7 @@ function Settings({
       <section className="card">
         <h2>Подключения</h2>
         <p className="muted">Сайт и имя видны вам. Секрет шифруется и в ответы не попадает.</p>
+        <ConnectHelp />
         <ul className="integration-logos" aria-label="Поддерживаемые сервисы">
           {INTEGRATION_LOGOS.map((logo) => (
             <li key={logo.id}>
@@ -1730,11 +1745,11 @@ function Settings({
               });
           }}
         >
-          <input aria-label="Сайт" placeholder="Сайт" value={site} onChange={(event) => setSite(event.target.value)} />
-          <input aria-label="Имя" placeholder="Имя" value={username} onChange={(event) => setUsername(event.target.value)} />
+          <input aria-label="Сайт" placeholder="Сайт: imap.company.ru, yandex.ru, company.bitrix24.ru" value={site} onChange={(event) => setSite(event.target.value)} />
+          <input aria-label="Имя" placeholder="Имя: адрес почты, webhook или token" value={username} onChange={(event) => setUsername(event.target.value)} />
           <input
             aria-label="Секрет"
-            placeholder="Секрет"
+            placeholder="Секрет: пароль приложения, адрес вебхука или токен"
             type="password"
             value={secret}
             autoComplete="new-password"
@@ -1794,6 +1809,7 @@ function Settings({
           Отправить отчёт
         </button>
       </section>
+      <AdminTesters apiBase={apiBase} token={token} />
       <button type="button" onClick={onSignOut}>Выйти</button>
     </div>
   );

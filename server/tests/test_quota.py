@@ -154,8 +154,9 @@ def test_alerts_at_50_80_and_95(session) -> None:
     assert again == 3
 
 
-def test_daily_fuse_stops_everyone(session, monkeypatch) -> None:
-    monkeypatch.setenv("DAILY_LIMIT_RUB", "1")
+def test_global_daily_fuse_stops_everyone_only_when_set(session, monkeypatch) -> None:
+    # DAILY_LIMIT_RUB is per user; the server-wide fuse is the explicit GLOBAL_DAILY_LIMIT_RUB.
+    monkeypatch.setenv("GLOBAL_DAILY_LIMIT_RUB", "1")
     user = _user(session)
     other = _user(session, "other@example.com")
     record_charge(session, other, Decimal("1"))

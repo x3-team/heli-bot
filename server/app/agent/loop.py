@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from app.agent.control import Control, NoControl, Stopped
+from app.agent import write_policy
 from app.agent.guard import Guard, describe
 from app.llm.client import Completion
 from app.llm.tools import parse_args
@@ -146,22 +147,40 @@ UNSAVED_NOTE = (
     "Если сохранять не нужно по задаче, так и напиши."
 )
 # «Изучи предмет»: in an unfamiliar service the first action or the answer waits for a look at the
-# knowledge base or the official help. Once per run, so a topic that needs no study costs one round.
+# official help or a knowledge note. An empty knowledge_search is not a look: the answer then waits for
+# web_search / open_url. The loop asks twice at most; an answer given without any look is marked unverified.
 STUDY_TOOLS = {"knowledge_search", "web_search", "open_url", "fetch_page"}
 ACT_TOOLS = {
-    "http_request", "direct_api", "browser_click", "browser_type", "browser_press", "mail_send",
+    "http_request", "direct_api", "ga4_send_event", "browser_click", "browser_type", "browser_press", "mail_send",
     "save_credential", "save_file", "use_computer",
 }
+STUDY_MAX_NUDGES = 2
 STUDY_GATE = (
-    "Не выполнено: сначала изучи предмет. Сервис или тема незнакомые и в базе знаний их нет: вызови "
-    "knowledge_search, затем найди официальную справку или документацию API (web_search, open_url), выпиши "
-    "ключевые правила и ограничения со ссылкой на источник — и только потом действуй."
+    "Не выполнено: сначала освой инструмент. Сервис или тема незнакомые и в базе знаний их нет: "
+    "knowledge_search, затем официальная справка или документация API (web_search, open_url). Выпиши "
+    "авторизацию, лимиты и что у сервиса песочница, со ссылкой на источник — и только потом действуй."
 )
 STUDY_NOTE = (
     "Прежде чем отвечать, изучи предмет: тема незнакомая и в базе знаний её нет. Вызови knowledge_search, "
     "найди официальную справку или документацию (web_search, open_url) и сверь с ней ответ; в ответе сошлись "
     "на источник. Если вопрос не про сервис и не про факты, которые могли измениться, ответь как есть."
 )
+UNVERIFIED_NOTE = (
+    "⚠️ Не сверено с официальной документацией: я не нашёл и не открыл источник, проверьте факты ниже.\n\n"
+)
+_EMPTY_KNOWLEDGE = ("ничего нет", '"notes": []')
+
+
+def studied_by(name: str, result: ToolResult) -> bool:
+    """Whether this successful call is a look at the subject. A knowledge base with nothing on it is not."""
+    if name not in STUDY_TOOLS:
+        return False
+    if name == "knowledge_search":
+        head = result.content[:300].lower()
+        return not any(marker in head for marker in _EMPTY_KNOWLEDGE)
+    return True
+
+
 # Looking does not change the page; an action in between makes looking again worthwhile.
 _LOOK_TOOLS = ("browser_read", "browser_screenshot")
 # Tools that load the same thing again whatever the page shows: same args = same call.
@@ -294,12 +313,23 @@ def _address(text: str) -> str | None:
     return None
 
 
+# http_tool.UA_REJECTED_CODE: the service refused the User-Agent, a new header fixes it, not a browser.
+UA_REJECTED = "user_agent_rejected"
+
+
 def repeat_key(name: str, args: dict) -> str | None:
-    """Identity of a call for the repeat check: the tool and its text arguments (limits and counts aside).
-    Browser tools and confirmations are left out: the page or the user's answer can change between calls."""
+    """Identity of a call for the repeat check: the tool and its text and object arguments (limits and
+    counts aside). Objects count: http_request with new headers (a User-Agent the service asked for) or a
+    new query is a different call, not a repeat. Browser tools and confirmations are left out: the page
+    or the user's answer can change between calls."""
     if name.startswith("browser_") or name == CONFIRM_TOOL:
         return None
-    texts = {k: v.strip().lower() for k, v in args.items() if isinstance(v, str)}
+    texts: dict[str, str] = {}
+    for k, v in args.items():
+        if isinstance(v, str):
+            texts[k] = v.strip().lower()
+        elif isinstance(v, (dict, list)) and v:
+            texts[k] = json.dumps(v, ensure_ascii=False, sort_keys=True, default=str).lower()
     return name + json.dumps(texts, ensure_ascii=False, sort_keys=True)
 
 
@@ -340,7 +370,7 @@ def run_agent(
     typed_unsaved = False  # typed into a form on a _FORM_HOSTS page after the last save
     unsaved_nudged = False
     studied = not budget.study_first
-    study_nudged = False
+    study_nudges = 0
 
     def safe_args(name: str, args: dict) -> dict:
         """Arguments as they go to the step stream and the trajectory: no passwords, no internals."""
@@ -459,8 +489,8 @@ def run_agent(
                     messages.append({"role": "user", "content": BROKEN_NOTE})
                 continue
             if not completion.tool_calls:
-                if not studied and not study_nudged:
-                    study_nudged = True
+                if not studied and study_nudges < STUDY_MAX_NUDGES:
+                    study_nudges += 1
                     messages.append({"role": "assistant", "content": text or "…"})
                     messages.append({"role": "user", "content": STUDY_NOTE})
                     emit({"type": "step", "kind": "study_nudge"})
@@ -478,6 +508,10 @@ def run_agent(
                     messages.append({"role": "user", "content": VERIFY_NOTE})
                     emit({"type": "step", "kind": "verify_nudge", "tool": VERIFY_TOOL})
                     continue
+                if not studied and text:
+                    # Asked twice and still no look at a source: the user sees that the facts are unchecked.
+                    emit({"type": "step", "kind": "study_unverified"})
+                    text = UNVERIFIED_NOTE + text
                 out.final_answer = text
                 break
             completion.text = text
@@ -497,12 +531,17 @@ def run_agent(
                 key = repeat_key(call.name, args)
                 if key and key in failed:
                     # The model repeats a call that already failed the same way: don't spend a step on it.
+                    hint = (
+                        "Не повторяй его: передай в headers User-Agent, который требует документация API. "
+                        "Браузер для этого не нужен."
+                        if failed[key] == UA_REJECTED
+                        else "Не повторяй его, попробуй другие аргументы или другой инструмент."
+                    )
                     messages.append(
                         {
                             "role": "tool",
                             "tool_call_id": call.id,
-                            "content": f"Не выполнено: этот вызов уже вернул ошибку ({failed[key]}). "
-                            "Не повторяй его, попробуй другие аргументы или другой инструмент.",
+                            "content": f"Не выполнено: этот вызов уже вернул ошибку ({failed[key]}). {hint}",
                         }
                     )
                     continue
@@ -529,8 +568,8 @@ def run_agent(
                             seen.clear()
                     messages.append({"role": "tool", "tool_call_id": call.id, "content": REPEAT_BLOCKED + note})
                     continue
-                if not studied and not study_nudged and call.name in ACT_TOOLS:
-                    study_nudged = True
+                if not studied and study_nudges < STUDY_MAX_NUDGES and call.name in ACT_TOOLS:
+                    study_nudges += 1
                     emit({"type": "step", "kind": "study_gate", "tool": call.name})
                     messages.append({"role": "tool", "tool_call_id": call.id, "content": STUDY_GATE})
                     continue
@@ -540,8 +579,12 @@ def run_agent(
                         messages.append({"role": "tool", "tool_call_id": call.id, "content": SCREENSHOT_LIMIT_TEXT})
                         continue
                 approved_here = False
+                policy_card = None
                 if guard.needs_approval(call.name, args):
-                    if guard.consume(call.name):
+                    # A live write shows the policy card (host, change, budget) even if the model asked
+                    # before: its own question may leave those out.
+                    policy_card = guard.card(call.name, args)
+                    if policy_card is None and guard.consume(call.name):
                         approved_here = True
                     elif not can_ask:
                         # The model skipped ask_confirmation: the loop asks, and never runs the tool unasked.
@@ -559,7 +602,7 @@ def run_agent(
                         label = None
                         if call.name == "browser_click" and isinstance(args.get("ref"), int):
                             label = guard.elements.get(args["ref"])
-                        ask_args = {"action": call.name, "details": describe(call.name, args, label)}
+                        ask_args = policy_card or {"action": call.name, "details": describe(call.name, args, label)}
                         answer = run_call(f"{call.id}_confirm{auto_ids}", CONFIRM_TOOL, ask_args)
                         calls_used += 1
                         if not approved(answer):
@@ -574,9 +617,10 @@ def run_agent(
                             continue
                         approved_here = True
                 run_args = {k: v for k, v in args.items() if not k.startswith("_")}
-                if approved_here and call.name == "browser_click":
-                    # The browser refuses a risky click by coordinates unless the loop says it was approved.
-                    run_args["_confirmed"] = True
+                if approved_here and (call.name == "browser_click" or policy_card is not None):
+                    # The browser refuses a risky click by coordinates, and a write tool a live write,
+                    # unless the loop says this very call was approved.
+                    run_args[write_policy.CONFIRMED_ARG] = True
                 result = run_call(call.id, call.name, run_args)
                 calls_used += 1
                 content = result.content
@@ -591,7 +635,7 @@ def run_agent(
                             seen.pop(other)
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": content})
                 if not result.error:
-                    if call.name in STUDY_TOOLS:
+                    if studied_by(call.name, result):
                         studied = True
                     if call.name == "browser_open" and isinstance(args.get("url"), str):
                         last_url = args["url"]

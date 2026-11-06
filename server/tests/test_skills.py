@@ -274,7 +274,7 @@ def test_bitrix24_write_only_on_a_training_portal(session, monkeypatch) -> None:
     args = {"method": "tasks.task.add", "params": {"fields": {"TITLE": "Пересчитать", "RESPONSIBLE_ID": 1}}}
     live = bitrix.execute(session, user, None, "bitrix24_write", {**args, "portal": "romashka.bitrix24.ru"},
                           transport=httpx.MockTransport(handler))
-    assert live.error == "write_forbidden" and "на экране" in live.content and seen == []
+    assert live.error == "confirmation_required" and "не подтверждена" in live.content and seen == []
     demo = bitrix.execute(session, user, None, "bitrix24_write", {**args, "portal": "demo.bitrix24.ru"},
                           transport=httpx.MockTransport(handler))
     assert demo.error is None and '"id": "42"' in demo.content and "bitrix24_read" in demo.content

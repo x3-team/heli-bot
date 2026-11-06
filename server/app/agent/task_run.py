@@ -102,7 +102,11 @@ CLOUD_HINT = (
 CONFIRM_HINT = (
     " Перед действием, которое трудно отменить (отправить письмо или сообщение, выставить счёт, оплатить, "
     "удалить), вызови ask_confirmation с точным описанием и продолжай только при ответе approved. "
-    "Без одобрения такое действие всё равно не выполнится. При отказе ничего не делай и сообщи об этом."
+    "Без одобрения такое действие всё равно не выполнится. При отказе ничего не делай и сообщи об этом. "
+    "Для записи в боевом кабинете через bitrix24_write, amocrm_write, direct_api или http_request сам не спрашивай: сервер "
+    "покажет карточку (где, что изменится, бюджет) и выполнит только после «да». Песочницы и публичные учебные "
+    "API (api.edu.cdek.ru, reqres.in, petstore.swagger.io, httpbin.org и т.п.) и POST за OAuth-токеном — не "
+    "боевой кабинет: вызывай http_request сразу и показывай ответ API как есть."
 )
 ANSWER_MAX_TOKENS = 1500
 # Earlier turns of the chat thread (task.context["history"]); the oldest are dropped first.
@@ -244,6 +248,14 @@ def system_prompt(tools: list[dict], guide: str | None = None, today: str | None
         text += CLOUD_HINT if "browser_open" in server_executed() else BROWSER_HINT
     if CONFIRM_TOOL in names:
         text += CONFIRM_HINT
+    if "moysklad_write" in names:
+        from app.agent.moysklad import WRITE_HINT
+
+        text += WRITE_HINT
+    if names & {"mail_read", "mail_search", "mail_send"}:
+        from app.agent.mail import MAIL_HINT
+
+        text += MAIL_HINT
     if "save_credential" in names:
         from app.agent.credentials import CREDENTIALS_HINT
 
@@ -252,6 +264,9 @@ def system_prompt(tools: list[dict], guide: str | None = None, today: str | None
         from app.knowledge import STUDY_HINT
 
         text += STUDY_HINT
+    from app.agent.schedule_tool import NO_SCHEDULE_HINT, SCHEDULE_HINT, TOOL_NAME as SCHEDULE_TOOL
+
+    text += SCHEDULE_HINT if SCHEDULE_TOOL in names else NO_SCHEDULE_HINT
     if "save_file" in names:
         from app.files import FILES_HINT
 
@@ -314,9 +329,26 @@ _STUDY_TOPIC = re.compile(
 )
 
 
+# «Посмотри API такого-то сервиса»: a question about a tool itself always needs its docs, whatever the complexity.
+_TOOL_TOPIC = re.compile(
+    r"(?<![\w])(?:api|апи|sdk|rest|вебхук\w*|webhook\w*|эндпоинт\w*|endpoint\w*|документаци\w*|"
+    r"песочниц\w*|sandbox|интеграц\w*|токен\w*)(?![\w])",
+    re.I,
+)
+
+
 def needs_study(request: str, complexity: int, guide: str | None, notes: list[str]) -> bool:
-    """«Изучи предмет»: an unfamiliar service or topic (no playbook, nothing in the knowledge base)."""
-    return complexity >= 2 and not guide and not notes and bool(_STUDY_TOPIC.search(request or ""))
+    """«Изучи предмет»: an unfamiliar service or topic (no playbook, nothing in the knowledge base).
+
+    A request about an API, its docs, sandbox or tokens studies at any complexity: the classifier calls
+    «посмотри API сервиса X» simple, and the facts about X are exactly what the model would otherwise guess.
+    """
+    if guide or notes:
+        return False
+    text = request or ""
+    if _TOOL_TOPIC.search(text):
+        return True
+    return complexity >= 2 and bool(_STUDY_TOPIC.search(text))
 
 
 class SecretError(Exception):

@@ -4,10 +4,11 @@ bitrix24_read reads on any portal: exact data for answers and a check of a recor
 screen. Without a login on the screen (the sign-in page asks a captcha from the server) read-only tasks can
 be done through this tool alone.
 
-bitrix24_write creates and changes records (deals, leads, contacts, companies, tasks, comments, stages),
-but only on a training portal: SANDBOX_PORTALS plus HELI_BITRIX_SANDBOX_HOSTS. A live portal stays read-only
-through REST, the same rule as the Direct API and http_request: changes there go through the screen, where
-the user sees them and confirms the dangerous ones. Nothing deletes through REST, sandbox or not.
+bitrix24_write creates and changes records (deals, leads, contacts, companies, tasks, comments, stages).
+On a training portal (SANDBOX_PORTALS plus HELI_BITRIX_SANDBOX_HOSTS) it writes at once. On a client's
+portal it writes only after the user's «да» on the card the loop shows (app.agent.write_policy: portal,
+method, fields); the call must name the portal, and without the approval nothing is sent. Nothing
+deletes through REST, sandbox or not.
 
 Access: «Доступы» entry with site = the portal (company.bitrix24.ru or a box on its own domain), login
 «webhook», password = the incoming webhook URL (https://company.bitrix24.ru/rest/1/abc123/) or just «1/abc123».
@@ -24,6 +25,7 @@ import uuid
 
 import httpx
 
+from app.agent import write_policy
 from app.agent.control import ClientResult
 
 log = logging.getLogger(__name__)
@@ -99,9 +101,10 @@ TOOL = _fn(
 )
 WRITE_TOOL = _fn(
     "bitrix24_write",
-    "Создать или изменить запись Битрикс24 через REST (вебхук в «Доступах»), только на учебном портале: "
-    "сделка, лид, контакт, компания, задача, комментарий, смена стадии (crm.deal.update с fields.STAGE_ID). "
-    "На боевом портале клиента REST только читает: там меняй на экране. Удаления нет. "
+    "Создать или изменить запись Битрикс24 через REST (вебхук в «Доступах»): сделка, лид, контакт, компания, "
+    "задача, комментарий, смена стадии (crm.deal.update с fields.STAGE_ID). Всегда указывай portal. На учебном "
+    "портале запись идёт сразу; на боевом портале клиента сервер сам покажет пользователю карточку "
+    "подтверждения (портал, метод, поля) и запишет только после «да» — сам ask_confirmation не вызывай. Удаления нет. "
     "После записи проверь её через bitrix24_read (crm.deal.get, tasks.task.get). "
     "Пример: method tasks.task.add, params {\"fields\": {\"TITLE\": \"…\", \"RESPONSIBLE_ID\": 1, "
     "\"DEADLINE\": \"2026-11-04T18:00:00+03:00\"}}. Методы: " + ", ".join(sorted(WRITE_METHODS)) + ".",
@@ -154,6 +157,21 @@ def is_sandbox(site: str) -> bool:
     return bool(host) and host in sandbox_portals()
 
 
+def classify(args: dict):
+    """write_policy rule for bitrix24_write. The portal comes from the args, as the card shows it."""
+    from app.skills.hosts import host_of
+
+    method = str(args.get("method") or "").strip()
+    host = host_of(str(args.get("portal") or "")) if args.get("portal") else ""
+    if method not in WRITE_METHODS:
+        return write_policy.read(host)  # the executor refuses it: nothing is written
+    if host and is_sandbox(host):
+        return write_policy.sandbox(host, method, method)
+    params = args.get("params") or {}
+    what = f"{method} — " + write_policy.short(params, 400)
+    return write_policy.live(host or "портал не указан", what, verb=method)
+
+
 def build_call(args: dict, write: bool = False) -> tuple[str, dict]:
     method = str(args.get("method") or "").strip().lower()
     allowed = WRITE_METHODS if write else METHODS
@@ -183,12 +201,13 @@ def _compact(value, depth: int = 0):
     return value
 
 
-def format_result(data: dict, write: bool = False) -> str:
+def format_result(data: dict, write: bool = False, live: bool = False) -> str:
     result = data.get("result")
     if write:
         if isinstance(result, dict) and isinstance(result.get("task"), dict):
             result = result["task"]  # tasks.task.add / update
-        text = "Записано на учебном портале. Ответ: " + json.dumps(_compact(result), ensure_ascii=False)
+        where = "на боевом портале (подтверждено пользователем)" if live else "на учебном портале"
+        text = f"Записано {where}. Ответ: " + json.dumps(_compact(result), ensure_ascii=False)
         return (text if len(text) <= RESULT_CHARS else text[:RESULT_CHARS] + "…") + (
             "\nПроверь запись через bitrix24_read (crm.*.get или tasks.task.get по ID) и сверь поля с задачей."
         )
@@ -231,7 +250,14 @@ def webhook_for(session, user, portal: str | None) -> dict | None:
     from app.skills.hosts import host_matches, host_of
     from app.vault import list_credentials
 
-    rows = [row for row in list_credentials(session, user) if is_webhook_login(row.get("username"))]
+    from app.agent.amocrm import account_host
+
+    # amoCRM tokens may be saved with the same login «webhook»: they are not Битрикс24 webhooks.
+    rows = [
+        row
+        for row in list_credentials(session, user)
+        if is_webhook_login(row.get("username")) and not account_host(row.get("site"))
+    ]
     target = host_of(portal)
     if target:
         for row in rows:
@@ -257,11 +283,14 @@ def execute(session, user, task_id, name: str, args: dict, transport: httpx.Base
                 "Битрикс24 без входа, создайте входящий вебхук (Разработчикам → Другое → Входящий вебхук) и "
                 "сохраните его в «Доступах»: сайт — адрес портала, логин webhook, пароль — адрес вебхука.",
             )
-        if write and not is_sandbox(cred["site"]):
+        live = write and not is_sandbox(cred["site"])
+        if live and not (write_policy.confirmed(args) and str(args.get("portal") or "").strip()):
+            # The card named the portal from the args; a live write without one, or without «да», never goes out.
             raise BxError(
-                "write_forbidden",
-                "Ошибка: портал " + str(cred["site"]) + " боевой, через REST на нём только чтение. Создай или измени "
-                "запись на экране (опасные действия — после подтверждения пользователя), затем проверь её через bitrix24_read.",
+                write_policy.REFUSED_CODE,
+                "Не выполнено: портал " + str(cred["site"]) + " боевой, а запись в нём не подтверждена пользователем "
+                "(или не указан portal). Ничего не отправлено. Вызови bitrix24_write с portal: сервер покажет "
+                "пользователю карточку, и запись пойдёт после «да».",
             )
         try:
             secret = secret_for_browser(session, user, uuid.UUID(cred["id"]))
@@ -269,8 +298,8 @@ def execute(session, user, task_id, name: str, args: dict, transport: httpx.Base
             raise BxError(exc.code, "Ошибка: хранилище паролей недоступно.") from None
         data = fetch(webhook_base(cred["site"], secret), method, params, transport)
         if write:
-            log.info("bitrix24 sandbox write %s", method)
-        return ClientResult(format_result(data, write))
+            log.info("bitrix24 %s write %s", "live" if live else "sandbox", method)
+        return ClientResult(format_result(data, write, live))
     except BxError as exc:
         return ClientResult(exc.text or f"Ошибка: {exc.code}", exc.code)
     except httpx.HTTPError as exc:
@@ -285,3 +314,6 @@ def register() -> None:
     register_client_tool(TOOL)
     register_client_tool(WRITE_TOOL)
     register_executor(TOOL_NAMES, execute)
+
+
+write_policy.register("bitrix24_write", classify)
