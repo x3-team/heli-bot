@@ -75,7 +75,28 @@ def test_live_endpoints_as_admin(session, client, monkeypatch):
     assert live["export_sft"]["status"] == 200
 
 
-def test_live_endpoints_without_admin(session):
-    _user(session, "client@example.com")
+def test_live_endpoints_without_admin_renders_in_process(session, client):
+    user = _user(session, "client@example.com")
+    task = start_task(session, user, "Задача", {})
+    auto_finish(session, task.id, "success", "Готово")
+    rate_task(session, user, task.id, rating=1)
     session.commit()
-    assert live_endpoints(session, "http://testserver") == {"skipped": "no_admin_user"}
+
+    live = live_endpoints(session, "http://testserver", http=client)
+
+    assert live["no_token_status"] == 401
+    assert live["skipped"] == "no_admin_user"
+    assert live["in_process"]["quality_tasks"] == 1
+    assert live["in_process"]["export_sft_lines"] == 1
+    assert session.scalar(select(func.count()).select_from(User)) == 1
+
+
+def test_email_places_name_the_key_not_the_value(session):
+    user = _user(session, "client@example.com")
+    task = start_task(session, user, "Сборка build@1.2.3 и почта петя@почта.рф", {})
+    auto_finish(session, task.id, "success", "ok")
+    session.commit()
+
+    places = learning_check(session)["export"]["raw"]["email_places"]
+
+    assert places == {"task (not_a_tld)": 1, "task (non_ascii)": 1}

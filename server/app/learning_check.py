@@ -45,6 +45,28 @@ def _keys(value: Any) -> set[str]:
     return found
 
 
+def _email_places(value: Any, path: str, out: Counter) -> None:
+    """Where in a document an address-like string survived masking: the key path and its shape, never the value."""
+    if isinstance(value, dict):
+        for key, inner in value.items():
+            _email_places(inner, f"{path}.{key}" if path else str(key), out)
+    elif isinstance(value, list):
+        for inner in value:
+            _email_places(inner, f"{path}[]", out)
+    elif isinstance(value, str):
+        for match in EMAIL_RE.finditer(value):
+            found = match.group(0)
+            domain = found.rsplit("@", 1)[1]
+            tld = domain.rsplit(".", 1)[-1]
+            if not found.isascii():
+                shape = "non_ascii"
+            elif not tld.isalpha():
+                shape = "not_a_tld"  # image@2x.png, version@1.2.3
+            else:
+                shape = "ascii_email"
+            out[f"{path} ({shape})"] += 1
+
+
 def _export_check(lines: list[dict], account_emails: set[str]) -> dict:
     body = "\n".join(json.dumps(line, ensure_ascii=False) for line in lines)
     keys = set().union(*(_keys(line) for line in lines)) if lines else set()
@@ -56,7 +78,15 @@ def _export_check(lines: list[dict], account_emails: set[str]) -> dict:
         # Account emails must never reach the dataset (masking turns emails into placeholders).
         "account_emails_found": sum(1 for email in account_emails if email and email in lowered),
         "raw_emails_found": len(EMAIL_RE.findall(body)),
+        "email_places": _places(lines),
     }
+
+
+def _places(lines: list[dict]) -> dict:
+    out: Counter = Counter()
+    for line in lines:
+        _email_places(line, "", out)
+    return dict(out.most_common(20))
 
 
 def learning_check(session: Session, *, days: int = 7, now: datetime | None = None) -> dict:
@@ -116,21 +146,41 @@ def learning_check(session: Session, *, days: int = 7, now: datetime | None = No
 
     report["journal_all"] = journal(tasks)
     report["journal_recent"] = journal(recent)
-    for part in ("journal_all", "journal_recent"):
+    # The first finished_at marks the build that writes the journal; older tasks cannot have one.
+    journal_start = min((_aware(r.finished_at) for r in tasks if r.finished_at), default=None)
+    report["journal_start"] = journal_start.isoformat() if journal_start else None
+    since_journal = [r for r in tasks if journal_start and _aware(r.created_at) >= journal_start - timedelta(hours=1)]
+    report["journal_since_start"] = journal(since_journal)
+    for part in ("journal_all", "journal_recent", "journal_since_start"):
         for key in ("last_task_at", "last_finished_at"):
             value = report[part][key]
             report[part][key] = value.isoformat() if value else None
 
     feedback = session.execute(
-        select(TaskFeedback.rating, TaskFeedback.acceptance, TaskFeedback.reason_code, TaskFeedback.user_fixed)
+        select(
+            TaskFeedback.rating,
+            TaskFeedback.acceptance,
+            TaskFeedback.reason_code,
+            TaskFeedback.user_fixed,
+            TaskFeedback.mail_disposition,
+            TaskFeedback.created_at,
+        )
     ).all()
-    report["feedback"] = {
-        "rows": len(feedback),
-        "thumbs_up": sum(1 for f in feedback if f.rating == 1),
-        "thumbs_down": sum(1 for f in feedback if f.rating == -1),
-        "with_reason_code": sum(1 for f in feedback if f.reason_code),
-        "user_fixed": sum(1 for f in feedback if f.user_fixed),
-    }
+
+    def rated(rows: list) -> dict:
+        return {
+            "rows": len(rows),
+            "thumbs_up": sum(1 for f in rows if f.rating == 1),
+            "thumbs_down": sum(1 for f in rows if f.rating == -1),
+            "with_reason_code": sum(1 for f in rows if f.reason_code),
+            "user_fixed": sum(1 for f in rows if f.user_fixed),
+            "with_mail_disposition": sum(1 for f in rows if f.mail_disposition),
+        }
+
+    report["feedback"] = rated(feedback)
+    report["feedback_since_journal"] = rated(
+        [f for f in feedback if journal_start and _aware(f.created_at) >= journal_start]
+    )
     report["signals_all"] = dict(Counter(session.scalars(select(TaskSignal.kind))))
     report["signals_without_task"] = int(
         session.scalar(select(func.count()).select_from(TaskSignal).where(TaskSignal.task_id.is_(None))) or 0
@@ -170,13 +220,16 @@ def live_endpoints(session: Session, base_url: str, days: int = 7, http: Any = N
 
     admin = session.scalar(select(User).where(User.is_admin.is_(True)).limit(1))
     session.rollback()
-    if admin is None:
-        return {"skipped": "no_admin_user"}
-    token = issue_token(admin.id)
-    headers = {"Authorization": f"Bearer {token}"}
     out: dict[str, Any] = {}
     client = http or httpx.Client(base_url=base_url, timeout=30)
     try:
+        # The route is on the running build and closed without a token.
+        out["no_token_status"] = client.get("/v1/admin/quality").status_code
+        if admin is None:
+            out["skipped"] = "no_admin_user"
+            out["in_process"] = _in_process(session, days)
+            return out
+        headers = {"Authorization": f"Bearer {issue_token(admin.id)}"}
         quality = client.get("/v1/admin/quality", params={"days": days}, headers=headers)
         out["quality_status"] = quality.status_code
         if quality.status_code == 200:
@@ -198,4 +251,25 @@ def live_endpoints(session: Session, base_url: str, days: int = 7, http: Any = N
     finally:
         if http is None:
             client.close()
+    return out
+
+
+def _in_process(session: Session, days: int) -> dict:
+    """No admin account yet: render the admin views from the API code on the live data, as a transient admin
+    that is never added to the session (nothing is written)."""
+    from app.api import admin_quality, export_trajectories
+
+    probe = User(email="learning-check@invalid", is_admin=True, consent_pdn=False, consent_training=False)
+    out: dict[str, Any] = {}
+    try:
+        data = admin_quality(days=days, user=probe, session=session)
+        out["quality_tasks"] = data.get("tasks")
+        out["quality_sft_ready"] = (data.get("dataset") or {}).get("sft_ready")
+        for kind in ("raw", "sft", "dpo"):
+            body = export_trajectories(kind=kind, success_only=None, thumbs_up_only=False, user=probe, session=session).body
+            out[f"export_{kind}_lines"] = len([line for line in body.decode().splitlines() if line.strip()])
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = type(exc).__name__
+    finally:
+        session.rollback()
     return out
