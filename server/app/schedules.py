@@ -26,6 +26,8 @@ MSK = ZoneInfo("Europe/Moscow")
 # A run more than this late (the server was down) is skipped: a 9:00 reminder at 15:00 helps nobody.
 LATE_AFTER = timedelta(minutes=30)
 TICK_OFFSET_S = 3
+# What the ticker did last, for GET /health/schedules: no user data, only times and counts.
+TICKER: dict = {"started_at": None, "last_tick": None, "ticks": 0, "last_due": 0, "last_ran": 0, "last_skip": None}
 
 _PHRASES = {
     "каждый понедельник в 9:00": "0 9 * * 1",
@@ -176,22 +178,32 @@ def autorun_enabled() -> bool:
 
 def tick(session_factory, client_factory, driver_factory, now: datetime | None = None) -> int:
     """One pass of the ticker: every user's due schedules, each in its own transaction."""
+    TICKER["last_tick"] = _aware(now).isoformat(timespec="seconds")
+    TICKER["ticks"] += 1
+    TICKER["last_due"] = 0
+    TICKER["last_ran"] = 0
+    TICKER["last_skip"] = None
     session = session_factory()
     try:
         due = session.scalar(
             select(func.count()).select_from(Schedule).where(Schedule.enabled.is_(True), Schedule.next_run <= _aware(now))
         )
+        TICKER["last_due"] = int(due or 0)
         if not due:
             return 0
         try:
             client = client_factory()
         except HeliError as exc:
             log.info("schedule tick skipped: %s", exc.code)
+            TICKER["last_skip"] = exc.code
             return 0
-        return run_due(session, client, driver_factory(), now=now, skip_late_after=LATE_AFTER, commit=True)
+        ran = run_due(session, client, driver_factory(), now=now, skip_late_after=LATE_AFTER, commit=True)
+        TICKER["last_ran"] = ran
+        return ran
     except Exception:  # noqa: BLE001  (one bad schedule must not stop the ticker)
         session.rollback()
         log.exception("schedule tick failed")
+        TICKER["last_skip"] = "tick_failed"
         return 0
     finally:
         session.close()
@@ -217,8 +229,14 @@ def install_ticker(session_factory=None, client_factory=None, driver_factory=Non
             )
 
     threading.Thread(target=loop, name="schedule-ticker", daemon=True).start()
+    TICKER["started_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     log.info("schedule ticker started")
     return True
+
+
+def ticker_status() -> dict:
+    """Public heartbeat of the ticker: on/off, when it last looked and what it did. No user data."""
+    return {"autorun": autorun_enabled(), **TICKER}
 
 
 def next_after(expression: str, now: datetime) -> datetime:
