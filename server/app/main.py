@@ -36,8 +36,11 @@ def create_app() -> FastAPI:
     app.state.mail_sink = []
 
     @app.get("/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok"}
+    def health() -> dict[str, str | None]:
+        # revision: the git SHA deploy-pinvds wrote into server/REVISION, so prod can be matched to main.
+        from app.trajectories import revision
+
+        return {"status": "ok", "revision": revision()}
 
     @app.get("/health/schedules")
     def health_schedules() -> dict:

@@ -129,6 +129,39 @@ write_training_values() {
   done
 }
 
+# infra/deploy on the host is a hand copy too. It is not run by this script, but a restore from it must not
+# bring back old defaults (HELI_OPEN_ACCESS=1), so deploy refreshes it from the release (no --delete:
+# files that exist only on the host stay) and diff shows what differs.
+infra_report() {
+  log "host layout (names only; .env, var, backups and venv are not read):"
+  $SUDO find "$APP_DIR" -mindepth 1 -maxdepth 1 -printf '  %y %M %u %TY-%Tm-%Td %f\n' 2>/dev/null | sort -k5 || true
+  log "files outside server/ that are not in git (except .env, var, backups, venv):"
+  $SUDO find "$APP_DIR" -mindepth 1 \( -path "$APP_DIR/server" -o -path "$APP_DIR/var" -o -path "$APP_DIR/backups" \
+    -o -path "$APP_DIR/venv" -o -path "$APP_DIR/.env" -o -path "$APP_DIR/server.failed" -o -path "$APP_DIR/infra" \) -prune \
+    -o -type f -printf '  %P %s bytes\n' 2>/dev/null | head -n 50 || true
+  if [ -d "$STAGE/infra/deploy" ]; then
+    if [ -d "$APP_DIR/infra/deploy" ]; then
+      log "infra/deploy: host vs release (first 200 lines; files only on the host are kept on deploy):"
+      $SUDO diff -ru "$APP_DIR/infra/deploy" "$STAGE/infra/deploy" | head -n 200 || true
+    else
+      log "infra/deploy: not on the host, deploy will add it"
+    fi
+  fi
+  local f
+  for f in $($SUDO find "$APP_DIR" -maxdepth 3 -name 'issue-cert*' -type f -not -path "$APP_DIR/backups/*" 2>/dev/null); do
+    log "operational script $f (long values masked):"
+    $SUDO sed -E 's/([A-Za-z0-9_+\/=-]{24,})/<masked>/g; s/((key|token|secret|password|passwd)[A-Za-z_]*=)[^ ]+/\1<masked>/Ig' "$f" | head -n 80 | sed 's/^/  | /'
+  done
+}
+sync_infra() {
+  [ -d "$STAGE/infra/deploy" ] || { log "release has no infra/deploy (old workflow), infra not refreshed"; return 0; }
+  if $SUDO mkdir -p "$APP_DIR/infra/deploy" 2>/dev/null && $SUDO rsync -rc "$STAGE/infra/deploy/" "$APP_DIR/infra/deploy/"; then
+    log "infra/deploy refreshed from the release (nothing deleted)"
+  else
+    log "WARNING: could not refresh $APP_DIR/infra/deploy as $ME (the API is deployed; fix the owner of that folder)"
+  fi
+}
+
 [ -d "$APP_DIR/server" ] || { log "no $APP_DIR/server on this host"; exit 1; }
 [ -f "$APP_DIR/.env" ] || { log "no $APP_DIR/.env on this host"; exit 1; }
 
@@ -158,6 +191,7 @@ if [ "$MODE" = diff ]; then
   $SUDO rsync -rcn --delete --itemize-changes "${RSYNC_EXCLUDES[@]}" "$STAGE/server/" "$APP_DIR/server/" | sed 's/^/  /' || true
   log "content diff (first 400 lines):"
   $SUDO diff -ru -x '__pycache__' -x '*.pyc' -x '*.egg-info' -x var -x .env "$APP_DIR/server" "$STAGE/server" | head -n 400 || true
+  infra_report
   exit 0
 fi
 
@@ -177,7 +211,10 @@ BACKUPS="$APP_DIR/backups"
 $SUDO mkdir -p "$BACKUPS" 2>/dev/null || mkdir -p "$BACKUPS"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP="$BACKUPS/server-$STAMP.tgz"
-$SUDO tar -czf "$BACKUP" -C "$APP_DIR" --exclude '__pycache__' --exclude 'server/var' server
+INFRA_PART=""
+[ -d "$APP_DIR/infra" ] && INFRA_PART="infra"
+# shellcheck disable=SC2086
+$SUDO tar -czf "$BACKUP" -C "$APP_DIR" --exclude '__pycache__' --exclude 'server/var' server $INFRA_PART
 log "backup: $BACKUP"
 if [ -f "$APP_DIR/var/heli.db" ]; then
   $SUDO cp -p "$APP_DIR/var/heli.db" "$BACKUPS/heli-$STAMP.db"
@@ -253,6 +290,7 @@ if curl -fsS --max-time 15 "$PUBLIC_HEALTH" >/dev/null 2>&1; then
 else
   log "WARNING: $PUBLIC_HEALTH did not answer (nginx/TLS are not touched by this deploy)"
 fi
+sync_infra
 curl -fsS "http://127.0.0.1:$PORT/health" || true
 echo
 log "deployed $REV"
