@@ -122,7 +122,16 @@ def execute(session, user, task_id, name: str, args: dict) -> ClientResult:
             "Предложи удалить лишние в разделе «Расписания».",
             "too_many_schedules",
         )
-    row = create_schedule(session, user, label, cron, request)
+    try:
+        row = create_schedule(session, user, label, cron, request)
+    except ScheduleError as exc:
+        if exc.code != "schedule_limit":
+            raise
+        return ClientResult(
+            "Ошибка: на тарифе пользователя расписаний больше не поставить. "
+            "Предложи удалить лишнее в разделе «Расписания» или перейти на тариф выше.",
+            "too_many_schedules",
+        )
     log.info("schedule saved from chat id=%s", row.id)
     return ClientResult(saved_text(row.label, row.expression, row.next_run, row.request_text))
 

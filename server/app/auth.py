@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.billing import start_trial
 from app.config import get_settings
 from app.models import Invite, LoginCode, User
 
@@ -117,6 +118,7 @@ def register_user(
         trial_ends_at=now + TRIAL,
         created_at=now,
     )
+    start_trial(user, now)
     session.add(user)
     session.flush()
     return user
@@ -241,6 +243,7 @@ def verify_login_code(session: Session, email: str, code: str) -> User:
             trial_ends_at=now + TRIAL,
             created_at=now,
         )
+        start_trial(user, now)
         session.add(user)
     if row.invite_id is not None:
         invite = session.get(Invite, row.invite_id)

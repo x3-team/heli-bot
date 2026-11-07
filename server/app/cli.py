@@ -42,6 +42,13 @@ def main() -> None:
     limit.add_argument("--monthly", type=Decimal)
     limit.add_argument("--weekly", type=Decimal)
 
+    wallet = sub.add_parser("wallet-credit", help="кошелёк бота: + оплаченный счёт, − корректировка, ₽")
+    wallet.add_argument("--email", required=True)
+    wallet.add_argument("--amount", type=Decimal, required=True)
+    wallet.add_argument("--note", default="")
+    wallet.add_argument("--ref", help="номер платежа/счёта: повтор с тем же номером не зачислится дважды")
+
+
     docs = sub.add_parser("crawl-docs", help="проиндексировать официальные справки сервисов (по sitemap)")
     docs.add_argument("--site", action="append", help="только этот сайт, например dev.moysklad.ru")
     docs.add_argument("--limit", type=int, default=100, help="страниц на сайт за запуск")
@@ -93,6 +100,19 @@ def main() -> None:
             if args.weekly is not None:
                 user.weekly_limit_rub = args.weekly if args.weekly > 0 else None
             print(f"monthly={user.monthly_limit_rub} weekly={user.weekly_limit_rub or 'auto'}")
+        elif args.command == "wallet-credit":
+            from app import billing
+
+            user = session.scalar(select(User).where(User.email == args.email.strip().lower()))
+            if user is None:
+                raise AuthError("user_not_found")
+            kind = "topup" if args.amount > 0 else "adjust"
+            title = args.note.strip() or ("Пополнение" if kind == "topup" else "Корректировка")
+            try:
+                billing.post_tx(session, user, kind, args.amount, title, ref=f"admin:{args.ref}" if args.ref else billing.new_ref())
+            except billing.BillingError as exc:
+                raise SystemExit(exc.code) from None
+            print(f"balance={billing.balance(user)}")
         session.commit()
     except AuthError as exc:
         session.rollback()
