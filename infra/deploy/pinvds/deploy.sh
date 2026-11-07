@@ -186,7 +186,9 @@ fi
 # Keep the last KEEP_BACKUPS of each kind.
 for pattern in 'server-*.tgz' 'heli-*.db' 'env-*'; do
   # shellcheck disable=SC2012
-  ls -1t "$BACKUPS"/$pattern 2>/dev/null | tail -n +"$((KEEP_BACKUPS + 1))" | xargs -r $SUDO rm -f
+  # No file of a kind yet (env-* before the first .env change): ls exits 2, and with pipefail
+  # that used to end the deploy right after the backup.
+  { ls -1t "$BACKUPS"/$pattern 2>/dev/null || true; } | tail -n +"$((KEEP_BACKUPS + 1))" | xargs -r $SUDO rm -f
 done
 
 ENV_BACKUP=""
