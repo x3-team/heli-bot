@@ -158,6 +158,19 @@ SEEDS: tuple[tuple[str, str, str], ...] = (
         "https://docs.ozon.ru/api/seller/",
     ),
     (
+        "ЦБ РФ: официальный курс валют на дату (XML_daily)",
+        "Курс доллара, евро, юаня и других валют ЦБ берётся одним GET без ключа: "
+        "https://www.cbr.ru/scripts/XML_daily.asp?date_req=ДД/ММ/ГГГГ (например date_req=15/10/2026; без "
+        "date_req — последний установленный курс). Ответ XML <ValCurs Date=…>: у каждой <Valute> CharCode (USD, "
+        "EUR, CNY), Nominal, Value (дробь через запятую) и VunitRate — курс за 1 единицу; Value делить на Nominal "
+        "(JPY, KZT, AMD — за 10 или 100). Атрибут Date — дата, на которую курс установлен (выходные — курс "
+        "прошлого рабочего дня), её и называй. Динамика за период: "
+        "https://www.cbr.ru/scripts/XML_dynamic.asp?date_req1=…&date_req2=…&VAL_NM_RQ=R01235 (R01235 — USD, "
+        "R01239 — EUR, R01375 — CNY; коды — XML_valFull.asp). SOAP-сервис DailyInfo.asmx для курса не используй: "
+        "это POST с конвертом и лишние шаги, XML_daily отвечает тем же.",
+        "https://www.cbr.ru/development/SXML/",
+    ),
+    (
         "Капча на сайтах",
         "Капчу Heli не решает и не обходит: ставит задачу на паузу и просит пользователя пройти её на экране "
         "«Компьютер агента», потом продолжает.",

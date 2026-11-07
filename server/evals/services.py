@@ -13,7 +13,9 @@ DNS тоже мок: адрес из ``services.dns`` или публичный,
 * ``sandbox_hosts`` — песочницы стенда, как ``HELI_HTTP_SANDBOX_HOSTS`` на сервере;
 * ``vault`` — «Доступы»: ``[{"site", "secret"}]``;
 * ``dns`` — ``{host: ip}``;
-* ``endpoints`` — ``[{"method", "host", "path", "auth"?, "status"?, "body", "append"?, "echo_auth"?}]``.
+* ``endpoints`` — ``[{"method", "host", "path", "query"?, "auth"?, "status"?, "body", "append"?, "echo_auth"?}]``.
+  ``query`` — параметры, которые должны совпасть (первый подходящий endpoint отвечает), ``body``-строка
+  уходит как XML (ЦБ ``XML_daily.asp``).
   ``auth`` — секрет, который ждёт сервис (иначе 401), ``append`` — путь к списку в state, куда POST
   кладёт тело запроса (так видно, ушла ли запись), ``echo_auth`` — небрежный API, который возвращает ключ.
 """
@@ -26,7 +28,7 @@ import json
 import os
 from contextlib import contextmanager
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 import httpx
 
@@ -97,7 +99,11 @@ class ServiceTools:
             raise ToolError(f"{exc.code}: {_http.redact(exc.text, secrets)}") from None
         status, body = self._answer(req, secrets)
         request = httpx.Request(req.method, req.url, params=req.query or None)
-        response = httpx.Response(status, json=body, request=request)
+        if isinstance(body, str):  # XML / text API (ЦБ XML_daily.asp)
+            response = httpx.Response(status, text=body, headers={"content-type": "application/xml; charset=utf-8"},
+                                      request=request)
+        else:
+            response = httpx.Response(status, json=body, request=request)
         text = _http.format_response(response, req.mode, secrets)
         if status >= 400:
             raise ToolError(f"http_{status}: {text}")
@@ -107,8 +113,12 @@ class ServiceTools:
         path = urlsplit(req.url).path or "/"
         # What «left the server»: tests check that a refused write never got here.
         self._services().setdefault("sent", []).append({"method": req.method, "host": req.host, "path": path})
+        asked = {k: str(v) for k, v in parse_qsl(urlsplit(req.url).query)}
+        asked.update({str(k): str(v) for k, v in (req.query or {}).items()})
         for ep in self._services().get("endpoints", []):
             if ep["method"] != req.method or ep["host"] != req.host or ep["path"].rstrip("/") != path.rstrip("/"):
+                continue
+            if any(asked.get(k) != v for k, v in ep.get("query", {}).items()):
                 continue
             sent = json.dumps([req.headers, req.query], ensure_ascii=False)
             if ep.get("auth") and ep["auth"] not in sent:

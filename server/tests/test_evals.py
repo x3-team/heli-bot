@@ -18,7 +18,7 @@ EXPECTED_TOOL_ERRORS = {"inn-04", "dx-01", "dx-02", "dx-03", "mt-01", "ms-w4", "
 def test_scenario_set_shape() -> None:
     ids = [s["id"] for s in SCENARIOS]
     assert len(ids) == len(set(ids))
-    assert 20 <= len(ids) <= 80
+    assert 20 <= len(ids) <= 100
     by_cat: dict[str, int] = {}
     for s in SCENARIOS:
         by_cat[s["category"]] = by_cat.get(s["category"], 0) + 1
