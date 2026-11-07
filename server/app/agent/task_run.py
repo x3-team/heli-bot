@@ -240,6 +240,12 @@ def run_max_rub() -> Decimal | None:
     return value if value > 0 else None
 
 
+def _plan_rub(server: Decimal | None, plan: Decimal | None) -> Decimal | None:
+    if plan is None:
+        return server
+    return plan if server is None else min(server, plan)
+
+
 def vision_alias() -> str:
     alias = os.environ.get("HELI_VISION_ALIAS", "").strip() or "heli-vision"
     return alias if alias in PUBLIC_MODEL_ALIASES else "heli-vision"
@@ -438,8 +444,13 @@ def execute_task(
     session.commit()
     publish({"type": "step", "kind": "classify", "position": step.position, "text": task_type})
 
+    from app import billing
+
+    plan_steps, plan_extend, plan_rub = billing.task_caps(user)
     if max_steps is None:
         max_steps = steps_for(complexity)
+        if plan_steps is not None:
+            max_steps = min(max_steps, plan_steps)
     ratio = remaining_ratio(snapshot(session, user))
     route = Router(client).route(phase="execute", complexity=complexity, quota_remaining=ratio)
     state = {"url": None, "rounds": 0}
@@ -595,8 +606,8 @@ def execute_task(
         complete=complete,
         budget=Budget(
             max_steps=max_steps,
-            extend_steps=extend_for(complexity),
-            max_rub=run_max_rub(),
+            extend_steps=extend_for(complexity) if plan_extend is None else min(extend_for(complexity), plan_extend),
+            max_rub=_plan_rub(run_max_rub(), plan_rub),
             estimate_rub=estimate_rub if estimate_rub is not None else estimate_turn_reserve(task.request_text),
             autopause=autopause,
             study_first=knowledge_on and needs_study(task.request_text, complexity, _guide(task.request_text, None), notes),

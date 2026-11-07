@@ -819,13 +819,20 @@ def billing_view(session: Session, user: User) -> dict:
             "day_percent": float(min(Decimal(100), snap.day_percent)),
             "blocked": snap.blocked,
             "warning": snap.warning,
-            "in_overage": plan is not None and snap.month_used >= snap.monthly_limit and not snap.blocked,
+            "in_overage": plan is not None
+            and not snap.blocked
+            and (snap.month_used >= snap.monthly_limit or (snap.daily_limit > 0 and snap.daily_used >= snap.daily_limit)),
+            # «Ещё ~N задач»: typical tasks left in the month and today (no rubles of cost leave the server).
+            "tasks_left_month": billing.tasks_left(snap.monthly_limit - snap.month_used) if plan else None,
+            "tasks_left_today": billing.tasks_left(snap.daily_limit - snap.daily_used) if plan else None,
             "period_ends_at": _iso_utc(snap.period_ends_at),
         },
         "overage": {
             "enabled": bool(user.overage_enabled),
             "cap_rub": str(billing.rub(user.overage_cap_rub)),
             "spent_rub": str(billing.overage_spent(session, user, since)) if plan else "0.00",
+            # «Продолжить за счёт кошелька (примерно N ₽ за задачу)»: a typical task, markup included.
+            "typical_task_rub": str(billing.rub(billing.TYPICAL_TASK_RUB * billing.OVERAGE_MARKUP)),
         },
         "plans": billing.public_plans(),
         "topup": {"available": False, "min_rub": str(TOPUP_MIN_RUB)},

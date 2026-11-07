@@ -44,6 +44,12 @@ class Plan:
     day_limit_rub: Decimal
     days: int
     schedules: int
+    # Per task: step limit, one-time extension when it is still moving, cost ceiling.
+    max_steps: int
+    extend_steps: int
+    task_max_rub: Decimal
+    # heli-smart / heli-smart-alt for planning and after two errors in a row.
+    smart: bool
     features: tuple[str, ...]
     public: bool = True
 
@@ -57,7 +63,11 @@ PLANS: dict[str, Plan] = {
         day_limit_rub=Decimal("15"),
         days=7,
         schedules=1,
-        features=("7 дней бесплатно", "Простые задачи каждый день", "1 расписание"),
+        max_steps=30,
+        extend_steps=0,
+        task_max_rub=Decimal("10"),
+        smart=False,
+        features=("7 дней бесплатно", "Возможности тарифа «Старт»"),
         public=False,
     ),
     "start": Plan(
@@ -68,11 +78,17 @@ PLANS: dict[str, Plan] = {
         day_limit_rub=Decimal("15"),
         days=30,
         schedules=1,
+        max_steps=30,
+        extend_steps=0,
+        task_max_rub=Decimal("10"),
+        smart=False,
         features=(
-            "Простые задачи каждый день",
-            "Облачный компьютер Heli",
+            "Попробовать, личные задачи, справки",
+            "~350 лёгких, или ~75 средних, или ~16 длинных задач в месяц",
+            "До 30 шагов на задачу",
             "1 расписание",
-            "Интеграции на чтение",
+            "Интеграции: чтение",
+            "Файлы и память",
         ),
     ),
     "business": Plan(
@@ -83,11 +99,17 @@ PLANS: dict[str, Plan] = {
         day_limit_rub=Decimal("50"),
         days=30,
         schedules=10,
+        max_steps=40,
+        extend_steps=20,
+        task_max_rub=Decimal("30"),
+        smart=False,
         features=(
-            "Примерно в 4 раза больше задач, чем «Старт»",
-            "Длинные задачи в 1С, Битрикс24, МойСклад",
+            "Ежедневная работа в 1С, МоёмСкладе, CRM",
+            "~1 500 лёгких, или ~300 средних, или ~70 длинных задач в месяц",
+            "До 40 шагов на задачу, +20 один раз",
             "10 расписаний",
-            "Запись в CRM с вашим подтверждением",
+            "Интеграции: чтение и запись с подтверждением",
+            "Файлы и память",
         ),
     ),
     "pro": Plan(
@@ -98,11 +120,18 @@ PLANS: dict[str, Plan] = {
         day_limit_rub=Decimal("150"),
         days=30,
         schedules=30,
+        max_steps=40,
+        extend_steps=20,
+        task_max_rub=Decimal("30"),
+        smart=True,
         features=(
-            "Почти в 3 раза больше задач, чем «Бизнес»",
-            "Умная модель для сложных задач",
+            "Бухгалтер, снабженец, владелец с длинными задачами",
+            "~4 000 лёгких, или ~850 средних, или ~190 длинных задач в месяц",
+            "До 40 шагов на задачу, +20 один раз",
+            "Умная модель для плана и сложных мест",
             "30 расписаний",
-            "Приоритет в поддержке",
+            "Интеграции: чтение и запись с подтверждением",
+            "Файлы и память",
         ),
     ),
 }
@@ -271,6 +300,30 @@ def overage_budget(session: Session, user: User, since: datetime) -> Decimal:
     return max(Decimal("0"), min(balance(user), cap_left))
 
 
+# Typical mix (60% light, 30% medium, 10% long) costs about this much per task: heli-pricing v2.
+TYPICAL_TASK_RUB = Decimal("1.4")
+
+
+def tasks_left(cost_left: Decimal) -> int:
+    """Approximate number of typical tasks the remaining limit covers (shown instead of rubles)."""
+    if cost_left <= 0:
+        return 0
+    return int(cost_left / TYPICAL_TASK_RUB)
+
+
+def smart_allowed(user: User) -> bool:
+    plan = plan_of(user)
+    return plan is None or plan.smart
+
+
+def task_caps(user: User) -> tuple[int | None, int | None, Decimal | None]:
+    """(max_steps, extend_steps, max_rub) of the plan; None = keep the server default."""
+    plan = plan_of(user)
+    if plan is None:
+        return None, None, None
+    return plan.max_steps, plan.extend_steps, plan.task_max_rub
+
+
 def schedule_limit(user: User) -> int | None:
     plan = plan_of(user)
     return plan.schedules if plan is not None else None
@@ -298,7 +351,21 @@ def history(session: Session, user: User, limit: int = 50) -> list[dict]:
 
 def public_plans() -> list[dict]:
     return [
-        {"id": plan.id, "title": plan.title, "price_rub": str(rub(plan.price_rub)), "days": plan.days, "features": list(plan.features)}
+        {
+            "id": plan.id,
+            "title": plan.title,
+            "price_rub": str(rub(plan.price_rub)),
+            "days": plan.days,
+            "features": list(plan.features),
+            "limits": {
+                "max_steps": plan.max_steps,
+                "extend_steps": plan.extend_steps,
+                "schedules": plan.schedules,
+                "smart_model": plan.smart,
+                "integrations_write": plan.id in ("business", "pro"),
+                "tasks_per_month": int(plan.month_limit_rub / TYPICAL_TASK_RUB),
+            },
+        }
         for plan in PLANS.values()
         if plan.public
     ]

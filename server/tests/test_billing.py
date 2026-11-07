@@ -155,7 +155,7 @@ def test_billing_api_flow(client, session, monkeypatch):
     settings = client.put(
         "/v1/billing/settings", json={"overage_enabled": True, "overage_cap_rub": 200}, headers=headers
     ).json()
-    assert settings["overage"] == {"enabled": True, "cap_rub": "200.00", "spent_rub": "0.00"}
+    assert settings["overage"] == {"enabled": True, "cap_rub": "200.00", "spent_rub": "0.00", "typical_task_rub": "2.10"}
     items = client.get("/v1/billing/history", headers=headers).json()["items"]
     assert [item["kind"] for item in items] == ["plan", "topup"]
     assert items[0]["amount_rub"] == "-390.00"
@@ -166,3 +166,29 @@ def test_signup_without_billing_flag_has_no_plan(client):
     view = client.get("/v1/billing", headers=headers).json()
     assert view["plan"]["status"] == "none"
     assert view["plan"]["title"] == "Бета-тест"
+
+
+def test_overage_covers_day_limit_too(session):
+    user = _user(session)
+    billing.post_tx(session, user, "topup", Decimal("500"), "Пополнение")
+    billing.buy_plan(session, user, "start", now=NOW)
+    at = NOW + timedelta(minutes=1)
+    record_charge(session, user, Decimal("15"), at=at)
+    assert snapshot(session, user, at).blocked
+    user.overage_enabled = True
+    user.overage_cap_rub = Decimal("100")
+    assert not snapshot(session, user, at).blocked
+    before = billing.balance(user)
+    record_charge(session, user, Decimal("2"), at=at + timedelta(minutes=1))
+    assert billing.balance(user) == before - Decimal("3.00")
+
+
+def test_plan_caps_task_and_smart_model(session):
+    user = _user(session)
+    assert billing.task_caps(user) == (None, None, None)
+    assert billing.smart_allowed(user)
+    billing.post_tx(session, user, "topup", Decimal("390"), "Пополнение")
+    billing.buy_plan(session, user, "start", now=NOW)
+    assert billing.task_caps(user) == (30, 0, Decimal("10"))
+    assert not billing.smart_allowed(user)
+    assert billing.tasks_left(Decimal("120")) == 85

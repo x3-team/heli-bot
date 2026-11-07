@@ -58,10 +58,19 @@ class UsageSnapshot:
     def day_percent(self) -> Decimal:
         return _percent(self.daily_used, self.daily_limit) if self.daily_limit > 0 else Decimal("0")
 
+    def over_limit(self, extra: Decimal, *, already: bool = False) -> Decimal:
+        """Part of `extra` cost above the plan's day or month limit (the larger one: one cost, paid once).
+
+        already=True: `extra` is in month_used/daily_used already (a charge just written)."""
+        month = self.month_used - (extra if already else Decimal("0"))
+        day = self.daily_used - (extra if already else Decimal("0"))
+        over_month = month + extra - max(self.monthly_limit, month)
+        over_day = (day + extra - max(self.daily_limit, day)) if self.daily_limit > 0 else Decimal("0")
+        return max(Decimal("0"), over_month, over_day)
+
     def overage_needed(self, extra: Decimal = Decimal("0")) -> Decimal:
-        """Wallet rubles (with markup) the cost above the month limit needs, counting `extra` more cost."""
-        over = self.month_used + extra - max(self.monthly_limit, self.month_used)
-        return max(Decimal("0"), over) * billing.OVERAGE_MARKUP
+        """Wallet rubles (with markup) that `extra` more cost needs above the plan limits."""
+        return self.over_limit(extra) * billing.OVERAGE_MARKUP
 
 
 def weekly_limit_of(user: User) -> Decimal:
@@ -113,12 +122,15 @@ def snapshot(session: Session, user: User, now: datetime | None = None) -> Usage
     month_percent = _percent(month_used, monthly_limit)
     plan_expired = plan is not None and billing.plan_status(user, now) == "expired"
     overage = billing.overage_budget(session, user, month_start) if plan is not None else Decimal("0")
-    month_over = month_used >= monthly_limit and (overage <= 0 or plan_expired)
+    day_out = daily_limit > 0 and daily_used >= daily_limit
+    if plan is not None:
+        # Over the day or month limit a plan goes on with overage from the wallet, if the client allowed it.
+        limits_out = (month_used >= monthly_limit or day_out) and overage <= 0
+    else:
+        limits_out = week_percent >= 100 or month_percent >= 100 or day_out
     blocked = (
         plan_expired
-        or (plan is None and week_percent >= 100)
-        or month_over
-        or (daily_limit > 0 and daily_used >= daily_limit)
+        or limits_out
         or (global_daily_limit > 0 and global_daily_used >= global_daily_limit)
     )
     warning = week_percent >= 80 or month_percent >= 80
@@ -213,6 +225,9 @@ def metered_complete(
     tools: list[dict] | None = None,
 ) -> Completion:
     """Reserve the worst-case cost, then replace it with the real charge."""
+    if alias.startswith("heli-smart") and not billing.smart_allowed(user):
+        # The smart model is a «Про» feature; other plans get the everyday one.
+        alias = "heli-fast"
     input_estimate = estimate_input_tokens(messages)
     reserve = cost_rub(alias, input_estimate, max_tokens)
     _ensure_room(session, user, reserve)
@@ -278,9 +293,7 @@ def settle_overage(session: Session, user: User, row: UsageLedger, now: datetime
     if billing.plan_of(user) is None or not user.overage_enabled:
         return
     snap = snapshot(session, user, now)
-    amount = _money(row.amount_rub)
-    prior = snap.month_used - amount
-    over = snap.month_used - max(prior, snap.monthly_limit)
+    over = snap.over_limit(_money(row.amount_rub), already=True)
     if over <= 0:
         return
     budget = billing.overage_budget(session, user, snap.month_start or _aware(now))
@@ -348,10 +361,14 @@ def _ensure_room(session: Session, user: User, reserve: Decimal) -> None:
         raise QuotaError("limit_reached")
     if billing.plan_of(user) is None and snap.week_used + reserve > snap.weekly_limit:
         raise QuotaError("limit_reached")
-    if snap.month_used + reserve > snap.monthly_limit and snap.overage_needed(reserve) > snap.overage_budget:
-        raise QuotaError("limit_reached")
-    if snap.daily_limit > 0 and snap.daily_used + reserve > snap.daily_limit:
-        raise QuotaError("limit_reached")
+    if billing.plan_of(user) is not None:
+        if snap.overage_needed(reserve) > snap.overage_budget:
+            raise QuotaError("limit_reached")
+    else:
+        if snap.month_used + reserve > snap.monthly_limit:
+            raise QuotaError("limit_reached")
+        if snap.daily_limit > 0 and snap.daily_used + reserve > snap.daily_limit:
+            raise QuotaError("limit_reached")
     if snap.global_daily_limit > 0 and snap.global_daily_used + reserve > snap.global_daily_limit:
         raise QuotaError("limit_reached")
 
