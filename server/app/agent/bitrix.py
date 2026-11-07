@@ -102,7 +102,8 @@ TOOL = _fn(
 WRITE_TOOL = _fn(
     "bitrix24_write",
     "Создать или изменить запись Битрикс24 через REST (вебхук в «Доступах»): сделка, лид, контакт, компания, "
-    "задача, комментарий, смена стадии (crm.deal.update с fields.STAGE_ID). Всегда указывай portal. На учебном "
+    "задача, комментарий, смена стадии (crm.deal.update с params.id и fields.STAGE_ID: код стадии из воронки "
+    "этой сделки или её название — сервер сверит его с воронкой и перечитает сделку). Всегда указывай portal. На учебном "
     "портале запись идёт сразу; на боевом портале клиента сервер сам покажет пользователю карточку "
     "подтверждения (портал, метод, поля) и запишет только после «да» — сам ask_confirmation не вызывай. Удаления нет. "
     "После записи проверь её через bitrix24_read (crm.deal.get, tasks.task.get). "
@@ -246,6 +247,115 @@ def fetch(base: str, method: str, params: dict, transport: httpx.BaseTransport |
     return data
 
 
+def _fields(params: dict) -> dict:
+    for key, value in params.items():
+        if str(key).lower() == "fields" and isinstance(value, dict):
+            return value
+    return {}
+
+
+def _stage_key(params: dict) -> str:
+    return next((k for k in _fields(params) if str(k).upper() == "STAGE_ID"), "")
+
+
+def _deal_id(params: dict) -> str:
+    return next((str(v).strip() for k, v in params.items() if str(k).lower() == "id" and str(v).strip()), "")
+
+
+def _norm(text) -> str:
+    return re.sub(r"\s+", " ", str(text or "").strip().strip("«»\"'").strip()).casefold()
+
+
+def deal_stages(base: str, category: str, transport: httpx.BaseTransport | None = None) -> list[dict]:
+    """Stages of one pipeline: [{STATUS_ID, NAME}]. Pipeline 0 is DEAL_STAGE, pipeline N is DEAL_STAGE_N."""
+    entity = "DEAL_STAGE" if category in ("", "0") else f"DEAL_STAGE_{category}"
+    rows = fetch(base, "crm.status.list", {"filter": {"ENTITY_ID": entity}, "order": {"SORT": "ASC"}}, transport)
+    stages = [r for r in (rows.get("result") or []) if isinstance(r, dict) and r.get("STATUS_ID")]
+    if not stages and category not in ("", "0"):
+        rows = fetch(base, "crm.dealcategory.stage.list", {"id": category}, transport)
+        stages = [r for r in (rows.get("result") or []) if isinstance(r, dict) and r.get("STATUS_ID")]
+    return stages
+
+
+def resolve_stage(wanted, stages: list[dict], category: str) -> dict | None:
+    """The pipeline's stage the model meant: its code, the code without the C<N>: prefix of the pipeline, or its name.
+
+    Deals outside the main pipeline keep codes like C3:PREPARATION. A code from crm.status.list for DEAL_STAGE
+    (pipeline 0) on such a deal is accepted by crm.deal.update with result true and changes nothing.
+    """
+    raw = str(wanted or "").strip()
+    code = raw.upper()
+    by_code = {str(s["STATUS_ID"]).upper(): s for s in stages}
+    if code in by_code:
+        return by_code[code]
+    bare = re.sub(r"^C\d+:", "", code)
+    if category not in ("", "0") and f"C{category}:{bare}" in by_code:
+        return by_code[f"C{category}:{bare}"]
+    if category in ("", "0") and bare in by_code:
+        return by_code[bare]
+    name = _norm(raw)
+    for stage in stages:
+        if name and _norm(stage.get("NAME")) == name:
+            return stage
+    return None
+
+
+def _stage_label(stage_id: str, stages: list[dict]) -> str:
+    for stage in stages:
+        if str(stage.get("STATUS_ID")) == stage_id:
+            return f"{stage_id} «{stage.get('NAME')}»"
+    return stage_id or "—"
+
+
+def update_deal_stage(base: str, params: dict, live: bool, transport: httpx.BaseTransport | None = None) -> str:
+    """crm.deal.update with fields.STAGE_ID: the stage is checked against the deal's own pipeline and read back.
+
+    Битрикс24 answers result: true to a stage from another pipeline and to a change a stage's required fields
+    or a robot rolled back, so «Записано» alone is not proof. Raises BxError with the stages to pick from.
+    """
+    deal_id = _deal_id(params)
+    if not deal_id:
+        raise BxError("bad_params", "Ошибка: для смены стадии укажи params.id — ID сделки (crm.deal.list найдёт его).")
+    deal = fetch(base, "crm.deal.get", {"id": deal_id}, transport).get("result") or {}
+    category = str(deal.get("CATEGORY_ID") or "0")
+    before = str(deal.get("STAGE_ID") or "")
+    stages = deal_stages(base, category, transport)
+    fields = _fields(params)
+    key = _stage_key(params)
+    wanted = fields.get(key)
+    stage = resolve_stage(wanted, stages, category)
+    listing = "; ".join(f"{s['STATUS_ID']} — {s.get('NAME', '')}" for s in stages) or "Битрикс24 не вернул список"
+    if stage is None:
+        raise BxError(
+            "bad_stage",
+            f"Не выполнено: в воронке сделки {deal_id} (CATEGORY_ID={category}) нет стадии «{wanted}». Ничего не "
+            f"записано. Стадии этой воронки: {listing}. Повтори crm.deal.update с STAGE_ID из этого списка.",
+        )
+    target = str(stage["STATUS_ID"])
+    if before == target:
+        return f"Сделка {deal_id} уже на стадии {_stage_label(target, stages)}. Ничего не менялось."
+    new_fields = {k: v for k, v in fields.items() if k != key}
+    new_fields["STAGE_ID"] = target
+    new_params = {k: v for k, v in params.items() if str(k).lower() != "fields"}
+    new_params["fields"] = new_fields
+    data = fetch(base, "crm.deal.update", new_params, transport)
+    log.info("bitrix24 %s write crm.deal.update stage", "live" if live else "sandbox")
+    after = str((fetch(base, "crm.deal.get", {"id": deal_id}, transport).get("result") or {}).get("STAGE_ID") or "")
+    if after != target:
+        raise BxError(
+            "stage_not_changed",
+            f"Битрикс24 принял crm.deal.update (ответ {json.dumps(data.get('result'), ensure_ascii=False)}), но стадия "
+            f"сделки {deal_id} не сменилась: сейчас {_stage_label(after, stages)}, нужна {_stage_label(target, stages)}. "
+            "Обычно мешают обязательные поля стадии или робот воронки. Прочитай сделку (crm.deal.get), заполни "
+            "недостающие поля и повтори; не сообщай пользователю, что стадия сменилась.",
+        )
+    where = "на боевом портале (подтверждено пользователем)" if live else "на учебном портале"
+    return (
+        f"Записано {where}: стадия сделки {deal_id} {_stage_label(before, stages)} → {_stage_label(after, stages)}. "
+        "Проверено чтением crm.deal.get."
+    )
+
+
 def webhook_for(session, user, portal: str | None) -> dict | None:
     from app.skills.hosts import host_matches, host_of
     from app.vault import list_credentials
@@ -266,6 +376,18 @@ def webhook_for(session, user, portal: str | None) -> dict | None:
                 return row
         return None
     return rows[0] if rows else None
+
+
+def fill_portal(session, user, args: dict) -> dict:
+    """bitrix24_write without portal: name the portal the executor would write to (the webhook in «Доступах»).
+    Then the write policy judges the real portal: a training one writes at once, a client's one shows its card."""
+    from app.skills.hosts import host_of
+
+    if str(args.get("portal") or "").strip():
+        return args
+    cred = webhook_for(session, user, None)
+    host = host_of(cred["site"]) if cred else ""
+    return {**args, "portal": host} if host else args
 
 
 def execute(session, user, task_id, name: str, args: dict, transport: httpx.BaseTransport | None = None) -> ClientResult:
@@ -296,7 +418,10 @@ def execute(session, user, task_id, name: str, args: dict, transport: httpx.Base
             secret = secret_for_browser(session, user, uuid.UUID(cred["id"]))
         except VaultError as exc:
             raise BxError(exc.code, "Ошибка: хранилище паролей недоступно.") from None
-        data = fetch(webhook_base(cred["site"], secret), method, params, transport)
+        base = webhook_base(cred["site"], secret)
+        if write and method == "crm.deal.update" and _stage_key(params):
+            return ClientResult(update_deal_stage(base, params, live, transport))
+        data = fetch(base, method, params, transport)
         if write:
             log.info("bitrix24 %s write %s", "live" if live else "sandbox", method)
         return ClientResult(format_result(data, write, live))

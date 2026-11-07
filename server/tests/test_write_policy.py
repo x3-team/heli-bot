@@ -333,3 +333,93 @@ def test_a_broken_classifier_asks_instead_of_guessing() -> None:
         assert Guard().needs_approval("broken_write", {})
     finally:
         write_policy.unregister("broken_write")
+
+
+# --- Учебный контур: без лишних карточек ------------------------------------------------
+
+
+def _run_training(world, *calls, tools=TOOLS):
+    return run_agent([], tools=tools, call_tool=world.call_tool, complete=_scripted(_completion(list(calls))),
+                     budget=Budget(), training=True)
+
+
+@pytest.mark.parametrize(
+    "url,body",
+    [
+        ("https://suggestions.dadata.ru/suggestions/api/4_1/rs/findById/party", {"query": "7707083893"}),
+        ("https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/address", {"query": "Москва Тверская 1"}),
+        ("https://egrul.nalog.ru/", {"query": "7707083893"}),
+        ("https://statusnpd.nalog.ru/api/v1/tracker/taxpayer_status", {"inn": "500100732259", "requestDate": "2026-11-07"}),
+    ],
+)
+def test_reference_lookups_by_inn_are_reads(url, body) -> None:
+    """mix-01, ns-dadata: a company by ИНН through DaData or ФНС is a POST that only reads."""
+    args = {"method": "POST", "url": url, "json": body}
+    assert not Guard().needs_approval("http_request", args)
+    assert write_policy.classify("http_request", args).kind == write_policy.READ
+
+
+def test_dadata_clean_and_other_posts_are_not_reads() -> None:
+    assert Guard().needs_approval("http_request", {"method": "POST", "url": "https://dadata.ru/api/v2/profile/balance/x"})
+    assert Guard().needs_approval(
+        "http_request", {"method": "DELETE", "url": "https://suggestions.dadata.ru/suggestions/api/4_1/rs/findById/party"}
+    )
+
+
+def test_training_account_model_question_is_approved_without_a_person(world) -> None:
+    """mix-01: the model asked in its own words before a lookup; on a training account nobody is asked."""
+    out = _run_training(world, ("ask_confirmation", {"action": "проверить ИНН в DaData"}),
+                        ("bitrix24_write", {**TASK, "portal": "b24-lvsc4f.bitrix24.ru"}))
+    assert world.cards == [] and out.stopped is None
+    assert world.sent == ["POST https://b24-lvsc4f.bitrix24.ru/rest/1/demosecret11/tasks.task.add.json"]
+
+
+def test_training_account_risky_tool_runs_without_a_card() -> None:
+    tools = [{"type": "function", "function": {"name": n, "parameters": {}}} for n in ("ask_confirmation", "telegram_send")]
+    called = []
+
+    def call_tool(cid, name, args):
+        called.append(name)
+        return ToolResult("ok")
+
+    out = run_agent([], tools=tools, call_tool=call_tool,
+                    complete=_scripted(_completion([("telegram_send", {"text": "x"})])), budget=Budget(), training=True)
+    assert called == ["telegram_send"] and out.stopped is None
+
+
+def test_training_account_still_asks_before_a_live_write(world) -> None:
+    """Policy #61: a client's portal is written only after «да», training account or not."""
+    out = _run_training(world, ("ask_confirmation", {"action": "bitrix24_write"}),
+                        ("bitrix24_write", {**TASK, "portal": "other.bitrix24.ru"}))
+    assert world.sent == [] and out.stopped == "confirm"
+    assert len(world.cards) == 1 and "other.bitrix24.ru" in world.cards[0]["details"]
+
+
+def test_training_account_without_a_person_still_no_live_write(world) -> None:
+    tools = [t for t in TOOLS if t["function"]["name"] != "ask_confirmation"]
+    out = _run_training(world, ("bitrix24_write", {**TASK, "portal": "other.bitrix24.ru"}), tools=tools)
+    assert world.sent == [] and out.stopped == "confirm"
+
+
+def test_bitrix_write_without_portal_goes_to_the_training_webhook(world) -> None:
+    """b24-08: the model left out portal; the only webhook is the training portal, so no card."""
+    user = _user(world.session, "trainee@example.com")
+    store_credential(world.session, user, "b24-lvsc4f.bitrix24.ru", "webhook", DEMO_HOOK)
+    world.session.flush()
+    world.user = user
+    out = run_agent([], tools=TOOLS, call_tool=world.call_tool, complete=_scripted(_completion([("bitrix24_write", TASK)])),
+                    budget=Budget(), prepare_args=lambda name, args: bitrix.fill_portal(world.session, user, args))
+    assert world.cards == [] and out.stopped is None
+    assert world.sent == ["POST https://b24-lvsc4f.bitrix24.ru/rest/1/demosecret11/tasks.task.add.json"]
+
+
+def test_bitrix_write_without_portal_on_a_client_webhook_names_it_on_the_card(world) -> None:
+    user = _user(world.session, "client@example.com")
+    store_credential(world.session, user, "other.bitrix24.ru", "webhook", LIVE_HOOK)
+    world.session.flush()
+    world.user = user
+    world.answer = "approved"
+    run_agent([], tools=TOOLS, call_tool=world.call_tool, complete=_scripted(_completion([("bitrix24_write", TASK)])),
+              budget=Budget(), prepare_args=lambda name, args: bitrix.fill_portal(world.session, user, args))
+    assert len(world.cards) == 1 and "other.bitrix24.ru" in world.cards[0]["details"]
+    assert world.sent == ["POST https://other.bitrix24.ru/rest/7/livesecret77/tasks.task.add.json"]
