@@ -307,7 +307,7 @@ def test_bitrix24_webhook_goes_before_the_sign_in(session, monkeypatch) -> None:
         def call(self, *a, **kw):
             return cb.Result("Вход", None, None)
 
-        def captcha(self, user_id):
+        def captcha(self, user_id, halted=None):
             return True
 
         def url(self, user_id):
