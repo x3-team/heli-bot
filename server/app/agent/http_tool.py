@@ -75,6 +75,18 @@ _TOKEN_PATH = re.compile(r"(?i)/oauth2?/(?:v\d+/)?token/?$")
 _BROWSER_UA = re.compile(r"(?i)mozilla/|chrome/|safari/|firefox/|edg/|opera/|yabrowser/")
 _UA_REJECTED = re.compile(r"(?i)user[-_ ]?agent")
 UA_REJECTED_CODE = "user_agent_rejected"
+# ЦБ РФ: currency rates come from the plain XML service (XML_daily.asp / XML_dynamic.asp), one GET. The SOAP
+# DailyInfo.asmx currency methods (GetCursOnDate…, GetCursDynamic…, EnumValutes) answer the same in more
+# steps, and a SOAP POST looks like a write. Other DailyInfo methods (key rate, etc.) are left alone.
+CBR_SOAP_CODE = "cbr_use_xml_daily"
+_CBR_SOAP_PATH = re.compile(r"(?i)/dailyinfo\.asmx")
+_CBR_SOAP_CURRENCY = re.compile(r"(?i)getcurs|enumvalutes")
+CBR_SOAP_HINT = (
+    "Не отправлено: курс валют ЦБ не бери через SOAP DailyInfo.asmx. Сделай один GET без ключа: "
+    "https://www.cbr.ru/scripts/XML_daily.asp с query {\"date_req\": \"ДД/ММ/ГГГГ\"} (без date_req — последний "
+    "курс). В ответе XML <Valute>: CharCode, Nominal, Value (через запятую), VunitRate — курс за 1 единицу. "
+    "Динамика за период — XML_dynamic.asp?date_req1=…&date_req2=…&VAL_NM_RQ=R01235 (USD)."
+)
 
 
 @dataclass(frozen=True)
@@ -333,6 +345,8 @@ TOOL = _fn(
     "браузер для этого не нужен. Запись в кабинет клиента (CRM, Директ, Метрика, МойСклад, Ozon…) — сервер "
     "сам покажет пользователю карточку подтверждения, сам ask_confirmation для этого не вызывай. "
     "User-Agent сервер ставит свой (HeliBot); браузерный User-Agent не подставляй. "
+    "Курс валют ЦБ РФ — GET https://www.cbr.ru/scripts/XML_daily.asp с query date_req=ДД/ММ/ГГГГ, не SOAP "
+    "DailyInfo.asmx. "
     "Перед первым запросом к незнакомому API найди его документацию (web_search, open_url).",
     {
         "method": {"type": "string", "enum": sorted(METHODS)},
@@ -392,6 +406,8 @@ def prepare(args: dict, lookup, resolver=None) -> tuple[Prepared, list[str]]:
     if form is not None:
         form = {str(k): "" if v is None else str(v) for k, v in form.items()}
     headers = with_user_agent({str(k): str(v) for k, v in headers.items() if str(k).lower() not in _FORBIDDEN_HEADERS})
+    if is_cbr_soap_currency(raw_url, headers, body, form):
+        raise HttpToolError(CBR_SOAP_CODE, CBR_SOAP_HINT)
     try:
         url = check_url(raw_url, resolver) if resolver else check_url(raw_url)
     except WebError as exc:
@@ -415,6 +431,20 @@ def prepare(args: dict, lookup, resolver=None) -> tuple[Prepared, list[str]]:
     if payload is not None and len(json.dumps(payload, ensure_ascii=False).encode()) > MAX_BODY_BYTES:
         raise HttpToolError("body_too_large", "Ошибка: тело запроса больше 200 КБ.")
     return Prepared(method, str(url_filled), host, query, headers, body, mode, form), used
+
+
+def is_cbr_soap_currency(url: str, headers: dict, body, form) -> bool:
+    """A currency-rate call to the ЦБ SOAP service DailyInfo.asmx (GetCursOnDate, GetCursDynamic…)."""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if not (host == "cbr.ru" or host.endswith(".cbr.ru")) or not _CBR_SOAP_PATH.search(parts.path or ""):
+        return False
+    payload = body if body is not None else form
+    seen = " ".join([url, json.dumps(headers, ensure_ascii=False), payload if isinstance(payload, str)
+                     else json.dumps(payload, ensure_ascii=False)])
+    return bool(_CBR_SOAP_CURRENCY.search(seen))
 
 
 def with_user_agent(headers: dict) -> dict:
