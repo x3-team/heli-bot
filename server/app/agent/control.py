@@ -33,6 +33,7 @@ class Control:
         self._cond = threading.Condition()
         self._paused = False
         self._stopped = False
+        self._reason = "stop"
         self._results: dict[str, ClientResult] = {}
         self._waiting: set[str] = set()
         self.pause_timeout = pause_timeout
@@ -51,8 +52,10 @@ class Control:
             self._paused = False
             self._cond.notify_all()
 
-    def stop(self) -> None:
+    def stop(self, reason: str = "stop") -> None:
         with self._cond:
+            if not self._stopped:
+                self._reason = reason
             self._stopped = True
             self._paused = False
             self._cond.notify_all()
@@ -73,12 +76,22 @@ class Control:
     def stopped(self) -> bool:
         return self._stopped
 
+    @property
+    def reason(self) -> str:
+        """Why the run was stopped from outside: «stop» (the user), «stalled» (the run watchdog)."""
+        return self._reason
+
+    @property
+    def waiting_client(self) -> bool:
+        """The run waits for the app to run a tool: silence is expected, not a hang."""
+        return bool(self._waiting)
+
     # Loop side ----------------------------------------------------------
     def checkpoint(self) -> None:
         """Raise Stopped if stop was pressed; block while paused."""
         with self._cond:
             if self._stopped:
-                raise Stopped("stop")
+                raise Stopped(self._reason)
             if not self._paused:
                 return
         self._wait_paused("user", {})
@@ -86,7 +99,7 @@ class Control:
     def auto_pause(self, reason: str, details: dict) -> None:
         with self._cond:
             if self._stopped:
-                raise Stopped("stop")
+                raise Stopped(self._reason)
             self._paused = True
         self._wait_paused(reason, details)
 
@@ -102,7 +115,7 @@ class Control:
                     raise Stopped("pause")
                 self._cond.wait(left)
             if self._stopped:
-                raise Stopped("stop")
+                raise Stopped(self._reason)
         if self.on_resume:
             self.on_resume()
 
@@ -114,7 +127,7 @@ class Control:
             try:
                 while call_id not in self._results:
                     if self._stopped:
-                        raise Stopped("stop")
+                        raise Stopped(self._reason)
                     left = deadline - time.monotonic()
                     if left <= 0:
                         raise Stopped("client_timeout")

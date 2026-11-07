@@ -172,7 +172,7 @@ def extend_for(complexity: int) -> int:
 
 
 # A run that stopped before the end leaves a checkpoint; «продолжи» in the next task picks it up.
-CONTINUABLE = {"budget", "max_steps", "loop", "stop", "pause", "quota", "client_timeout", "captcha"}
+CONTINUABLE = {"budget", "max_steps", "loop", "stop", "pause", "quota", "client_timeout", "captcha", "stalled"}
 CHECKPOINT_TTL = timedelta(hours=24)
 _CONTINUE = re.compile(r"^\s*(продолж|дальше|давай дальше|доделай|continue)", re.I)
 CONTINUE_NOTE = (
