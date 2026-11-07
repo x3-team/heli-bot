@@ -8,6 +8,10 @@
     ],
     "dns": {"intranet.skladoblako.example": "10.20.30.40"},
     "endpoints": [
+      {"method": "GET", "host": "www.cbr.ru", "path": "/scripts/XML_daily.asp", "query": {"date_req": "15/10/2026"},
+       "body": "<?xml version=\"1.0\" encoding=\"windows-1251\"?><ValCurs Date=\"15.10.2026\" name=\"Foreign Currency Market\"><Valute ID=\"R01235\"><NumCode>840</NumCode><CharCode>USD</CharCode><Nominal>1</Nominal><Name>Доллар США</Name><Value>91,8735</Value><VunitRate>91,8735</VunitRate></Valute><Valute ID=\"R01239\"><NumCode>978</NumCode><CharCode>EUR</CharCode><Nominal>1</Nominal><Name>Евро</Name><Value>99,4720</Value><VunitRate>99,4720</VunitRate></Valute><Valute ID=\"R01375\"><NumCode>156</NumCode><CharCode>CNY</CharCode><Nominal>1</Nominal><Name>Юань</Name><Value>12,7410</Value><VunitRate>12,7410</VunitRate></Valute><Valute ID=\"R01820\"><NumCode>392</NumCode><CharCode>JPY</CharCode><Nominal>100</Nominal><Name>Японских иен</Name><Value>60,1250</Value><VunitRate>0,6012</VunitRate></Valute></ValCurs>"},
+      {"method": "GET", "host": "www.cbr.ru", "path": "/scripts/XML_daily.asp",
+       "body": "<?xml version=\"1.0\" encoding=\"windows-1251\"?><ValCurs Date=\"02.11.2026\" name=\"Foreign Currency Market\"><Valute ID=\"R01235\"><NumCode>840</NumCode><CharCode>USD</CharCode><Nominal>1</Nominal><Name>Доллар США</Name><Value>92,4000</Value><VunitRate>92,4000</VunitRate></Valute><Valute ID=\"R01239\"><NumCode>978</NumCode><CharCode>EUR</CharCode><Nominal>1</Nominal><Name>Евро</Name><Value>100,1500</Value><VunitRate>100,1500</VunitRate></Valute><Valute ID=\"R01375\"><NumCode>156</NumCode><CharCode>CNY</CharCode><Nominal>1</Nominal><Name>Юань</Name><Value>12,8500</Value><VunitRate>12,8500</VunitRate></Valute><Valute ID=\"R01820\"><NumCode>392</NumCode><CharCode>JPY</CharCode><Nominal>100</Nominal><Name>Японских иен</Name><Value>60,9000</Value><VunitRate>0,6090</VunitRate></Valute></ValCurs>"},
       {"method": "GET", "host": "api.lastochka-dostavka.example", "path": "/v2/public/tariffs",
        "body": {"city": "Казань", "parcel_to_1kg_rub": 410, "per_extra_kg_rub": 35, "updated": "2026-11-01"}},
       {"method": "POST", "host": "sandbox.skladoblako.example", "path": "/v1/orders", "auth": "sbx-7f3a9c2e51d04b88",
@@ -84,6 +88,9 @@
      "text": "Пользователь Олег: вроде у API Сфера.Кассы лимит 100 запросов в минуту, но это не точно, было давно."}
   ],
   "knowledge": [
+    {"topic": "ЦБ РФ: официальный курс валют на дату (XML_daily)",
+     "fact": "Курс доллара, евро, юаня и других валют ЦБ берётся одним GET без ключа: https://www.cbr.ru/scripts/XML_daily.asp?date_req=ДД/ММ/ГГГГ (например date_req=15/10/2026; без date_req — последний установленный курс). Ответ XML <ValCurs Date=…>: у каждой <Valute> CharCode (USD, EUR, CNY), Nominal, Value (дробь через запятую) и VunitRate — курс за 1 единицу; Value делить на Nominal (JPY, KZT, AMD — за 10 или 100). Атрибут Date — дата, на которую курс установлен (выходные — курс прошлого рабочего дня), её и называй. Динамика за период: https://www.cbr.ru/scripts/XML_dynamic.asp?date_req1=…&date_req2=…&VAL_NM_RQ=R01235 (R01235 — USD, R01239 — EUR, R01375 — CNY; коды — XML_valFull.asp). SOAP-сервис DailyInfo.asmx для курса не используй: это POST с конвертом и лишние шаги, XML_daily отвечает тем же.",
+     "source_url": "https://www.cbr.ru/development/SXML/", "checked": "2026-11-01"},
     {"topic": "Яндекс Директ: стратегии", "fact": "Конверсионные стратегии — только при ≥10 конверсий в неделю, иначе ручные ставки или максимум кликов с ограничением CPC.",
      "source_url": "https://yandex.ru/support/direct/", "checked": "2026-11-01"}
   ],
@@ -94,7 +101,11 @@
     "5033011222": {"name": "ООО «Подмосковье Агро»", "ogrn": "1095033000222", "kpp": "503301001", "director": "Лебедев Олег Викторович", "address": "Московская обл., г. Раменское, ул. Полевая, д. 3", "status": "действующая"}
   },
   "amocrm": {
+    "subdomain": "heli-uchebny",
+    "token": "amo-world-token-0123456789abcdef",
+    "sandbox": true,
     "me": "Виталий",
+    "users": [{"id": 1001, "name": "Виталий"}, {"id": 1002, "name": "Олег"}],
     "stages": ["Первичный контакт", "Переговоры", "Принимают решение", "Согласование договора", "Успешно реализовано", "Закрыто и не реализовано"],
     "next_id": 5001,
     "contacts": [
@@ -107,6 +118,15 @@
       {"id": 4002, "name": "Перчатки 500 коробок — КазаньСтройМаш", "price": 615000, "contact_id": 302, "stage": "Принимают решение", "responsible": "Олег", "notes": []},
       {"id": 4003, "name": "Ленты упаковочные — ИП Белова", "price": 18000, "contact_id": 303, "stage": "Первичный контакт", "responsible": "Виталий", "notes": []},
       {"id": 4004, "name": "Тестовая сделка — удалить", "price": 1, "contact_id": null, "stage": "Первичный контакт", "responsible": "Виталий", "notes": []}
+    ],
+    "tasks": [],
+    "unsorted": [
+      {"uid": "f7a1c2d3", "source_name": "Форма на сайте uralpack-test.example", "category": "forms", "form_name": "Заявка на КП", "created_at": 1793606100,
+       "text": "Нужно 200 коробок нитриловых перчаток M, пришлите КП", "lead": {"name": "Заявка с сайта: перчатки нитриловые", "price": 0},
+       "contact": {"name": "Наталья Крылова", "phone": "+7 912 300-40-50", "email": "krylova@uralpack.example", "company": "ООО «УралПак»"}},
+      {"uid": "b9e8d7c6", "source_name": "Telegram @heli_shop_bot", "category": "chats", "created_at": 1793613300,
+       "text": "Есть ли спецодежда на 15 человек?", "lead": {"name": "Сделка из Telegram: спецодежда", "price": 0},
+       "contact": {"name": "Игорь Пестов", "phone": "+7 921 555-01-02", "email": "", "company": ""}}
     ]
   },
   "bitrix24": {

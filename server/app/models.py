@@ -76,6 +76,12 @@ class Task(Base):
     outcome: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     final_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Run journal: when and why the run ended (confirm, budget, max_steps, loop, captcha, quota, stop, error).
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    stopped: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # «Продолжи», a retry or a reformulation points at the task it follows.
+    parent_task_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("tasks.id"), nullable=True, index=True)
 
     user: Mapped[User] = relationship(back_populates="tasks")
     steps: Mapped[list["TaskStep"]] = relationship(back_populates="task", order_by="TaskStep.position")
@@ -122,9 +128,30 @@ class TaskFeedback(Base):
     acceptance: Mapped[str | None] = mapped_column(String(16), nullable=True)
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     user_edit: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # One-tap reason after 👎 (app.trajectories.REASON_CODES).
+    reason_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # «Исправил сам»: the user wrote how it should be (user_edit).
+    user_fixed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # A task with a letter: sent_as_is | edited_then_sent | declined.
+    mail_disposition: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Reserved for a future LLM judge; nothing writes it yet.
+    judge: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     task: Mapped[Task] = relationship(back_populates="feedback")
+
+
+class TaskSignal(Base):
+    """Implicit quality signal (retry, abandon, confirm_rejected, verify_ok…). Never shown to the user."""
+
+    __tablename__ = "task_signals"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    task_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("tasks.id"), nullable=True, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
 
 
 class Trajectory(Base):
@@ -269,3 +296,7 @@ class KnowledgeNote(Base):
     stale_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # A note from a live client task is a candidate (origin="candidate", approved_at=None): hidden from
+    # search until an admin approves it. Seeds and older notes have approved_at=None but are not candidates.
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import json
+import os
 import time
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal
@@ -16,6 +18,25 @@ from evals.world import World
 SCENARIOS_DIR = Path(__file__).with_name("scenarios")
 DEFAULT_BUDGET = {"max_steps": 12, "max_rub": 3.0}
 STOP_REASONS = {None, "confirm", "budget", "pause", "stop", "max_steps", "error"}
+
+
+@contextlib.contextmanager
+def _amo_sandbox(world: World):
+    """Учебный аккаунт мира — учебный и для прод-политики записи (карточка цикла не нужна).
+    Только на время сценария: в прод-список SANDBOX_HOSTS адрес мира не попадает."""
+    amo = world.state.get("amocrm") or {}
+    if not amo.get("sandbox", True) or not amo.get("subdomain"):
+        yield
+        return
+    old = os.environ.get("HELI_AMO_SANDBOX_HOSTS")
+    os.environ["HELI_AMO_SANDBOX_HOSTS"] = ",".join(filter(None, [old, f"{amo['subdomain']}.amocrm.ru"]))
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("HELI_AMO_SANDBOX_HOSTS", None)
+        else:
+            os.environ["HELI_AMO_SANDBOX_HOSTS"] = old
 
 
 class Agent(Protocol):
@@ -89,7 +110,8 @@ def run_scenario(scenario: dict, agent: Agent) -> Result:
         if scenario.get("study_first") and _accepts(agent, "study_first"):
             # Как в проде, когда сервис незнакомый и в базе знаний о нём нет (task_run.needs_study).
             extra["study_first"] = True
-        out = agent(task_text(scenario, world), world.tools(), call_tool, budget, **extra) or {}
+        with _amo_sandbox(world):
+            out = agent(task_text(scenario, world), world.tools(), call_tool, budget, **extra) or {}
         crash = None
     except Exception as exc:  # агент упал: это провал сценария, а не всего прогона
         out, crash = {}, f"агент упал: {type(exc).__name__}: {exc}"

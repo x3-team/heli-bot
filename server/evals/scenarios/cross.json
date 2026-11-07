@@ -20,13 +20,15 @@
    "task": "Новый клиент, ИНН 5033011222. Если компания действующая, заведи в amoCRM контакт с директором и сделку «Спецодежда» на 120 000 руб.",
    "expect": [
      {"type": "called", "tool": ["company_by_inn", "web_search"]},
-     {"type": "called", "tool": "amocrm_create_contact", "args": {"name": "Лебедев"}, "max": 1},
-     {"type": "called", "tool": "amocrm_create_deal", "args": {"price": 120000, "contact_id": 5001}, "max": 1}
+     {"type": "called", "tool": "amocrm_write", "args": {"method": "POST", "path": "contacts"}, "max": 1},
+     {"type": "state", "path": "amocrm.contacts[id=5001].name", "equals": "Лебедев"},
+     {"type": "state", "path": "amocrm.deals[-1].contact_id", "equals": 5001},
+     {"type": "state", "path": "amocrm.deals[-1].price", "equals": 120000}
    ],
    "golden": {"calls": [{"tool": "company_by_inn", "args": {"inn": "5033011222"}},
-                        {"tool": "amocrm_find_contacts", "args": {"query": "Лебедев"}},
-                        {"tool": "amocrm_create_contact", "args": {"name": "Лебедев Олег Викторович", "company": "ООО «Подмосковье Агро»"}},
-                        {"tool": "amocrm_create_deal", "args": {"name": "Спецодежда", "price": 120000, "contact_id": 5001}}],
+                        {"tool": "amocrm_read", "args": {"path": "/api/v4/contacts", "params": {"query": "Лебедев"}}},
+                        {"tool": "amocrm_write", "args": {"method": "POST", "path": "/api/v4/contacts", "body": [{"name": "Лебедев Олег Викторович", "_embedded": {"companies": [{"name": "ООО «Подмосковье Агро»"}]}}], "account": "heli-uchebny.amocrm.ru"}},
+                        {"tool": "amocrm_write", "args": {"method": "POST", "path": "/api/v4/leads", "body": [{"name": "Спецодежда", "price": 120000, "_embedded": {"contacts": [{"id": 5001}]}}], "account": "heli-uchebny.amocrm.ru"}}],
               "answer": "ООО «Подмосковье Агро» действующее. Контакт Лебедев О. В. и сделка «Спецодежда» на 120 000 руб. созданы."}},
 
   {"id": "x-03", "title": "Риск по должнику → задача бухгалтеру",
@@ -53,8 +55,8 @@
    "golden": {"calls": [{"tool": "telegram_read", "args": {"chat": "Отдел продаж"}},
                         {"tool": "bitrix24_read", "args": {"method": "user.search", "params": {"FIND": "Склад"}}},
                         {"tool": "bitrix24_write", "args": {"method": "tasks.task.add", "params": {"fields": {"TITLE": "Перенести отгрузку КазаньСтройМаш на 6 ноября", "RESPONSIBLE_ID": 13, "DEADLINE": "2026-11-06T18:00:00+03:00"}}}},
-                        {"tool": "amocrm_list_deals", "args": {"query": "КазаньСтройМаш"}},
-                        {"tool": "amocrm_add_note", "args": {"deal_id": 4002, "text": "Клиент попросил перенести отгрузку на 6 ноября"}}],
+                        {"tool": "amocrm_read", "args": {"path": "/api/v4/leads", "params": {"query": "КазаньСтройМаш"}}},
+                        {"tool": "amocrm_write", "args": {"method": "POST", "path": "/api/v4/leads/4002/notes", "body": [{"note_type": "common", "params": {"text": "Клиент попросил перенести отгрузку на 6 ноября"}}], "account": "heli-uchebny.amocrm.ru"}}],
               "answer": "Задача складу поставлена, в сделку 4002 добавлено примечание о переносе на 6 ноября."}},
 
   {"id": "x-05", "title": "Утренняя сводка из трёх систем",
@@ -63,12 +65,12 @@
    "expect": [
      {"type": "called", "tool": "bitrix24_read", "args": {"method": "tasks.task.list"}},
      {"type": "called", "tool": "onec_find_counterparty"},
-     {"type": "called", "tool": "amocrm_list_deals"},
+     {"type": "called", "tool": "amocrm_read", "args": {"path": "leads"}},
      {"type": "answer_contains", "all": ["Инвентаризац", "128 400", "54 000", "615 000"]}
    ],
    "golden": {"calls": [{"tool": "bitrix24_read", "args": {"method": "tasks.task.list", "params": {"filter": {"!STATUS": 5}}}},
                         {"tool": "onec_find_counterparty", "args": {"query": ""}},
-                        {"tool": "amocrm_list_deals", "args": {"query": "Принимают решение"}}],
+                        {"tool": "amocrm_read", "args": {"path": "/api/v4/leads", "params": {"filter": {"statuses": [{"pipeline_id": 7001, "status_id": 70003}]}}}}],
               "answer": "Просрочено: «Инвентаризация склада №2». Должны: КазаньСтройМаш 128 400 руб., Невский Логистик 54 000 руб. На этапе «Принимают решение»: «Перчатки 500 коробок — КазаньСтройМаш», 615 000 руб."}},
 
   {"id": "x-06", "title": "Погода → письмо клиенту",

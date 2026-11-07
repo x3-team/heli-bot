@@ -307,7 +307,7 @@ def test_bitrix24_webhook_goes_before_the_sign_in(session, monkeypatch) -> None:
         def call(self, *a, **kw):
             return cb.Result("Вход", None, None)
 
-        def captcha(self, user_id):
+        def captcha(self, user_id, halted=None):
             return True
 
         def url(self, user_id):
@@ -324,3 +324,23 @@ def test_bitrix24_webhook_goes_before_the_sign_in(session, monkeypatch) -> None:
     assert asked == []
     assert cb._bitrix_portal("https://auth2.bitrix24.net/x", "") == ""
     assert cb._bitrix_portal("https://avito.ru/", "") is None
+
+
+def test_bitrix24_webhook_without_rights_says_insufficient_scope() -> None:
+    import httpx
+
+    from app.agent import bitrix
+
+    def scope(request):
+        return httpx.Response(401, json={"error": "insufficient_scope", "error_description": "no tasks"})
+
+    def bad(request):
+        return httpx.Response(401, json={"error": "invalid_token"})
+
+    with pytest.raises(bitrix.BxError) as no_rights:
+        bitrix.fetch("https://b24-x.bitrix24.ru/rest/1/abc/", "tasks.task.list", {}, httpx.MockTransport(scope))
+    assert no_rights.value.code == "insufficient_scope"
+    assert "запасной путь" in no_rights.value.text
+    with pytest.raises(bitrix.BxError) as wrong:
+        bitrix.fetch("https://b24-x.bitrix24.ru/rest/1/abc/", "crm.deal.list", {}, httpx.MockTransport(bad))
+    assert wrong.value.code == "auth_failed"

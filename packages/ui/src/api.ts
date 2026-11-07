@@ -21,6 +21,7 @@ export type { AuthResult } from "./authSession";
 export { parseAuthResponse } from "./authSession";
 
 import { readApiError } from "./errors";
+import type { FeedbackPayload } from "./feedback";
 
 export class ApiError extends Error {
   readonly status: number | undefined;
@@ -201,6 +202,7 @@ export class TaskAbortedError extends Error {
 export interface TaskRunResult {
   taskId: string;
   reply: string;
+  mail?: boolean;
 }
 
 export interface TaskCostEstimate {
@@ -246,8 +248,8 @@ export async function runTask(
     throw new TaskAbortedError();
   }
   if (!run.ok) throw new ApiError(await readError(run));
-  const body = (await run.json()) as { reply?: string };
-  return { taskId: task.id, reply: body.reply ?? "" };
+  const body = (await run.json()) as { reply?: string; mail?: boolean };
+  return { taskId: task.id, reply: body.reply ?? "", mail: Boolean(body.mail) };
 }
 
 export async function finishTask(
@@ -272,16 +274,57 @@ export async function submitTaskFeedback(
   worked: boolean,
   comment: string,
 ): Promise<void> {
+  await sendTaskFeedback(base, token, taskId, {
+    rating: worked ? 1 : -1,
+    acceptance: worked ? "accepted" : "rejected",
+    comment: comment.trim() || undefined,
+  });
+}
+
+/** The rating card: any mix of rating, reason, «Исправил сам» and the letter's fate (see feedback.ts). */
+export async function sendTaskFeedback(
+  base: string,
+  token: string,
+  taskId: string,
+  body: FeedbackPayload,
+): Promise<void> {
   const response = await send(base, `/v1/tasks/${taskId}/feedback`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-    body: JSON.stringify({
-      rating: worked ? 1 : -1,
-      acceptance: worked ? "accepted" : "rejected",
-      comment: comment.trim() || undefined,
-    }),
+    body: JSON.stringify(body),
   });
   if (!response.ok) throw new ApiError(await readError(response));
+}
+
+/** The card closed with ✕: no rating needed. */
+export async function dismissTaskFeedback(base: string, token: string, taskId: string): Promise<void> {
+  const response = await send(base, `/v1/tasks/${taskId}/dismiss`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+}
+
+/** «Удалить обучающую копию»: documents only, the task history stays. */
+export async function deleteTrainingCopy(base: string, token: string): Promise<number> {
+  const response = await send(base, "/v1/me/trajectories", {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+  const body = (await response.json()) as { deleted?: number };
+  return Number(body.deleted ?? 0);
+}
+
+/** «Удалить историю задач»: tasks, steps, ratings and the training copy. Logins and memory stay. */
+export async function deleteTaskHistory(base: string, token: string): Promise<number> {
+  const response = await send(base, "/v1/me/tasks", {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) throw new ApiError(await readError(response));
+  const body = (await response.json()) as { deleted?: { tasks?: number } };
+  return Number(body.deleted?.tasks ?? 0);
 }
 
 export async function submitIncidentReport(

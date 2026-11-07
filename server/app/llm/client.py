@@ -75,6 +75,23 @@ class Completion:
         )
 
 
+# One model call waits at most this long (the SDK default is 10 minutes: a hung upstream held the run,
+# its browser and the app's stream). HELI_LLM_TIMEOUT_S=0 keeps the SDK default.
+LLM_TIMEOUT_S = 180.0
+LLM_CONNECT_S = 15.0
+
+
+def default_timeout() -> httpx.Timeout | None:
+    raw = os.environ.get("HELI_LLM_TIMEOUT_S", "").strip()
+    try:
+        seconds = float(raw) if raw else LLM_TIMEOUT_S
+    except ValueError:
+        seconds = LLM_TIMEOUT_S
+    if seconds <= 0:
+        return None
+    return httpx.Timeout(seconds, connect=min(LLM_CONNECT_S, seconds))
+
+
 class HeliClient:
     def __init__(self, client: OpenAI) -> None:
         self._client = client
@@ -85,6 +102,8 @@ class HeliClient:
         if not key:
             raise HeliError("missing_api_key")
         base_url = os.environ.get("HELI_BASE_URL", "https://getheli.ru/v1")
+        if timeout is None:
+            timeout = default_timeout()
         return cls(OpenAI(api_key=key, base_url=base_url, max_retries=max_retries,
                           timeout=NOT_GIVEN if timeout is None else timeout))
 

@@ -83,10 +83,30 @@ def _bitrix_rest_note(session, user, site: str) -> str:
         return ""
     if cred is None:
         return ""
-    tools = "bitrix24_read и bitrix24_write" if bitrix.is_sandbox(cred["site"]) else "bitrix24_read (на экране — только изменения)"
+    # Reads and writes go through the webhook; a live portal's writes wait for the user's «да» on the card.
+    tools = "bitrix24_read и bitrix24_write" + ("" if bitrix.is_sandbox(cred["site"]) else " (запись в боевом портале — после «да» в карточке)")
     return (
         f"Для {cred['site']} в «Доступах» есть вебхук: делай задачу через {tools}, без входа на экране — "
         "вход в облачный Битрикс24 с сервера обычно просит капчу. Входи на экране, только если REST не подходит.\n"
+    )
+
+
+def _amo_rest_note(session, user, site: str) -> str:
+    """An amoCRM account with a token in «Доступах»: REST first, no sign-in on the screen."""
+    from app.agent import amocrm
+
+    if not amocrm.account_host(site):
+        return ""
+    try:
+        cred = amocrm.token_entry_for(session, user, site)
+    except Exception:  # noqa: BLE001
+        return ""
+    if cred is None:
+        return ""
+    write = "amocrm_write пишет сразу" if amocrm.is_sandbox(cred["site"]) else "amocrm_write — после подтверждения пользователя"
+    return (
+        f"Для {cred['site']} в «Доступах» есть токен amoCRM: делай задачу через amocrm_read ({write}), без входа "
+        "на экране и без пароля. Входи на экране, только если REST не подходит.\n"
     )
 
 
@@ -126,7 +146,8 @@ def execute(session, user, task_id, name: str, args: dict) -> ClientResult:
     if not site:
         return ClientResult("Ошибка: укажи адрес сайта", "bad_args")
     if name == "find_credential":
-        rest = _bitrix_rest_note(session, user, site) or _moysklad_api_note(session, user, site)
+        rest = (_bitrix_rest_note(session, user, site) or _amo_rest_note(session, user, site)
+                or _moysklad_api_note(session, user, site))
         found = credential_for(session, user, url=f"https://{site}")
         if found is None:
             return ClientResult(rest or f"Сохранённого доступа для {site} нет.")

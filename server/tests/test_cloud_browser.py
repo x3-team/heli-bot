@@ -563,7 +563,7 @@ def test_real_chromium_sees_1c_web_client(tmp_path, monkeypatch):
         text = p.read()
         assert "«Банк и касса»" in text and "«Продажи»" in text
         assert "ООО Ромашка | 7701234567" in text and "Таблица" in text
-        assert "Дата: 05.11.2026" in text
+        assert "поле «Дата» = «05.11.2026»" in text
         assert "Это 1С" in text
         assert "Путеводитель" not in text
         p.click(None, "Банк и касса")
@@ -715,3 +715,214 @@ def test_real_chromium_go_to_link_replaces_the_remembered_link():
         assert p.onec_go("https://h/b/ru_RU/#e1cib/list/%D0%A1%D0%BF%D1%80%D0%B0%D0%B2%D0%BE%D1%87%D0%BD%D0%B8%D0%BA.%D0%9A")
         assert page.title() == "Перешёл:e1cib/list/Справочник.К"
         browser_.close()
+
+
+# 1С web client as it is drawn on accounting.demo.1c.ru (8.3.27): windows are div.cloud[id$=win] with their caption
+# in data-title, a modal one has a dark .surface right under it; a report is a set of frames with [y] rows of [x] cells.
+ONEC_WINDOWS = """<!doctype html><html><head><title>Бухгалтерия предприятия, редакция 3.0 (1С:Предприятие)</title>
+<style>.cloud{position:absolute;background:#fff}.surface{position:absolute;left:0;top:0;width:1280px;height:800px}
+.press{display:inline-block;cursor:pointer;padding:4px}</style></head><body>
+<div id="themesCell"><div class="themeCell">Продажи</div></div>
+<div id="form1_Счет#title_text">Счет:</div><input class="editInput" id="form1_Счет_i0" value="">
+<input class="editInput" id="form1_КонецПериода_i0" value="30.09.2026">
+<span id="openedCell_cmd_close" title="Закрыть" style="position:absolute;left:5px;top:60px;width:20px;height:20px"
+ onclick="document.title='tab closed'"></span>
+<div class="surface surfaceBlack" id="modalSurface" style="z-index:9040"></div>
+<div class="cloud" id="ps1win" style="z-index:9024;left:600px;top:340px;width:500px;height:300px">
+ <div id="ps1headerTopLine"><div class="toplineBox" data-title="Путеводитель по демонстрационной базе"></div>
+ <span id="ps1headerTopLine_cmd_CloseButton" title="Закрыть" onclick="document.getElementById('ps1win').remove()">x</span></div>
+ Добро пожаловать!</div>
+<div class="cloud" id="ps2win" style="z-index:9044;left:460px;top:170px;width:480px;height:260px">
+ <div id="ps2headerTopLine"><div class="toplineBox" data-title="Рекомендуется обновить версию конфигурации"></div></div>
+ <p>Обновите программу.</p>
+ <a class="press" id="form2_КнопкаОсновная" style="position:absolute;left:380px;top:220px"
+  onclick="document.getElementById('ps2win').remove();document.getElementById('modalSurface').remove()">Закрыть</a></div>
+<div class="cloud" id="ps3win" style="z-index:9050;left:780px;top:330px;width:300px;height:200px">
+ <div class="toplineBox" data-title="Подсказка"></div>Совет дня</div>
+</body></html>"""
+
+
+@pytest.mark.skipif(_chromium() is None, reason="Playwright Chromium not installed")
+def test_real_chromium_1c_modal_window_and_a_covered_button():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        browser_ = pw.chromium.launch(executable_path=_chromium())
+        page = browser_.new_page(viewport=cb.VIEWPORT)
+        page.set_content(ONEC_WINDOWS)
+        p = cb.Page(page.context, page)
+        text = p.read()
+        # The modal notice is what the model sees; the form behind it is not offered for clicks.
+        assert "Поверх страницы открыто окно «Рекомендуется обновить версию конфигурации»" in text
+        assert "Поверх страницы открыто окно «Подсказка»" not in text
+        assert "Текст окна (форма за ним скрыта" in text
+        assert "«Счет»" not in text and "Продажи" not in text.split("Элементы:")[1]
+        # «Закрыть» of the notice lies under another window: pressed by its own events, not the tab's «Закрыть».
+        out = p.click(None, "Закрыть")
+        assert page.evaluate("() => !!document.getElementById('ps2win')") is False
+        assert page.title() != "tab closed"
+        assert "Не нажал" not in out
+        # After the click the guide (a start window, known by its caption) is closed too.
+        assert "Закрыл стартовые окна 1С: «Путеводитель по демонстрационной базе»" in out
+        assert page.evaluate("() => !!document.getElementById('ps1win')") is False
+        text = p.read()
+        assert "поле «Счет» (пусто)" in text and "поле «Конец периода» = «30.09.2026»" in text
+        browser_.close()
+
+
+ONEC_QUESTION = """<!doctype html><html><head><title>Бухгалтерия (1С:Предприятие)</title>
+<style>.cloud{position:absolute;background:#fff}.surface{position:absolute;left:0;top:0;width:1280px;height:800px}
+.press{display:inline-block;cursor:pointer;padding:4px}</style></head><body>
+<div id="themesCell">Банк</div>
+<a class="press" id="form5_ФормаЗаписать" style="position:absolute;left:300px;top:100px" onclick="document.title='saved'">Записать</a>
+<div class="surface surfaceBlack" style="z-index:9000"></div>
+<div class="cloud" id="ps4win" style="z-index:9004;left:400px;top:300px;width:400px;height:160px">
+ <div id="ps4headerTopLine"><div class="toplineBox" data-title=""></div>
+ <span id="ps4headerTopLine_cmd_CloseButton" title="Закрыть" style="display:inline-block;width:20px;height:20px"></span></div>
+ <div>Данные были изменены. Сохранить изменения?</div>
+ <div><a class="press" onclick="document.title='yes'">Да</a><a class="press" onclick="document.title='no'">Нет</a>
+ <a class="press">Отмена</a></div></div>
+</body></html>"""
+
+
+@pytest.mark.skipif(_chromium() is None, reason="Playwright Chromium not installed")
+def test_real_chromium_1c_question_is_answered_and_the_form_behind_is_not_clicked():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        browser_ = pw.chromium.launch(executable_path=_chromium())
+        page = browser_.new_page(viewport=cb.VIEWPORT)
+        page.set_content(ONEC_QUESTION)
+        p = cb.Page(page.context, page)
+        text = p.read()
+        assert "окно «Данные были изменены. Сохранить изменения?»" in text and "«Нет»" in text
+        assert "кнопка «Закрыть окно»" in text and "Записать" not in text.split("Элементы:")[1]
+        blocked = p.click(None, "Записать")
+        assert blocked.startswith("Не нажал «Записать»") and page.title() != "saved"
+        p.click(None, "Нет")
+        assert page.title() == "no"
+        browser_.close()
+
+
+ONEC_FORM = """<!doctype html><html><head><title>Реализация товаров (1С:Предприятие)</title>
+<style>.gridBox{position:absolute;top:0;height:29px}.gridLine{position:relative;height:29px}</style></head><body>
+<div id="themesCell">Продажи</div>
+<div id="form8_Контрагент#title_text">Контрагент:</div><input class="editInput" id="form8_Контрагент_i0" value="">
+<div id="grid_form8_Товары" style="position:relative;width:900px">
+ <div class="gridHead"><div class="gridLine" style="position:relative;height:29px">
+  <div class="gridBox" colindex="0" style="left:0;width:40px">N</div>
+  <div class="gridBox" colindex="1" style="left:40px;width:300px">Номенклатура</div>
+  <div class="gridBox" colindex="3" style="left:340px;width:200px">Количество</div>
+  <div class="gridBox" colindex="6" style="left:540px;width:120px">Цена</div></div></div>
+ <div class="gridBody"><div class="gridLine" rowindex="0">
+  <div class="gridBox" colindex="0" style="left:0;width:40px">1</div>
+  <div class="gridBox" colindex="2" style="left:40px;width:300px" onclick="document.title='cell'">Конфеты</div>
+  <div class="gridBox" colindex="4" style="left:340px;width:120px">5,000</div>
+  <div class="gridBox" colindex="5" style="left:460px;width:80px">шт</div>
+  <div class="gridBox" colindex="6" style="left:540px;width:120px"></div></div></div></div>
+<div id="editDropDown" style="position:absolute;z-index:9007;left:300px;top:300px;width:300px">
+ <ol class="eddList"><li>Конфетпром ООО (00-000026)</li><li>Создать: Конфет</li></ol></div>
+<div class="moxelContainer" style="width:600px;height:200px">
+ <iframe style="width:200px;height:200px" srcdoc='<div y="0"><div x="0">Контрагенты</div></div><div y="1"><div x="0">Магазин №23</div></div>'></iframe>
+ <iframe style="width:380px;height:200px" srcdoc='<div y="0"><div x="0">Контрагенты</div><div x="1">Дебет</div><div x="2">Кредит</div></div><div y="1"><div x="1"></div><div x="2">40,00</div></div>'></iframe>
+</div>
+</body></html>"""
+
+
+@pytest.mark.skipif(_chromium() is None, reason="Playwright Chromium not installed")
+def test_real_chromium_1c_fields_table_part_variants_and_report():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        browser_ = pw.chromium.launch(executable_path=_chromium())
+        page = browser_.new_page(viewport=cb.VIEWPORT)
+        page.set_content(ONEC_FORM)
+        page.wait_for_timeout(300)
+        p = cb.Page(page.context, page)
+        text = p.read()
+        assert "[1] вариант «Конфетпром ООО (00-000026)»" in text
+        assert "вариант: создаст новый элемент «Создать: Конфет»" in text
+        assert "поле «Контрагент» (пусто)" in text
+        # Cells of a table part: each with its column (the header box over two body columns too) and a ref.
+        row = next(line for line in text.splitlines() if "строка 1 —" in line)
+        assert "Номенклатура: Конфеты" in row and "Количество: 5,000" in row and "Цена: " in row
+        ref = int(row.split("Номенклатура:")[0].rsplit("[", 1)[1].split("]")[0])
+        assert "] ячейка" not in text  # cells are listed in the table, not again among elements
+        p.click(ref, None)
+        assert page.title() == "cell"
+        # The report frames put back together by row and column.
+        assert "Контрагенты | Дебет | Кредит" in text and "Магазин №23 |  | 40,00" in text
+        browser_.close()
+
+
+def test_format_snapshot_shows_1c_values_windows_and_reports():
+    text = cb.format_snapshot({
+        "url": "https://h/b/ru_RU/", "title": "1С", "text": "Выбор периода", "onec": True,
+        "dialog": {"title": "Выбор периода", "buttons": ["3 квартал"], "onec": True},
+        "elements": [
+            {"ref": 1, "kind": "поле", "label": "Счет", "value": ""},
+            {"ref": 2, "kind": "поле", "label": "Период", "value": "01.07.2026"},
+            {"ref": 3, "kind": "ячейка", "label": "Цена", "inline": True},
+        ],
+        "rows": ["[4] строка 1 — [3] Цена: "],
+        "report": ["Счет | Дебет", "62 | 66 310,41"], "reportCut": True,
+    })
+    assert "Поверх страницы открыто окно «Выбор периода»" in text and "Текст окна (форма за ним скрыта" in text
+    assert "[1] поле «Счет» (пусто)" in text and "[2] поле «Период» = «01.07.2026»" in text
+    assert "[3] ячейка" not in text and "[3] Цена:" in text
+    assert "62 | 66 310,41" in text and "Отчёт длиннее" in text
+
+
+def test_1c_link_is_not_opened_by_a_reload_while_signed_in():
+    """A reload ends the 1С session (1c-06): when «Перейти по ссылке» does not come up, say so instead."""
+
+    class Stub:
+        url = "https://demo.example/accounting/ru_RU/"
+
+        def wait_for_timeout(self, ms):
+            pass
+
+    class OneC(cb.Page):
+        def __init__(self, signed_in):  # noqa: D107
+            self.page = Stub()
+            self.signed_in = signed_in
+            self.reloaded: list[str] = []
+
+        def is_onec(self):
+            return True
+
+        def onec_wait_ready(self, seconds=15):
+            return True
+
+        def onec_cleanup(self):
+            return ""
+
+        def onec_go(self, url):
+            return False
+
+        def onec_signed_in(self):
+            return self.signed_in
+
+        def goto(self, url):
+            self.reloaded.append(url)
+
+        def settle(self, ms):
+            pass
+
+        def close_start_windows(self):
+            return []
+
+        def close_error_windows(self):
+            return []
+
+        def read(self):
+            return "страница"
+
+    link = "https://demo.example/accounting/ru_RU/#e1cib/list/Справочник.Контрагенты"
+    page = OneC(signed_in=True)
+    text = page.open(link)
+    assert text.startswith("Навигационную ссылку не открыл") and "сбросило бы вход" in text
+    assert page.reloaded == []
+    # On the sign-in form there is nothing to lose: the base is loaded with the link as before.
+    page = OneC(signed_in=False)
+    assert "Перезагрузил базу 1С" in page.open(link) and len(page.reloaded) == 1
