@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.aliases import PUBLIC_MODEL_ALIASES
 from app.config import get_settings
-from app.masking import mask_text, mask_value, redact_secrets, redact_secrets_text
+from app.masking import mask_emails, mask_text, mask_value, redact_secrets, redact_secrets_text
 from app.models import Task, TaskFeedback, TaskSignal, TaskStep, Trajectory, UsageLedger, User
 
 log = logging.getLogger(__name__)
@@ -592,7 +592,7 @@ def list_documents(
                 continue
         if confirmed_only and not confirmed_good(payload):
             continue
-        documents.append(payload)
+        documents.append(mask_emails(payload))
     return documents
 
 

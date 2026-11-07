@@ -171,6 +171,17 @@ def mask_text(text: str) -> str:
     return masked
 
 
+def mask_emails(value: Any) -> Any:
+    """Only the address pass, over a whole document: for documents written before the pattern got wider."""
+    if isinstance(value, str):
+        return _EMAIL.sub("[email]", value) if "@" in value else value
+    if isinstance(value, dict):
+        return {key: mask_emails(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [mask_emails(item) for item in value]
+    return value
+
+
 def mask_value(value: Any) -> Any:
     if isinstance(value, str):
         return mask_text(value)

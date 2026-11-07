@@ -160,3 +160,16 @@ def test_cyrillic_and_punycode_emails_are_masked():
     assert mask_text("пишите петя@почта.рф или info@кц-сервис.рф.") == "пишите [email] или [email]."
     assert mask_text("a.b@site.xn--p1ai") == "[email]"
     assert mask_text("сборка build@1.2.3") == "сборка build@1.2.3"
+
+
+def test_old_documents_get_the_wider_email_mask_on_export(session):
+    from app.trajectories import list_documents
+
+    user = _user(session, "client@example.com")
+    task = start_task(session, user, "Задача", {})
+    auto_finish(session, task.id, "success", "Готово")
+    row = session.scalar(select(Trajectory).where(Trajectory.task_id == task.id))
+    row.payload = {**row.payload, "final_answer": "Отправил на петя@почта.рф"}  # written by the old mask
+    session.commit()
+
+    assert list_documents(session)[0]["final_answer"] == "Отправил на [email]"
