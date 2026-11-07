@@ -268,6 +268,18 @@ def webhook_for(session, user, portal: str | None) -> dict | None:
     return rows[0] if rows else None
 
 
+def fill_portal(session, user, args: dict) -> dict:
+    """bitrix24_write without portal: name the portal the executor would write to (the webhook in «Доступах»).
+    Then the write policy judges the real portal: a training one writes at once, a client's one shows its card."""
+    from app.skills.hosts import host_of
+
+    if str(args.get("portal") or "").strip():
+        return args
+    cred = webhook_for(session, user, None)
+    host = host_of(cred["site"]) if cred else ""
+    return {**args, "portal": host} if host else args
+
+
 def execute(session, user, task_id, name: str, args: dict, transport: httpx.BaseTransport | None = None) -> ClientResult:
     """app.agent.executors contract."""
     from app.vault import VaultError, secret_for_browser
