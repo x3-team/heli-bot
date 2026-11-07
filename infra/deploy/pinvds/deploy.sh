@@ -4,12 +4,15 @@
 #
 #   deploy.sh diff   <tarball>   show what differs from the running copy, change nothing
 #   deploy.sh deploy <tarball>   back up, sync, pip, alembic, restart, health check, roll back on failure
+#   deploy.sh learning-check <tarball>
+#                                read-only: run journal, SFT/DPO export and /admin/quality as counts
+#                                (code from the tarball, data from the running copy; nothing changes)
 #
 # Touches only /opt/heli-bot and the heli-bot-api unit. getheli.ru (/opt/heli), nginx and certificates
 # are never touched. The .env, var/ (database, browser profiles, files) and the venv are kept.
 set -euo pipefail
 
-MODE="${1:?mode: diff|deploy}"
+MODE="${1:?mode: diff|deploy|learning-check}"
 TARBALL="${2:?release tarball}"
 APP_DIR="${APP_DIR:-/opt/heli-bot}"
 APP_USER="${APP_USER:-helibot}"
@@ -102,6 +105,15 @@ if [ "$MODE" = diff ]; then
   log "content diff (first 400 lines):"
   $SUDO diff -ru -x '__pycache__' -x '*.pyc' -x '*.egg-info' -x var -x .env "$APP_DIR/server" "$STAGE/server" | head -n 400 || true
   exit 0
+fi
+
+if [ "$MODE" = learning-check ]; then
+  # Read-only. The release code is put first on sys.path, the working directory and .env are the running
+  # copy's, so it reads the live database. Prints only counts and the quality summary.
+  log "running copy: $(cat "$APP_DIR/server/REVISION" 2>/dev/null || echo unknown)"
+  chmod -R a+rX "$STAGE"
+  as_app_with_env bash -c "cd '$APP_DIR/server' && exec '$APP_DIR/venv/bin/python' -c \"import sys; sys.path.insert(0, '$STAGE/server'); sys.argv = ['heli-server', 'learning-check', '--api', 'http://127.0.0.1:$PORT']; from app.cli import main; main()\""
+  exit $?
 fi
 
 [ "$MODE" = deploy ] || { log "unknown mode $MODE"; exit 1; }

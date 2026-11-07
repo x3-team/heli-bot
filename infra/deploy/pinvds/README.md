@@ -13,6 +13,11 @@ Workflow: **Actions → deploy-pinvds → Run workflow**.
    `systemctl restart heli-bot-api` → health check on 127.0.0.1:8001 and https://bot-api.getheli.ru/health.
    If the API does not come up, the previous copy is restored and restarted.
 
+`mode = learning-check`: read-only check of the self-learning signals on the live database: schema (0011),
+run journal (finished_at/stopped/duration, tasks never closed), feedback, signals, trajectories, the raw/sft/dpo
+export (line counts, no forbidden keys or account emails) and `/v1/admin/quality` + export called on the running
+API as an admin. Prints counts only: no task texts, emails, ids or tokens. Nothing on the host changes.
+
 `.env`, `var/` (database, browser profiles, files) and the venv are kept as they are.
 
 The API must run only under the `heli-bot-api` unit. If another process (for example `python -m app.main`

@@ -3,6 +3,8 @@ name: deploy-pinvds
 # Heli bot API on pinvds (bot-api.getheli.ru, /opt/heli-bot). Manual only.
 #   mode=diff    compare the running copy with this commit, change nothing (run it first:
 #                the copy on the host was made by hand, not from git)
+#   mode=learning-check  read-only: run journal, SFT export and /admin/quality as counts (no data leaves
+#                as text: no task texts, emails or ids)
 #   mode=deploy  tests, then back up, sync server/, pip, alembic, restart heli-bot-api,
 #                health check; rolls back by itself if the API does not come up
 # getheli.ru (/opt/heli), nginx and certificates on the same host are never touched.
@@ -11,9 +13,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "diff = only show differences, deploy = install"
+        description: "diff = only show differences, learning-check = read-only learning signals check, deploy = install"
         type: choice
-        options: [diff, deploy]
+        options: [diff, learning-check, deploy]
         default: diff
   pull_request:
     paths:
