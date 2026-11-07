@@ -74,3 +74,20 @@ for a click.
 (training GA4 Measurement IDs, `G-…`). Empty means «leave as is». `mode=diff` prints the current values;
 `mode=deploy` backs up `.env` to `backups/env-<stamp>` (mode 600), writes only these keys and restores the
 backup on rollback. Nothing else in `.env` is changed, and values in any other format are refused.
+
+## Web cabinet bot.getheli.ru
+
+Static build of `apps/web`, served by nginx from `/var/www/bot.getheli.ru/current`
+(`releases/<stamp>`, the newest 5 kept). It talks to `https://bot-api.getheli.ru` (CORS is open on the API).
+
+1. **DNS:** A record `bot.getheli.ru → 5.188.88.202` (reg.ru).
+2. **Once, as root** (the deploy user `helibot` has no rights on nginx or certbot):
+   `sudo bash /opt/heli-bot/infra/deploy/pinvds/bot-web-setup.sh`. It checks DNS, creates the web root owned by
+   `helibot`, adds one nginx server block for `bot.getheli.ru` only, runs `nginx -t` and then
+   `systemctl reload nginx` (never restart: getheli.ru shares this nginx), and gets the certificate with
+   `certbot --nginx -d bot.getheli.ru --redirect`. Safe to run again. Any run of `deploy-bot-web` puts the
+   current copy of the script at that path.
+3. **Every release:** Actions → `deploy-bot-web` → `deploy`. Builds with
+   `VITE_HELI_API_BASE=https://bot-api.getheli.ru`, unpacks a new release, switches `current` and checks that
+   `https://bot.getheli.ru/REVISION` shows the new commit; if the site answers but serves something else, it
+   switches back. `diff` only reports what is served.
