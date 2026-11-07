@@ -2129,7 +2129,8 @@ def execute(session, user, task_id, name: str, args: dict):
                     publish(heli_files.published(info))
                 return ClientResult(
                     f"Вход в Битрикс24 просит капчу. Для {webhook['site']} в «Доступах» есть вебхук: не входи на экране, "
-                    "делай задачу через bitrix24_read" + (" и bitrix24_write" if _bitrix_sandbox(webhook["site"]) else "")
+                    "делай задачу через bitrix24_read и bitrix24_write"
+                    + ("" if _bitrix_sandbox(webhook["site"]) else " (запись в боевом портале уйдёт после «да» в карточке)")
                     + ". Капчу не решай.",
                     "captcha_use_rest",
                 )

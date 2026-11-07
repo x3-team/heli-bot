@@ -83,7 +83,8 @@ def _bitrix_rest_note(session, user, site: str) -> str:
         return ""
     if cred is None:
         return ""
-    tools = "bitrix24_read и bitrix24_write" if bitrix.is_sandbox(cred["site"]) else "bitrix24_read (на экране — только изменения)"
+    # Reads and writes go through the webhook; a live portal's writes wait for the user's «да» on the card.
+    tools = "bitrix24_read и bitrix24_write" + ("" if bitrix.is_sandbox(cred["site"]) else " (запись в боевом портале — после «да» в карточке)")
     return (
         f"Для {cred['site']} в «Доступах» есть вебхук: делай задачу через {tools}, без входа на экране — "
         "вход в облачный Битрикс24 с сервера обычно просит капчу. Входи на экране, только если REST не подходит.\n"
