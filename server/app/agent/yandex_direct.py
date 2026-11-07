@@ -207,13 +207,24 @@ def format_tsv(text: str) -> str:
     return out if len(out) <= RESULT_CHARS else out[:RESULT_CHARS] + "\n…[отчёт обрезан]"
 
 
+# Error 58: the token is fine, but the Яндекс account behind it has no API access yet (the access
+# request in Директ is not filed or not approved, or the sandbox is not switched on). Only a person
+# can fix it in the Директ web interface; retrying or opening the cabinet on screen does not help.
+REGISTRATION_58 = (
+    "Регистрация доступа к API Директа не завершена. Это делает владелец аккаунта в веб-интерфейсе "
+    "Директа: «Инструменты» → «API» → заявка на доступ (для sandbox=true — там же включить песочницу), "
+    "и у приложения на oauth.yandex.ru должен быть доступ «Использование API Яндекс Директа». "
+    "Повтор запроса не поможет, кабинет на экране не открывай: ответь BLOCKED и перескажи эти шаги."
+)
+
+
 def format_json(data: dict, units: str | None = None) -> str:
     if "error" in data:
         err = data["error"]
-        raise DirectError(
-            "api_error",
-            f"Ошибка API Директа {err.get('error_code')}: {err.get('error_string')}. {err.get('error_detail', '')}"[:600],
-        )
+        text = f"Ошибка API Директа {err.get('error_code')}: {err.get('error_string')}. {err.get('error_detail', '')}"[:600]
+        if str(err.get("error_code")) == "58":
+            raise DirectError("registration_incomplete", f"{text}\n{REGISTRATION_58}")
+        raise DirectError("api_error", text)
     text = json.dumps(data.get("result", data), ensure_ascii=False)
     if units:
         text = f"Баллы (потрачено/осталось/лимит): {units}\n{text}"

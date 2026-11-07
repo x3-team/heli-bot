@@ -131,3 +131,87 @@ def test_failure_detail_names_the_status_and_hides_the_key(monkeypatch) -> None:
 
     detail = failure_detail(PaymentRequired("Недостаточно средств для ключа sk-heli-secret-123456"))
     assert detail.startswith("402 PaymentRequired:") and "sk-heli-secret" not in detail and "<KEY>" in detail
+
+
+class _FlakyCompletions(_FakeCompletions):
+    """Fails with the given exceptions first, then answers."""
+
+    def __init__(self, payload: dict, failures: list) -> None:
+        super().__init__(payload)
+        self.failures = list(failures)
+        self.attempts = 0
+
+    def create(self, **kwargs):
+        self.attempts += 1
+        if self.failures:
+            raise self.failures.pop(0)
+        return super().create(**kwargs)
+
+
+def _flaky(failures: list, retries: int) -> tuple[HeliClient, _FlakyCompletions, list]:
+    sdk = _FakeSDK({"text": "ок", "input_tokens": 1, "output_tokens": 1})
+    sdk.chat.completions = _FlakyCompletions({"text": "ок", "input_tokens": 1, "output_tokens": 1}, failures)
+    pauses: list = []
+    return HeliClient(sdk, retries=retries, sleep=pauses.append), sdk.chat.completions, pauses
+
+
+def _status_error(status: int):
+    import httpx
+    import openai
+
+    request = httpx.Request("POST", "https://getheli.ru/v1/chat/completions")
+    response = httpx.Response(status, request=request, json={"error": {"message": "x"}})
+    cls = {402: openai.PermissionDeniedError, 401: openai.AuthenticationError}.get(status, openai.InternalServerError)
+    if status == 429:
+        cls = openai.RateLimitError
+    return cls("gateway said no", response=response, body=None)
+
+
+def _connection_error():
+    import httpx
+    import openai
+
+    return openai.APIConnectionError(request=httpx.Request("POST", "https://getheli.ru/v1/chat/completions"))
+
+
+def test_reset_connection_is_retried_and_the_run_goes_on() -> None:
+    client, completions, pauses = _flaky([_connection_error(), _status_error(502)], retries=2)
+    completion = client.complete("heli-fast", [{"role": "user", "content": "привет"}])
+    assert completion.text == "ок"
+    assert completions.attempts == 3
+    assert pauses == [1.0, 3.0]
+
+
+def test_rate_limit_is_retried() -> None:
+    client, completions, _ = _flaky([_status_error(429)], retries=2)
+    assert client.complete("heli-fast", [{"role": "user", "content": "привет"}]).text == "ок"
+    assert completions.attempts == 2
+
+
+def test_refused_key_or_balance_is_not_retried() -> None:
+    for status in (401, 402):
+        client, completions, pauses = _flaky([_status_error(status)], retries=2)
+        with pytest.raises(HeliError) as caught:
+            client.complete("heli-fast", [{"role": "user", "content": "привет"}])
+        assert caught.value.code == "request_failed"
+        assert str(status) in caught.value.detail
+        assert completions.attempts == 1
+        assert pauses == []
+
+
+def test_retries_end_with_request_failed_and_the_reason() -> None:
+    client, completions, _ = _flaky([_connection_error()] * 5, retries=2)
+    with pytest.raises(HeliError) as caught:
+        client.complete("heli-fast", [{"role": "user", "content": "привет"}])
+    assert completions.attempts == 3
+    assert "APIConnectionError" in caught.value.detail
+
+
+def test_from_env_retries_twice_by_default(monkeypatch) -> None:
+    monkeypatch.setenv("HELI_API_KEY", "test-key-123456")
+    monkeypatch.delenv("HELI_LLM_RETRIES", raising=False)
+    client = HeliClient.from_env()
+    assert client._retries == 2
+    assert client._client.max_retries == 0
+    monkeypatch.setenv("HELI_LLM_RETRIES", "0")
+    assert HeliClient.from_env()._retries == 0
