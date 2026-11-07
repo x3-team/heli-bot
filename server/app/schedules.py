@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -171,7 +172,13 @@ def run_due(
 
 def autorun_enabled() -> bool:
     """The ticker runs in the server unless HELI_SCHEDULES_AUTORUN=0, and never in tests."""
-    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("APP_ENV", "").strip().lower() == "test":
+    # "pytest" in sys.modules: app.main builds the app at import, while pytest collects the tests and before
+    # PYTEST_CURRENT_TEST is set; a real ticker started then overwrote TICKER during test_schedule_ticker.
+    if (
+        "pytest" in sys.modules
+        or os.environ.get("PYTEST_CURRENT_TEST")
+        or os.environ.get("APP_ENV", "").strip().lower() == "test"
+    ):
         return False
     return os.environ.get("HELI_SCHEDULES_AUTORUN", "1").strip().lower() not in {"0", "false", "no", "off"}
 
