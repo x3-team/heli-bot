@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.browser import BrowserError, pool_start
@@ -21,6 +23,11 @@ from app.trajectories import TrajectoryError, finish_task, start_task
 
 log = logging.getLogger(__name__)
 MSK = ZoneInfo("Europe/Moscow")
+# A run more than this late (the server was down) is skipped: a 9:00 reminder at 15:00 helps nobody.
+LATE_AFTER = timedelta(minutes=30)
+TICK_OFFSET_S = 3
+# What the ticker did last, for GET /health/schedules: no user data, only times and counts.
+TICKER: dict = {"started_at": None, "last_tick": None, "ticks": 0, "last_due": 0, "last_ran": 0, "last_skip": None}
 
 _PHRASES = {
     "каждый понедельник в 9:00": "0 9 * * 1",
@@ -118,16 +125,118 @@ def run_due(
     *,
     user_id: uuid.UUID | None = None,
     now: datetime | None = None,
+    skip_late_after: timedelta | None = None,
+    commit: bool = False,
 ) -> int:
+    """Run the schedules whose time has come. Each one is claimed first, so two servers never run it twice.
+
+    skip_late_after: a run that is later than this (the server was down) is skipped with last_error="missed";
+    the schedule moves on to its next time. commit=True commits after the claim and after each run (the ticker).
+    """
     moment = _aware(now)
     query = select(Schedule).where(Schedule.enabled.is_(True), Schedule.next_run <= moment)
     if user_id is not None:
         query = query.where(Schedule.user_id == user_id)
     ran = 0
     for row in list(session.scalars(query)):
-        _run_one(session, row, client, driver, moment)
+        was_due = _aware(row.next_run)
+        if not _claim(session, row, moment):
+            continue
+        if commit:
+            session.commit()
+        if skip_late_after is not None and moment - was_due > skip_late_after:
+            row.last_error = "missed"
+            session.flush()
+            if commit:
+                session.commit()
+            continue
+        if not commit:
+            _run_one(session, row, client, driver, moment)
+            ran += 1
+            continue
+        schedule_id = row.id
+        try:
+            _run_one(session, row, client, driver, moment)
+            session.commit()
+        except Exception:  # noqa: BLE001  (the claim is committed: this run is not retried every minute)
+            session.rollback()
+            log.exception("schedule run failed id=%s", schedule_id)
+            failed = session.get(Schedule, schedule_id)
+            if failed is not None:
+                failed.last_error = "run_failed"
+                session.commit()
         ran += 1
     return ran
+
+
+def autorun_enabled() -> bool:
+    """The ticker runs in the server unless HELI_SCHEDULES_AUTORUN=0, and never in tests."""
+    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("APP_ENV", "").strip().lower() == "test":
+        return False
+    return os.environ.get("HELI_SCHEDULES_AUTORUN", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def tick(session_factory, client_factory, driver_factory, now: datetime | None = None) -> int:
+    """One pass of the ticker: every user's due schedules, each in its own transaction."""
+    TICKER["last_tick"] = _aware(now).isoformat(timespec="seconds")
+    TICKER["ticks"] += 1
+    TICKER["last_due"] = 0
+    TICKER["last_ran"] = 0
+    TICKER["last_skip"] = None
+    session = session_factory()
+    try:
+        due = session.scalar(
+            select(func.count()).select_from(Schedule).where(Schedule.enabled.is_(True), Schedule.next_run <= _aware(now))
+        )
+        TICKER["last_due"] = int(due or 0)
+        if not due:
+            return 0
+        try:
+            client = client_factory()
+        except HeliError as exc:
+            log.info("schedule tick skipped: %s", exc.code)
+            TICKER["last_skip"] = exc.code
+            return 0
+        ran = run_due(session, client, driver_factory(), now=now, skip_late_after=LATE_AFTER, commit=True)
+        TICKER["last_ran"] = ran
+        return ran
+    except Exception:  # noqa: BLE001  (one bad schedule must not stop the ticker)
+        session.rollback()
+        log.exception("schedule tick failed")
+        TICKER["last_skip"] = "tick_failed"
+        return 0
+    finally:
+        session.close()
+
+
+def install_ticker(session_factory=None, client_factory=None, driver_factory=None) -> bool:
+    """Start the background ticker: once a minute, a few seconds after the minute turns."""
+    if not autorun_enabled():
+        return False
+
+    def loop() -> None:
+        from app.browser import DockerDriver
+        from app.db import get_session_factory
+
+        wait = threading.Event()
+        while True:
+            now = datetime.now(timezone.utc)
+            wait.wait(60 - now.second + TICK_OFFSET_S)
+            tick(
+                session_factory or get_session_factory(),
+                client_factory or (lambda: HeliClient.from_env(timeout=120)),
+                driver_factory or DockerDriver,
+            )
+
+    threading.Thread(target=loop, name="schedule-ticker", daemon=True).start()
+    TICKER["started_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    log.info("schedule ticker started")
+    return True
+
+
+def ticker_status() -> dict:
+    """Public heartbeat of the ticker: on/off, when it last looked and what it did. No user data."""
+    return {"autorun": autorun_enabled(), **TICKER}
 
 
 def next_after(expression: str, now: datetime) -> datetime:
@@ -155,8 +264,6 @@ def _run_one(session: Session, row: Schedule, client: HeliClient, driver, moment
         pool_start(session, user.id, driver, prefer_local=False, now=moment)
     except BrowserError:
         log.info("schedule browser skipped")
-    row.last_run = moment
-    row.next_run = next_after(row.expression, moment)
     try:
         task = start_task(session, user, row.request_text, {"schedule_id": str(row.id)})
         turn = run_turn(session, user, task, client)
@@ -173,7 +280,25 @@ def _run_one(session: Session, row: Schedule, client: HeliClient, driver, moment
     row.last_error = None
     row.last_result = turn.text
     session.flush()
-    notify(f"{row.label}: {turn.text}")
+    # The result stays in «Расписания» (last_result) and in the task. Telegram goes to the owner's chat, not to
+    # the user, so it is off unless HELI_SCHEDULE_TELEGRAM=1.
+    if os.environ.get("HELI_SCHEDULE_TELEGRAM", "").strip() == "1":
+        notify(f"{row.label}: {turn.text}")
+
+
+def _claim(session: Session, row: Schedule, moment: datetime) -> bool:
+    """Move next_run on only if nobody else did since we read it. False: another server has this run."""
+    claimed = session.execute(
+        update(Schedule)
+        .where(Schedule.id == row.id, Schedule.next_run == row.next_run)
+        .values(next_run=next_after(row.expression, moment), last_run=moment)
+        .execution_options(synchronize_session=False)
+    )
+    if claimed.rowcount != 1:
+        session.expire(row)
+        return False
+    session.refresh(row)
+    return True
 
 
 def _matches(expression: str, local: datetime) -> bool:

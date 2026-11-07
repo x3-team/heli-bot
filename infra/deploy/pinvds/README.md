@@ -41,3 +41,11 @@ chmod 440 /etc/sudoers.d/heli-bot-deploy && visudo -c
 
 The job runs in the GitHub environment `pinvds`: add required reviewers there to make every deploy wait
 for a click.
+
+## Training-stand keys in .env
+
+`deploy-pinvds` → Run workflow has two optional inputs: `amo_sandbox_hosts` → `HELI_AMO_SANDBOX_HOSTS`
+(training amoCRM accounts, `xxx.amocrm.ru`, comma-separated) and `ga4_sandbox_ids` → `HELI_GA4_SANDBOX_IDS`
+(training GA4 Measurement IDs, `G-…`). Empty means «leave as is». `mode=diff` prints the current values;
+`mode=deploy` backs up `.env` to `backups/env-<stamp>` (mode 600), writes only these keys and restores the
+backup on rollback. Nothing else in `.env` is changed, and values in any other format are refused.

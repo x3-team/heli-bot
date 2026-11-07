@@ -63,19 +63,6 @@ def reqres(request: httpx.Request) -> httpx.Response:
     return httpx.Response(404, json={})
 
 
-def cdek_edu(request: httpx.Request) -> httpx.Response:
-    form = parse_qs(request.content.decode())
-    ok = (
-        request.url.path == "/v2/oauth/token"
-        and request.headers.get("content-type", "").startswith("application/x-www-form-urlencoded")
-        and form.get("grant_type") == ["client_credentials"]
-        and form.get("client_id") == ["edu-client-id"]
-    )
-    if not ok:
-        return httpx.Response(400, json={"error": "invalid_request"})
-    return httpx.Response(200, json={"access_token": "edu-access-token", "token_type": "bearer", "expires_in": 3599})
-
-
 def hh(request: httpx.Request) -> httpx.Response:
     """Like api.hh.ru on 06.11: no UA → 403, a browser or generic UA → 400 bad_user_agent, HeliBot/* → vacancies."""
     ua = request.headers.get("user-agent", "")
@@ -159,18 +146,100 @@ def test_reqres_post_runs_without_a_card_and_returns_id_and_created_at(session, 
     assert "browser_open" not in world.calls
 
 
-# --- C2: edu CDEK OAuth token is not a write ------------------------------------------------
+# --- C2: edu CDEK: the server holds the token, the model gets a stub ------------------------
 
 
-def test_cdek_edu_oauth_token_with_a_form_is_not_blocked(session, user) -> None:
-    world = World(session, user, cdek_edu)
-    form = {"grant_type": "client_credentials", "client_id": "edu-client-id", "client_secret": "edu-client-secret"}
+EDU_TOKEN = "edu-access-token-REAL-0001"
+
+
+def cdek_edu_server(request: httpx.Request) -> httpx.Response:
+    """api.edu.cdek.ru: a token for the server's own client, orders only with that Bearer token."""
+    if request.url.path == "/v2/oauth/token":
+        form = parse_qs(request.content.decode())
+        if form.get("grant_type") == ["client_credentials"] and form.get("client_id") == ["server-edu-id"]:
+            return httpx.Response(200, json={"access_token": EDU_TOKEN, "token_type": "bearer", "expires_in": 3599})
+        return httpx.Response(401, json={"error": "invalid_client"})
+    if request.headers.get("authorization") != f"Bearer {EDU_TOKEN}":
+        return httpx.Response(401, json={"errors": [{"code": "v2_token_expired"}]})
+    if request.method == "POST" and request.url.path == "/v2/orders":
+        return httpx.Response(202, json={"entity": {"uuid": "72753031-0000-4000-8000-000000000001"},
+                                         "echo": request.headers.get("authorization")})
+    return httpx.Response(404, json={})
+
+
+@pytest.fixture
+def cdek_env(monkeypatch):
+    from app.agent import cdek_edu
+
+    monkeypatch.setenv("HELI_CDEK_EDU_CLIENT_ID", "server-edu-id")
+    monkeypatch.setenv("HELI_CDEK_EDU_CLIENT_SECRET", "server-edu-secret")
+    cdek_edu.reset_cache()
+    yield
+    cdek_edu.reset_cache()
+
+
+def test_cdek_edu_token_request_gets_a_stub_not_the_token(session, user, cdek_env) -> None:
+    world = World(session, user, cdek_edu_server)
+    form = {"grant_type": "client_credentials", "client_id": "model-guess", "client_secret": "model-guess"}
     world.run([("http_request", {"method": "POST", "url": "https://api.edu.cdek.ru/v2/oauth/token", "form": form})])
-    assert world.cards == [] and world.sent == ["POST https://api.edu.cdek.ru/v2/oauth/token"]
+    assert world.cards == []
     result = world.results[0]
-    assert result.error is None and "edu-access-token" in result.content
+    assert result.error is None
     assert result.content.startswith("HTTP 200 (получение токена, данные не меняются)")
-    assert "боев" not in result.content
+    assert EDU_TOKEN not in result.content and "{{secret:api.edu.cdek.ru}}" in result.content
+    # Only the server's own token request went out, with the server's client, not the model's guess.
+    assert world.sent == ["POST https://api.edu.cdek.ru/v2/oauth/token"]
+    assert parse_qs(world.requests[0].content.decode())["client_id"] == ["server-edu-id"]
+
+
+def test_cdek_edu_placeholder_becomes_the_server_token_and_is_redacted(session, user, cdek_env) -> None:
+    world = World(session, user, cdek_edu_server)
+    order = {"method": "POST", "url": "https://api.edu.cdek.ru/v2/orders", "json": {"tariff_code": 136},
+             "headers": {"Authorization": "Bearer {{secret:api.edu.cdek.ru}}"}}
+    world.run([("http_request", order)], [("http_request", order)])
+    assert world.cards == []
+    assert world.sent == ["POST https://api.edu.cdek.ru/v2/oauth/token", "POST https://api.edu.cdek.ru/v2/orders",
+                          "POST https://api.edu.cdek.ru/v2/orders"]  # the token is cached: one token request
+    for result in world.results:
+        assert result.error is None and result.content.startswith("HTTP 202 (песочница или учебный API)")
+        assert EDU_TOKEN not in result.content and "72753031" in result.content
+
+
+def test_cdek_edu_token_is_never_sent_to_another_host(session, user, cdek_env) -> None:
+    world = World(session, user, cdek_edu_server)
+    world.run([("http_request", {"method": "GET", "url": "https://httpbin.org/anything",
+                                  "headers": {"Authorization": "Bearer {{secret:api.edu.cdek.ru}}"}})])
+    assert world.results[0].error == "secret_wrong_site"
+    assert all(EDU_TOKEN not in str(r.headers) for r in world.requests)
+    assert not any(r.url.host == "httpbin.org" for r in world.requests)
+
+
+def test_cdek_edu_server_token_refused_is_an_honest_error(session, user, monkeypatch) -> None:
+    from app.agent import cdek_edu
+
+    monkeypatch.setenv("HELI_CDEK_EDU_CLIENT_ID", "revoked-id")
+    monkeypatch.setenv("HELI_CDEK_EDU_CLIENT_SECRET", "revoked-secret")
+    cdek_edu.reset_cache()
+    world = World(session, user, cdek_edu_server)
+    world.run([("http_request", {"method": "POST", "url": "https://api.edu.cdek.ru/v2/oauth/token",
+                                  "form": {"grant_type": "client_credentials"}})])
+    assert world.results[0].error == cdek_edu.UNAVAILABLE_CODE and "не выдумывай" in world.results[0].content
+    cdek_edu.reset_cache()
+
+
+def test_cdek_edu_defaults_to_the_public_test_account(monkeypatch) -> None:
+    from app.agent import cdek_edu
+
+    monkeypatch.delenv("HELI_CDEK_EDU_CLIENT_ID", raising=False)
+    monkeypatch.delenv("HELI_CDEK_EDU_CLIENT_SECRET", raising=False)
+    assert cdek_edu.credentials() == (cdek_edu.PUBLIC_CLIENT_ID, cdek_edu.PUBLIC_CLIENT_SECRET)
+
+
+def test_live_cdek_token_request_is_not_stubbed() -> None:
+    from app.agent import cdek_edu
+
+    assert not cdek_edu.is_token_call({"method": "POST", "url": "https://api.cdek.ru/v2/oauth/token"})
+    assert cdek_edu.is_token_call({"method": "POST", "url": "https://api.edu.cdek.ru/v2/oauth/token/"})
 
 
 @pytest.mark.parametrize(
