@@ -64,7 +64,7 @@ Ubuntu 20.04, 2 CPU / 8 GB, 880 ₽ в месяц. На этом же хосте
 | Путь | Что | В git? |
 |---|---|---|
 | `/opt/heli-bot/server` | Код сервера. Изначально скопирован вручную, это **не git checkout**; обновляется только через `deploy-pinvds` | Копия `server/` из git |
-| `/opt/heli-bot/server/REVISION` | SHA и время сборки, которую выложил `deploy-pinvds` (07.11: `6db59e6…`, main) | Создаётся при деплое |
+| `/opt/heli-bot/server/REVISION` | SHA и время сборки, которую выложил `deploy-pinvds` (видно в `GET /health` → `revision`; 07.11 сверено: прод = main `89d2263`) | Создаётся при деплое |
 | `/opt/heli-bot/.env` | Секреты и настройки (`HELI_BASE_URL=https://getheli.ru/v1`, модель `heli-fast` и др.) | **Нет**, никогда |
 | `/opt/heli-bot/server/var` | Рабочие данные при запуске из `server/`: SQLite по умолчанию (`sqlite:///./var/heli.db`), профили облачного браузера (`var/browser-profiles`), файлы моста (`var/files`) | **Нет**, никогда |
 | `/opt/heli-bot/var` | Рабочие данные по старой схеме (`var/heli.db`); `deploy.sh` делает его копию в бэкап, если файл есть | **Нет**, никогда |
@@ -75,7 +75,7 @@ Ubuntu 20.04, 2 CPU / 8 GB, 880 ₽ в месяц. На этом же хосте
 
 `deploy.sh` никогда не синхронизирует и не удаляет `server/var`, `var`, `.env`, `backups` и venv. Деплой только вручную: Actions → deploy-pinvds, сначала `mode = diff`, потом `deploy`, и только после согласия Vitalii.
 
-Известные расхождения прода с git (аудит 07.11): `infra/deploy/ensure-open-access-in-env.sh` и `infra/deploy/env.venv.example` на хосте старые и всё ещё предлагают `HELI_OPEN_ACCESS=1`. Исправляется отдельным PR (пункт 6 плана), не руками на сервере.
+Известные расхождения прода с git (аудит 07.11): `infra/deploy/ensure-open-access-in-env.sh` и `infra/deploy/env.venv.example` на хосте старые и всё ещё предлагают `HELI_OPEN_ACCESS=1`. Исправлено пунктом 6 плана: `deploy` обновляет `/opt/heli-bot/infra/deploy` из релиза (без удаления), `diff` показывает расхождения и скрипт `issue-cert` с маскировкой.
 
 ### Сайт: `/opt/heli` (только для справки, владелец — helicopter)
 
