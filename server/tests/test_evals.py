@@ -12,13 +12,13 @@ from evals.world import DANGEROUS, TOOL_NAMES, TOOLS, World
 SCENARIOS = load_scenarios()
 # dx/mt: в мире нет токена Яндекса; ms-w4: боевой аккаунт МоегоСклада, запись отклонена;
 # learn: запись на бой без подтверждения, 401; amo-10: нет токена amoCRM.
-EXPECTED_TOOL_ERRORS = {"inn-04", "dx-01", "dx-02", "dx-03", "mt-01", "ms-w4", "learn-04", "learn-05", "amo-10"}
+EXPECTED_TOOL_ERRORS = {"inn-04", "dx-01", "dx-02", "dx-03", "dx-04", "mt-01", "ms-w4", "learn-04", "learn-05", "amo-10"}
 
 
 def test_scenario_set_shape() -> None:
     ids = [s["id"] for s in SCENARIOS]
     assert len(ids) == len(set(ids))
-    assert 20 <= len(ids) <= 80
+    assert 20 <= len(ids) <= 100
     by_cat: dict[str, int] = {}
     for s in SCENARIOS:
         by_cat[s["category"]] = by_cat.get(s["category"], 0) + 1
@@ -401,7 +401,7 @@ def test_world_yandex_without_token_answers_like_prod() -> None:
     assert "captcha" in world.call("browser_open", {"url": "https://direct.yandex.ru/"})["error"]
 
 
-@pytest.mark.parametrize("sid", ["dx-01", "dx-02", "dx-03", "mt-01"])
+@pytest.mark.parametrize("sid", ["dx-01", "dx-02", "dx-03", "dx-04", "mt-01"])
 @pytest.mark.parametrize("url", ["https://direct.yandex.ru/", "https://metrika.yandex.ru/", "https://getheli.ru/login"])
 def test_opening_the_cabinet_without_token_fails(sid: str, url: str) -> None:
     """dx-12, 06.11.2026: после «нет токена» модель открыла кабинет и встала на капче. Так нельзя."""
@@ -416,7 +416,7 @@ def test_opening_the_cabinet_without_token_fails(sid: str, url: str) -> None:
     assert not run_scenario(scenario, goes_to_ui).success
 
 
-@pytest.mark.parametrize("sid", ["dx-01", "dx-02", "dx-03", "mt-01"])
+@pytest.mark.parametrize("sid", ["dx-01", "dx-02", "dx-03", "dx-04", "mt-01"])
 def test_answer_sending_user_to_the_cabinet_fails(sid: str) -> None:
     bad = copy.deepcopy(_scenario(sid))
     bad["golden"]["answer"] += " Пока токена нет, откройте кабинет https://direct.yandex.ru на экране."
@@ -429,3 +429,53 @@ def test_live_write_without_token_fails_dx_03() -> None:
                                                                    "params": {"SelectionCriteria": {"Ids": [1]}}}})
     assert not run_scenario(bad, golden_agent(bad)).success
 
+
+
+def _greets_first(answer_after):
+    """dx-api-01 / ja-web-01, 07.11.2026: the model answers «Чем могу помочь?» to a task and calls nothing."""
+
+    def decide(messages):
+        from app.agent.loop import IDLE_NOTE
+
+        if not any(m.get("content") == IDLE_NOTE for m in messages):
+            return "Здравствуйте! Я Heli, ваш помощник. Чем могу помочь?"
+        return answer_after(messages)
+
+    return decide
+
+
+def _direct_then_blocked(messages):
+    last = messages[-1]
+    if last.get("role") == "tool":
+        return "BLOCKED: нет токена. Сохраните в «Доступах» запись: сайт direct.yandex.ru, логин token, пароль — OAuth-токен."
+    return ("direct_api", {"service": "campaigns", "method": "get", "params": {"SelectionCriteria": {}}})
+
+
+def _search_then_answer(messages):
+    last = messages[-1]
+    if last.get("role") == "tool" and "dostavka-bystro.example/punkty" in str(last.get("content")):
+        if "Островского" in str(last.get("content")) and "21:00" in str(last.get("content")):
+            return "Пункт «Быстро» на ул. Островского работает до 21:00: https://dostavka-bystro.example/punkty"
+        return ("open_url", {"url": "https://dostavka-bystro.example/punkty"})
+    return ("web_search", {"query": "Быстро доставка пункт выдачи Казань"})
+
+
+@pytest.mark.parametrize(("sid", "after"), [("dx-04", _direct_then_blocked), ("as-09", _search_then_answer)])
+def test_greeting_instead_of_the_task_fails_and_the_prod_loop_nudges(sid: str, after) -> None:
+    scenario = _scenario(sid)
+
+    def greets(task, tools, call_tool, budget):
+        return {"final_answer": "Здравствуйте! Чем могу помочь?", "steps": 1, "cost_rub": 0, "stopped": None}
+
+    assert not run_scenario(scenario, greets).success
+    result = run_scenario(scenario, _prod_agent(_greets_first(after)))
+    assert result.success, result.failures + result.violations
+    assert result.calls
+
+
+def test_prod_loop_answers_a_bare_greeting_in_words() -> None:
+    from app.agent import evals as prod
+
+    client = _ScriptedClient(lambda messages: "Здравствуйте! Чем могу помочь?")
+    out = prod.run("Привет!", [], lambda name, args: "", client=client)
+    assert out["final_answer"] == "Здравствуйте! Чем могу помочь?" and client.rounds == 1

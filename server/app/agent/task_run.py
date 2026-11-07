@@ -80,6 +80,9 @@ SYSTEM = (
     "и откуда они. Не отвечай «готово» или «нашёл» без самих данных. Если что-то не удалось, так и скажи. "
     "Не пиши, что сохранил или заполнил, пока не проверил: после сохранения перечитай запись и сверь каждое "
     "поле с задачей; в ответе только подтверждённое на экране. "
+    "Если в сообщении есть задача, сразу берись за неё: не отвечай только приветствием и не спрашивай "
+    "«чем могу помочь?». Если для задачи нужен доступ (токен, вход), вызови инструмент и, если доступа нет, "
+    "ответь «BLOCKED:», чего не хватает и что сохранить в «Доступах». "
     "Не останавливайся на полпути: если задача просит создать, записать или отправить — сделай это "
     "инструментами, а не предлагай пользователю. Не задавай уточняющих вопросов, пока не попробовал "
     "найти данные сам (поиск, почта, CRM, чаты); если запрос не дал результата, переформулируй его. "
@@ -106,7 +109,8 @@ CONFIRM_HINT = (
     "Для записи в боевом кабинете через bitrix24_write, amocrm_write, direct_api или http_request сам не спрашивай: сервер "
     "покажет карточку (где, что изменится, бюджет) и выполнит только после «да». Песочницы и публичные учебные "
     "API (api.edu.cdek.ru, reqres.in, petstore.swagger.io, httpbin.org и т.п.) и POST за OAuth-токеном — не "
-    "боевой кабинет: вызывай http_request сразу и показывай ответ API как есть."
+    "боевой кабинет: вызывай http_request сразу и показывай ответ API как есть. Справочные запросы (DaData: "
+    "компания по ИНН, адрес, банк; проверки ФНС) ничего не меняют: подтверждение для них не нужно."
 )
 ANSWER_MAX_TOKENS = 1500
 # Earlier turns of the chat thread (task.context["history"]); the oldest are dropped first.
@@ -572,6 +576,15 @@ def execute_task(
             public["screenshot"] = True
         publish(public)
 
+    def prepare_args(name: str, args: dict) -> dict:
+        if name == "bitrix24_write" and executor_for(name) is not None:
+            from app.agent.bitrix import fill_portal
+
+            return fill_portal(session, user, args)
+        return args
+
+    from app.auth import is_training_account
+
     control.on_pause = lambda reason, details: publish({"type": "paused", "reason": reason, **details})
     control.on_resume = lambda: publish({"type": "resumed"})
 
@@ -587,10 +600,13 @@ def execute_task(
             estimate_rub=estimate_rub if estimate_rub is not None else estimate_turn_reserve(task.request_text),
             autopause=autopause,
             study_first=knowledge_on and needs_study(task.request_text, complexity, _guide(task.request_text, None), notes),
+            request=task.request_text,
         ),
         control=control,
         on_event=on_event,
         start_cost=classified.cost_rub,
+        training=is_training_account(user),
+        prepare_args=prepare_args,
     )
     save_checkpoint(task, outcome, state["url"])
     session.commit()

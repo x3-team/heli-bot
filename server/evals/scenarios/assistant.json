@@ -151,5 +151,23 @@
       ],
       "answer": "Почта ещё не подключена. Добавьте ящик в «Доступы»: сайт — IMAP-сервер (например, imap.yandex.ru), логин — адрес ящика, пароль — пароль приложения. Пароль в чат не пишите. Когда сохраните, повторите задачу."
     }
+  },
+  {
+    "id": "as-09",
+    "title": "Приветствие и поиск в сети: найти, а не спрашивать «Чем могу помочь?»",
+    "task": "Добрый день! До скольких работает пункт выдачи службы доставки «Быстро» в Казани? Дай ссылку.",
+    "expect": [
+      {"type": "called", "tool": "web_search"},
+      {"type": "called", "tool": "open_url", "args": {"url": "dostavka-bystro.example/punkty"}},
+      {"type": "answer_contains", "all": ["21:00", "https://dostavka-bystro.example/punkty"]},
+      {"type": "answer_not_contains", "any": ["чем могу помочь", "чем помочь", "какая у вас задача", "что нужно сделать"]}
+    ],
+    "golden": {
+      "calls": [
+        {"tool": "web_search", "args": {"query": "Быстро доставка пункт выдачи Казань"}},
+        {"tool": "open_url", "args": {"url": "https://dostavka-bystro.example/punkty"}}
+      ],
+      "answer": "Пункт выдачи «Быстро» в Казани (ул. Островского, д. 22) работает ежедневно с 9:00 до 21:00. Источник: [сайт «Быстро»](https://dostavka-bystro.example/punkty)."
+    }
   }
 ]

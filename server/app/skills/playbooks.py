@@ -104,7 +104,8 @@ _BITRIX_GUIDE = """\
 - Наблюдателей и соисполнителей добавляй через «Ещё» в форме задачи.
 
 REST прежде экрана
-- Если в «Доступах» есть вебхук портала (find_credential об этом скажет), любую задачу Битрикс24 делай через REST, без входа на экране: bitrix24_read читает (crm.deal.list с filter и select, tasks.task.list, user.get, user.search), bitrix24_write создаёт и меняет — только на учебном портале (crm.deal.add / update, crm.lead.add, crm.contact.add, crm.company.add, tasks.task.add / update / complete, task.commentitem.add, crm.timeline.comment.add; стадия — crm.deal.update с fields.STAGE_ID, коды стадий — crm.status.list с filter ENTITY_ID=DEAL_STAGE).
+- Если в «Доступах» есть вебхук портала (find_credential об этом скажет), любую задачу Битрикс24 делай через REST, без входа на экране: bitrix24_read читает (crm.deal.list с filter и select, tasks.task.list, user.get, user.search), bitrix24_write создаёт и меняет — только на учебном портале (crm.deal.add / update, crm.lead.add, crm.contact.add, crm.company.add, tasks.task.add / update / complete, task.commentitem.add, crm.timeline.comment.add; стадия — crm.deal.update с params.id и fields.STAGE_ID).
+- Стадии у каждой воронки свои. Сначала crm.deal.get по ID сделки: CATEGORY_ID — её воронка. Коды стадий: crm.status.list с filter ENTITY_ID=DEAL_STAGE для воронки 0 и ENTITY_ID=DEAL_STAGE_<CATEGORY_ID> для остальных (коды вида C3:PREPARATION). Код из чужой воронки Битрикс24 молча не применит. В STAGE_ID можно передать и название стадии: сервер сам найдёт код в воронке сделки, перечитает сделку и скажет, сменилась ли стадия.
 - Ответственного по имени находи через user.get / user.search (ID), потом ставь RESPONSIBLE_ID / ASSIGNED_BY_ID. Срок задачи — DEADLINE в формате 2026-11-04T18:00:00+03:00.
 - После записи проверь её через bitrix24_read (crm.deal.get, tasks.task.get по ID из ответа) и сверь поля с задачей.
 - На боевом портале клиента bitrix24_write откажет: там создавай и меняй на экране, а проверяй через bitrix24_read.
@@ -113,7 +114,7 @@ REST прежде экрана
 
 Опасно, сначала спроси пользователя
 - Письмо, SMS, сообщение в WhatsApp или Telegram клиенту из ленты.
-- Перевод сделки в «Сделка успешна» или «Провалена»: срабатывают роботы и бизнес-процессы.
+- Перевод сделки в «Сделка успешна» или «Провалена» на боевом портале: срабатывают роботы и бизнес-процессы (bitrix24_write сам покажет карточку). На учебном портале переводи сразу.
 - Групповые действия в списке, удаление, смена ответственного у многих записей.
 - Изменение настроек CRM, воронок, прав доступа."""
 
