@@ -9,7 +9,7 @@
 #                                (code from the tarball, data from the running copy; nothing changes)
 #
 # Training-stand and admin settings (optional, from the workflow inputs): SET_HELI_AMO_SANDBOX_HOSTS,
-# SET_HELI_GA4_SANDBOX_IDS and SET_HELI_ADMIN_EMAILS in the environment write those keys into .env on deploy (the .env is backed
+# SET_HELI_GA4_SANDBOX_IDS, SET_HELI_ADMIN_EMAILS and SET_HELI_DOCS_CRAWL in the environment write those keys into .env on deploy (the .env is backed
 # up first and restored on rollback). Only these keys, only strict formats; nothing else in .env changes.
 #
 # Touches only /opt/heli-bot and the heli-bot-api unit. getheli.ru (/opt/heli), nginx and certificates
@@ -84,12 +84,13 @@ stop_orphans() {
 }
 
 # Training-stand keys this script may write into .env, with the only format each accepts.
-TRAINING_KEYS=(HELI_AMO_SANDBOX_HOSTS HELI_GA4_SANDBOX_IDS HELI_ADMIN_EMAILS)
+TRAINING_KEYS=(HELI_AMO_SANDBOX_HOSTS HELI_GA4_SANDBOX_IDS HELI_ADMIN_EMAILS HELI_DOCS_CRAWL)
 training_format() {
   case "$1" in
     HELI_AMO_SANDBOX_HOSTS) echo '^[a-z0-9-]+\.(amocrm\.(ru|com)|kommo\.com)(,[a-z0-9-]+\.(amocrm\.(ru|com)|kommo\.com))*$' ;;
     HELI_GA4_SANDBOX_IDS) echo '^G-[A-Z0-9]{4,16}(,G-[A-Z0-9]{4,16})*$' ;;
     HELI_ADMIN_EMAILS) echo '^[a-z0-9._+-]+@[a-z0-9-]+(\.[a-z0-9-]+)+(,[a-z0-9._+-]+@[a-z0-9-]+(\.[a-z0-9-]+)+)*$' ;;
+    HELI_DOCS_CRAWL) echo '^[01]$' ;;
   esac
 }
 training_requested() {

@@ -20,6 +20,8 @@ API as an admin. Prints counts only: no task texts, emails, ids or tokens. Nothi
 
 Input `admin_emails` (with `mode = deploy`): writes `HELI_ADMIN_EMAILS` into `.env` (replaces the list; `.env` is backed up first). A listed address signs up in the app with a password and no invite, and gets admin rights (`/v1/admin/*`).
 
+Input `docs_crawl` (with `mode = deploy`): `1` writes `HELI_DOCS_CRAWL=1`, the API then indexes the official docs sites (`OFFICIAL_SOURCES`) two minutes after start and once a day (robots.txt, 1 request/s per site, 100 pages per site per run); `0` turns it off. Empty leaves `.env` as is.
+
 `.env`, `var/` (database, browser profiles, files) and the venv are kept as they are.
 
 ## Which build is on prod
