@@ -1,0 +1,57 @@
+name: branch-cleanup
+
+# Removes old branches listed in docs/branch-cleanup.txt (built from docs/branch-inventory.md).
+# Manual only. mode=dry-run prints what would happen and changes nothing.
+#   archive: tag archive/<branch> on the listed head, check the tag, then delete the branch
+#   delete:  delete the branch (its content is already in main)
+# A branch whose head is not the listed SHA is skipped, so new work on it is never lost.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "dry-run = only show, apply = tag and delete"
+        type: choice
+        options: [dry-run, apply]
+        default: dry-run
+
+permissions:
+  contents: write
+
+concurrency:
+  group: branch-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Clean up
+        env:
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          git fetch -q origin '+refs/heads/*:refs/remotes/origin/*'
+          done=0; skipped=0; tagged=0
+          while read -r -u 3 branch sha action; do
+            case "$branch" in ''|'#'*) continue ;; esac
+            case "$branch" in main|master) echo "refuse: $branch"; exit 1 ;; esac
+            now="$(git ls-remote origin "refs/heads/$branch" | cut -f1)"
+            if [ -z "$now" ]; then echo "gone     $branch"; continue; fi
+            if [ "$now" != "$sha" ]; then echo "SKIP     $branch moved to $now (listed $sha)"; skipped=$((skipped+1)); continue; fi
+            if [ "$action" = archive ]; then
+              if [ "$MODE" = apply ]; then
+                git push -q origin "$sha:refs/tags/archive/$branch"
+                tag="$(git ls-remote origin "refs/tags/archive/$branch" | cut -f1)"
+                if [ "$tag" != "$sha" ]; then echo "SKIP     $branch: tag check failed ($tag)"; skipped=$((skipped+1)); continue; fi
+              fi
+              echo "archive  $branch -> tag archive/$branch at ${sha:0:7}"; tagged=$((tagged+1))
+            elif [ "$action" != delete ]; then
+              echo "unknown action $action for $branch"; exit 1
+            fi
+            if [ "$MODE" = apply ]; then git push -q origin --delete "$branch"; fi
+            echo "delete   $branch (${sha:0:7})"; done=$((done+1))
+          done 3< docs/branch-cleanup.txt
+          echo "mode=$MODE: delete $done, of them tagged first $tagged, skipped $skipped"
