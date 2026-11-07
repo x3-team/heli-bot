@@ -40,6 +40,8 @@ class Budget:
     extend_steps: int = 0
     # Unfamiliar service or topic: study it (knowledge base, official help) before acting or answering.
     study_first: bool = False
+    # The user's own words (without memory and knowledge notes): a bare «привет» may be answered in words.
+    request: str | None = None
 
 
 @dataclass
@@ -169,6 +171,62 @@ UNVERIFIED_NOTE = (
     "⚠️ Не сверено с официальной документацией: я не нашёл и не открыл источник, проверьте факты ниже.\n\n"
 )
 _EMPTY_KNOWLEDGE = ("ничего нет", '"notes": []')
+
+
+# «Чем могу помочь?» on a real task (dx-api-01, ja-web-01, 07.11.2026): the model greeted and called nothing.
+# An answer with no tool call that is only a greeting or an offer of help gets one nudge to do the task.
+IDLE_NOTE = (
+    "Ты ответил приветствием, но в сообщении пользователя уже есть задача — не спрашивай, чем помочь. "
+    "Выполни её сейчас инструментами. Если для неё нужен доступ (токен, вход), всё равно вызови нужный "
+    "инструмент: если он ответит, что доступа нет, напиши «BLOCKED:», чего не хватает и что сохранить в "
+    "«Доступах». Если задача не требует инструментов, просто ответь на неё по существу."
+)
+_GREETING = re.compile(
+    r"(?<![\w])(?:привет\w*|здравствуй\w*|здрасьте|добр(?:ый|ое|ого)\s+(?:день|утр\w*|вечер\w*|дня|времени\w*)|"
+    r"доброго\s+времени\s+суток|хай|салют|hello|hi|hey|good\s+(?:morning|afternoon|evening))(?![\w])",
+    re.I,
+)
+_HELP_OFFER = re.compile(
+    r"(?:чем|с\s+чем|как)\s+(?:я\s+)?(?:\w+\s+)?(?:могу|можем|мне|могли\s+бы)?\s*(?:вам\s+|тебе\s+)?помочь\w*|"
+    r"чем\s+(?:вам\s+|тебе\s+)?(?:могу\s+)?(?:быть\s+)?полезен\w*|"
+    r"(?:какая|какой|что)\s+(?:у\s+вас\s+|у\s+тебя\s+)?(?:задача|вопрос)\w*|"
+    r"что\s+(?:нужно|надо|требуется)\s+(?:сделать|выполнить)|"
+    r"(?:я\s+)?(?:Heli|Хели)[,\s]+(?:ваш\s+|твой\s+)?(?:универсальн\w+\s+)?помощник\w*|"
+    r"готов\w*\s+(?:помочь|к\s+работе|приступить)|"
+    r"how\s+can\s+i\s+help(?:\s+you)?(?:\s+today)?",
+    re.I,
+)
+# Small talk the user may get a greeting for: «привет», «как дела?», «кто ты?», «спасибо».
+_SMALL_TALK = re.compile(
+    r"^(?:как\s+(?:дела|ты|жизнь|поживаешь)|кто\s+ты|что\s+(?:ты\s+)?умеешь|ты\s+тут|ты\s+здесь|"
+    r"спасибо|благодарю|ок|окей|ok|понял\w*|ясно|пока|до\s+свидания|тест|test|проверка)$",
+    re.I,
+)
+
+
+def _letters(text: str) -> str:
+    return re.sub(r"[^\w]+", " ", text).strip()
+
+
+def is_small_talk(request: str) -> bool:
+    """A greeting or small talk with no task in it: words are the right answer."""
+    rest = _letters(_GREETING.sub(" ", request or ""))
+    rest = re.sub(r"\s+", " ", re.sub(r"(?<![\w])(?:heli|хели)(?![\w])", " ", rest, flags=re.I)).strip()
+    if len(rest) < 3 or _SMALL_TALK.match(rest):
+        return True
+    return len(rest) < 40 and bool(re.search(r"спасиб|благодар|thank", rest, re.I))
+
+
+def is_idle_answer(text: str) -> bool:
+    """Only a greeting and «чем могу помочь?»: no data, no result, no question about the task itself."""
+    if not text or len(text) > 400 or not _HELP_OFFER.search(text):
+        return False
+    if re.search(r"\d|https?://|BLOCKED|не\s+удалось|нет\s+доступа|нет\s+токена", text, re.I):
+        return False  # numbers, a link or an honest «can't» are an answer, not a greeting
+    if re.search(r"(?<![\w])(?:ещё|еще|anything\s+else)(?![\w])", text, re.I):
+        return False  # «чем ещё помочь?» closes an answer that was given
+    rest = _letters(_HELP_OFFER.sub(" ", _GREETING.sub(" ", text)))
+    return len(rest) < 80
 
 
 def studied_by(name: str, result: ToolResult) -> bool:
@@ -371,6 +429,13 @@ def run_agent(
     unsaved_nudged = False
     studied = not budget.study_first
     study_nudges = 0
+    idle_nudged = False
+    request = budget.request
+    if request is None:
+        request = next(
+            (str(m.get("content")) for m in reversed(messages) if m.get("role") == "user" and isinstance(m.get("content"), str)),
+            "",
+        )
 
     def safe_args(name: str, args: dict) -> dict:
         """Arguments as they go to the step stream and the trajectory: no passwords, no internals."""
@@ -489,6 +554,13 @@ def run_agent(
                     messages.append({"role": "user", "content": BROKEN_NOTE})
                 continue
             if not completion.tool_calls:
+                if not idle_nudged and calls_used == 0 and is_idle_answer(text) and not is_small_talk(request):
+                    # A task, and the model only said hello: once, ask it to do the task (or say BLOCKED).
+                    idle_nudged = True
+                    messages.append({"role": "assistant", "content": text or "…"})
+                    messages.append({"role": "user", "content": IDLE_NOTE})
+                    emit({"type": "step", "kind": "idle_nudge"})
+                    continue
                 if not studied and study_nudges < STUDY_MAX_NUDGES:
                     study_nudges += 1
                     messages.append({"role": "assistant", "content": text or "…"})

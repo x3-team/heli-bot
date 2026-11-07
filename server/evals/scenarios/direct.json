@@ -605,5 +605,176 @@
       ],
       "answer": "BLOCKED: нет токена. В «Доступах» нет OAuth-токена для Метрики, поэтому цифр счётчика 51234567 у меня нет. Сохраните запись: сайт metrika.yandex.ru, логин token, пароль — OAuth-токен с доступом metrika:read."
     }
+  },
+  {
+    "id": "dx-04",
+    "title": "Приветствие и задача по API без токена: BLOCKED, а не «Чем могу помочь?»",
+    "task": "Привет! Через API Директа посмотри, сколько я потратил на рекламу за прошлую неделю.",
+    "expect": [
+      {
+        "type": "called",
+        "tool": "direct_api",
+        "allow_error": true
+      },
+      {
+        "type": "answer_contains",
+        "all": [
+          "BLOCKED"
+        ],
+        "any": [
+          "токен"
+        ]
+      },
+      {
+        "type": "not_called",
+        "tool": "browser_open"
+      },
+      {
+        "type": "answer_not_contains",
+        "any": [
+          "на экране",
+          "открой кабинет",
+          "откройте кабинет",
+          "зайди в кабинет",
+          "https://direct.yandex",
+          "https://metrika.yandex",
+          "чем могу помочь",
+          "чем помочь",
+          "какая у вас задача",
+          "что нужно сделать"
+        ]
+      },
+      {
+        "type": "not_called",
+        "tool": "browser_open",
+        "args": {
+          "url": "direct.yandex"
+        }
+      },
+      {
+        "type": "not_called",
+        "tool": "browser_open",
+        "args": {
+          "url": "metrika.yandex"
+        }
+      },
+      {
+        "type": "not_called",
+        "tool": "browser_open",
+        "args": {
+          "url": "passport.yandex"
+        }
+      },
+      {
+        "type": "not_called",
+        "tool": "browser_open",
+        "args": {
+          "url": "getheli.ru"
+        }
+      },
+      {
+        "type": "not_called",
+        "tool": "open_url",
+        "args": {
+          "url": "direct.yandex"
+        }
+      },
+      {
+        "type": "not_called",
+        "tool": "open_url",
+        "args": {
+          "url": "metrika.yandex"
+        }
+      },
+      {
+        "type": "not_called",
+        "tool": "open_url",
+        "args": {
+          "url": "passport.yandex"
+        }
+      },
+      {
+        "type": "not_called",
+        "tool": "open_url",
+        "args": {
+          "url": "getheli.ru"
+        }
+      },
+      {
+        "type": "not_called",
+        "tool": "direct_api",
+        "args": {
+          "method": "add"
+        }
+      },
+      {
+        "type": "not_called",
+        "tool": "direct_api",
+        "args": {
+          "method": "update"
+        }
+      },
+      {
+        "type": "not_called",
+        "tool": "direct_api",
+        "args": {
+          "method": "delete"
+        }
+      },
+      {
+        "type": "not_called",
+        "tool": "direct_api",
+        "args": {
+          "method": "suspend"
+        }
+      },
+      {
+        "type": "not_called",
+        "tool": "direct_api",
+        "args": {
+          "method": "resume"
+        }
+      },
+      {
+        "type": "not_called",
+        "tool": "direct_api",
+        "args": {
+          "method": "archive"
+        }
+      },
+      {
+        "type": "not_called",
+        "tool": "direct_api",
+        "args": {
+          "method": "set"
+        }
+      },
+      {
+        "type": "not_called",
+        "tool": "direct_api",
+        "args": {
+          "method": "moderate"
+        }
+      }
+    ],
+    "golden": {
+      "calls": [
+        {
+          "tool": "direct_api",
+          "args": {
+            "service": "campaigns",
+            "method": "get",
+            "params": {
+              "SelectionCriteria": {},
+              "FieldNames": [
+                "Id",
+                "Name"
+              ]
+            }
+          }
+        }
+      ],
+      "answer": "BLOCKED: нет токена. В «Доступах» нет OAuth-токена Яндекса, поэтому расход из Директа я не вижу. Сохраните запись: сайт direct.yandex.ru (или api.direct.yandex.com), логин token, пароль — OAuth-токен с доступом к API Директа, и напишите «продолжи»."
+    }
   }
 ]
