@@ -8,6 +8,7 @@ import {
   rub,
   saveBillingSettings,
   tasksLeftLabel,
+  topupShort,
   type Billing,
   type PlanOffer,
   type WalletOperation,
@@ -38,6 +39,7 @@ function currentLine(billing: Billing): string {
   const { plan } = billing;
   const until = dayLabel(plan.periodEndsAt);
   if (plan.status === "none") return "Тестовый доступ: лимиты как раньше, оплата не нужна.";
+  if (plan.status === "unpaid") return "Выберите тариф, чтобы ставить задачи.";
   if (plan.status === "trial") return `Бесплатно до ${until}. Потом можно выбрать тариф.`;
   if (plan.status === "expired") return `Тариф закончился ${until}. Новые задачи ждут продления.`;
   const price = plan.priceRub !== null ? `${rub(plan.priceRub)} в месяц · ` : "";
@@ -62,7 +64,10 @@ export function PlanPage({
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ text: string; short?: number } | null>(null);
   const { plan, usage } = billing;
-  const hasPlan = plan.status !== "none";
+  const hasPlan = plan.status !== "none" && plan.status !== "unpaid";
+  const unpaid = plan.status === "unpaid";
+  const cheapest = billing.plans.reduce<PlanOffer | null>((low, offer) => (!low || offer.priceRub < low.priceRub ? offer : low), null);
+  const startShort = cheapest ? topupShort(billing, cheapest.priceRub) : 0;
 
   async function buy(offer: PlanOffer) {
     setBusy(true);
@@ -84,8 +89,42 @@ export function PlanPage({
     <div className="page billing">
       <PageHead
         title="Тариф"
-        lede="Лимит считается в процентах: видно, сколько осталось на сегодня и на месяц. На 100% новые задачи ждут нового дня или идут за счёт кошелька, если вы это разрешили."
+        lede={
+          unpaid
+            ? "Доступ к Heli bot платный с первого дня. Выберите тариф: лимит на день и на месяц будет виден здесь в процентах."
+            : "Лимит считается в процентах: видно, сколько осталось на сегодня и на месяц. На 100% новые задачи ждут нового дня или идут за счёт кошелька, если вы это разрешили."
+        }
       />
+      {unpaid ? (
+        <section className="bill-card dark glow bill-start" aria-labelledby="bill-start-title">
+          <span className="bill-label">Первый шаг</span>
+          <strong id="bill-start-title" className="bill-big">
+            Выберите тариф
+          </strong>
+          <span className="bill-sub">
+            Тариф оплачивается из кошелька Heli bot. Пополните кошелёк и подключите тариф ниже: задачи откроются сразу.
+          </span>
+          <ol className="bill-steps">
+            <li data-done={startShort === 0 || undefined}>
+              <span>Пополнить кошелёк</span>
+              <b>{rub(billing.walletRub)}</b>
+            </li>
+            <li>
+              <span>Подключить тариф</span>
+              <b>{cheapest ? `от ${rub(cheapest.priceRub)}` : ""}</b>
+            </li>
+          </ol>
+          <div className="bill-actions">
+            {startShort > 0 ? (
+              <button type="button" data-emphasis="go" onClick={() => onWallet(startShort)}>
+                Пополнить кошелёк
+              </button>
+            ) : (
+              <span className="bill-sub">На кошельке хватает на «{cheapest?.title}». Выберите тариф ниже.</span>
+            )}
+          </div>
+        </section>
+      ) : (
       <div className="billing-top">
         <section className="bill-card dark">
           <span className="bill-label">Ваш тариф</span>
@@ -111,6 +150,7 @@ export function PlanPage({
           <span className="bill-sub">{usage.inOverage ? "Лимит месяца закончился, задачи идут за счёт кошелька" : tasksLeftLabel(usage.tasksLeftMonth, "в этом месяце")}</span>
         </section>
       </div>
+      )}
       {note ? (
         <div className={`bill-note${note.short !== undefined ? " warn" : ""}`} role="status">
           <span>{note.text}</span>
@@ -148,11 +188,11 @@ export function PlanPage({
                 <button
                   type="button"
                   className="plan-cta"
-                  data-emphasis={offer.id === "pro" ? "go" : undefined}
+                  data-emphasis={offer.id === "business" ? "go" : undefined}
                   disabled={busy}
                   onClick={() => setConfirm(offer)}
                 >
-                  {plan.id === offer.id ? `Продлить «${offer.title}»` : `Перейти на «${offer.title}»`}
+                  {!hasPlan ? `Подключить «${offer.title}»` : plan.id === offer.id ? `Продлить «${offer.title}»` : `Перейти на «${offer.title}»`}
                 </button>
               )}
             </article>
@@ -160,7 +200,7 @@ export function PlanPage({
         })}
       </div>
       <p className="muted small">
-        Тариф оплачивается из кошелька Heli bot. При смене тарифа неиспользованные дни старого возвращаются в кошелёк. Пробная неделя бесплатна.
+        Тариф оплачивается из кошелька Heli bot. При смене тарифа неиспользованные дни старого возвращаются в кошелёк. Автопродление можно выключить в кошельке.
       </p>
       {confirm ? (
         <Dialog title={`Тариф «${confirm.title}»`} onClose={() => setConfirm(null)}>
@@ -172,13 +212,30 @@ export function PlanPage({
             <span>На кошельке</span>
             <strong>{rub(billing.walletRub)}</strong>
           </div>
+          {topupShort(billing, confirm.priceRub) > 0 ? (
+            <p className="bill-info">Не хватает {rub(Math.ceil(confirm.priceRub - billing.walletRub))}. Пополните кошелёк, потом вернитесь сюда.</p>
+          ) : null}
           <div className="dialog-actions">
             <button type="button" onClick={() => setConfirm(null)}>
               Отмена
             </button>
-            <button type="button" data-emphasis="primary" disabled={busy} onClick={() => void buy(confirm)}>
-              {busy ? "Подключаю…" : `Оплатить ${rub(confirm.priceRub)}`}
-            </button>
+            {topupShort(billing, confirm.priceRub) > 0 ? (
+              <button
+                type="button"
+                data-emphasis="primary"
+                onClick={() => {
+                  const short = topupShort(billing, confirm.priceRub);
+                  setConfirm(null);
+                  onWallet(short);
+                }}
+              >
+                {`Пополнить на ${rub(topupShort(billing, confirm.priceRub))}`}
+              </button>
+            ) : (
+              <button type="button" data-emphasis="primary" disabled={busy} onClick={() => void buy(confirm)}>
+                {busy ? "Подключаю…" : `Оплатить ${rub(confirm.priceRub)}`}
+              </button>
+            )}
           </div>
         </Dialog>
       ) : null}
@@ -196,12 +253,15 @@ export function WalletPage({
   topupAmount,
   onTopupClose,
   onTopup,
+  onPlans,
 }: {
   apiBase: string;
   token: string;
   billing: Billing;
   email: string;
   onBilling: (next: Billing) => void;
+  /** Open «Тариф» (shown while no plan is bought yet). */
+  onPlans: () => void;
   /** Open the top-up dialog with this amount (null: closed). */
   topupAmount: number | null;
   onTopupClose: () => void;
@@ -230,11 +290,19 @@ export function WalletPage({
 
   const { overage } = billing;
   const spentShare = overage.capRub > 0 ? (overage.spentRub / overage.capRub) * 100 : 0;
-  const hasPlan = billing.plan.status !== "none";
+  const hasPlan = billing.plan.status !== "none" && billing.plan.status !== "unpaid";
 
   return (
     <div className="page billing">
       <PageHead title="Кошелёк" lede="Отдельный кошелёк Heli bot. Из него оплачивается тариф и, если вы разрешили, задачи сверх лимита." />
+      {billing.plan.status === "unpaid" ? (
+        <div className="bill-note" role="status">
+          <span>Тариф ещё не выбран. Когда деньги придут на кошелёк, подключите тариф, и задачи откроются.</span>
+          <button type="button" data-emphasis="go" onClick={onPlans}>
+            Выбрать тариф
+          </button>
+        </div>
+      ) : null}
       <div className="wallet-top">
         <section className="bill-card dark glow">
           <span className="bill-label">На кошельке</span>

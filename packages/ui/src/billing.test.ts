@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseBilling, rub, tasksLeftLabel } from "./billing.ts";
+import { needsPlan, parseBilling, rub, tasksLeftLabel, topupShort } from "./billing.ts";
 
 test("billing view is parsed from the server shape, rubles as numbers", () => {
   const view = parseBilling({
@@ -36,4 +36,24 @@ test("rubles and task counts read like Russian text", () => {
   assert.equal(tasksLeftLabel(1500, "в этом месяце"), "ещё ~1 500 задач в этом месяце");
   assert.equal(tasksLeftLabel(0, "сегодня"), "задачи сегодня закончились");
   assert.equal(tasksLeftLabel(null, "сегодня"), "");
+});
+
+test("a new paid-only account has no plan yet and is asked to choose one", () => {
+  const view = parseBilling({
+    plan: { id: "unpaid", title: "Тариф не выбран", status: "unpaid", period_ends_at: null },
+    wallet: { balance_rub: "150.00" },
+    usage: { blocked: true },
+    topup: { available: false, min_rub: "100" },
+  });
+  assert.equal(view.plan.status, "unpaid");
+  assert.equal(view.usage.blocked, true);
+  assert.equal(needsPlan(view), true);
+  assert.equal(needsPlan(parseBilling({ plan: { status: "expired" } })), true);
+  assert.equal(needsPlan(parseBilling({ plan: { status: "active" } })), false);
+  assert.equal(needsPlan(parseBilling({ plan: { status: "none" } })), false);
+  assert.equal(needsPlan(null), false);
+  // 390 ₽ plan, 150 ₽ on the wallet: put 240 ₽ more; never less than the minimum top-up.
+  assert.equal(topupShort(view, 390), 240);
+  assert.equal(topupShort(view, 200), 100);
+  assert.equal(topupShort(view, 100), 0);
 });

@@ -1,7 +1,8 @@
 /** Heli bot's own wallet and plans (server: app/billing.py, API /v1/billing*). Only percents of the
  * plan limit are shown; rubles appear only for plan prices, the wallet and spending over the limit. */
 
-export type PlanStatus = "none" | "trial" | "active" | "expired";
+/** unpaid: a new account that has not bought a plan yet (access is paid from the start, no trial). */
+export type PlanStatus = "none" | "unpaid" | "trial" | "active" | "expired";
 
 export interface PlanOffer {
   id: string;
@@ -58,7 +59,7 @@ export class BillingError extends Error {
 
 const BILLING_ERRORS: Record<string, string> = {
   insufficient_funds: "На кошельке не хватает денег. Пополните кошелёк и попробуйте снова.",
-  plan_required: "Тариф закончился. Продлите его, чтобы ставить новые задачи.",
+  plan_required: "Чтобы ставить задачи, нужен тариф. Выберите или продлите его в разделе «Тариф».",
   bad_plan: "Такого тарифа нет.",
   payments_not_configured: "Оплата картой пока не подключена. Пополним по счёту через менеджера.",
 };
@@ -70,7 +71,7 @@ const num = (value: unknown, fallback = 0): number => {
 
 const optNum = (value: unknown): number | null => (value === null || value === undefined || value === "" ? null : num(value));
 
-const STATUSES: PlanStatus[] = ["none", "trial", "active", "expired"];
+const STATUSES: PlanStatus[] = ["none", "unpaid", "trial", "active", "expired"];
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function parseBilling(body: any): Billing {
@@ -116,6 +117,17 @@ export function parseBilling(body: any): Billing {
       : [],
     topup: { available: Boolean(body?.topup?.available), minRub: num(body?.topup?.min_rub, 100) },
   };
+}
+
+/** No working plan: never bought (unpaid) or ran out (expired). The server answers tasks with 402. */
+export function needsPlan(billing: Billing | null): boolean {
+  return billing !== null && (billing.plan.status === "unpaid" || billing.plan.status === "expired");
+}
+
+/** How much to put on the wallet before this price can be paid (0 when the wallet already covers it). */
+export function topupShort(billing: Billing, priceRub: number): number {
+  const short = Math.ceil(priceRub - billing.walletRub);
+  return short <= 0 ? 0 : Math.max(billing.topup.minRub, short);
 }
 
 /** 1490 → «1 490 ₽», 64.5 → «64,50 ₽». */

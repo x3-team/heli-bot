@@ -74,7 +74,7 @@ import {
 import { feedbackRequest, type FeedbackAction } from "./feedback";
 import { FeedbackCard } from "./feedbackCard";
 import { PageHead } from "./pageHead";
-import { loadBilling, type Billing } from "./billing";
+import { loadBilling, needsPlan, rub, type Billing } from "./billing";
 import { PlanPage, WalletPage } from "./billingViews";
 
 type View = "chat" | "limits" | "wallet" | "schedules" | "connections" | "memory" | "settings";
@@ -484,11 +484,17 @@ function Workspace({
   activeRef.current = activeId;
 
   const active = threads.find((thread) => thread.id === activeId) ?? null;
-  const stopped = usage.blocked || limitTone(usage.weekPercent) === "stop" || limitTone(usage.monthPercent) === "stop";
+  // No plan bought yet, or it ran out: the server answers tasks with 402, so the composer waits for a plan.
+  const planGate = needsPlan(billing);
+  const stopped = planGate || usage.blocked || limitTone(usage.weekPercent) === "stop" || limitTone(usage.monthPercent) === "stop";
 
   useEffect(() => {
     void loadBilling(apiBase, token)
-      .then(setBilling)
+      .then((next) => {
+        setBilling(next);
+        // Access is paid from the start: a new account opens on choosing a plan.
+        if (next?.plan.status === "unpaid") setView("limits");
+      })
       .catch(() => undefined);
     void loadUsage(apiBase, token)
       .then(setUsage)
@@ -806,6 +812,15 @@ function Workspace({
             onDetach={(index) => setAttachments((list) => list.filter((_, i) => i !== index))}
             busy={busy}
             stopped={stopped}
+            planGate={
+              planGate && billing
+                ? {
+                    unpaid: billing.plan.status === "unpaid",
+                    fromRub: billing.plans.length ? Math.min(...billing.plans.map((offer) => offer.priceRub)) : null,
+                  }
+                : null
+            }
+            onChoosePlan={() => setView("limits")}
             error={error}
             pending={pending}
             trial={usage.trialActive ? trialLabel(usage.trialEndsAt) : null}
@@ -885,6 +900,7 @@ function Workspace({
             topupAmount={topupAmount}
             onTopup={() => setTopupAmount(1000)}
             onTopupClose={() => setTopupAmount(null)}
+            onPlans={() => setView("limits")}
           />
         ) : null}
         {view === "schedules" ? <Schedules apiBase={apiBase} token={token} /> : null}
@@ -1081,6 +1097,8 @@ function Chat({
   onDetach,
   busy,
   stopped,
+  planGate,
+  onChoosePlan,
   error,
   pending,
   trial,
@@ -1115,6 +1133,9 @@ function Chat({
   onDetach: (index: number) => void;
   busy: boolean;
   stopped: boolean;
+  /** No plan to run tasks on: unpaid = never bought, otherwise it ran out. */
+  planGate: { unpaid: boolean; fromRub: number | null } | null;
+  onChoosePlan: () => void;
   error: string;
   pending: string | null;
   trial: string | null;
@@ -1195,7 +1216,7 @@ function Chat({
         </button>
         <textarea
           aria-label="Текст задачи"
-          placeholder={stopped ? "Лимит исчерпан до сброса" : "Опишите задачу"}
+          placeholder={planGate ? "Сначала выберите тариф" : stopped ? "Лимит исчерпан до сброса" : "Опишите задачу"}
           rows={1}
           value={draft}
           disabled={stopped}
@@ -1367,7 +1388,21 @@ function Chat({
         ) : null}
         {notice ? <p className="muted">{notice}</p> : null}
         <ComputerConfirmCard />
-        {stopped ? (
+        {planGate ? (
+          <article className="card">
+            <h2>{planGate.unpaid ? "Выберите тариф" : "Тариф закончился"}</h2>
+            <p className="muted">
+              {planGate.unpaid
+                ? `Хели начнёт работать, как только вы подключите тариф. Оплата из кошелька Heli bot${planGate.fromRub ? `, тарифы от ${rub(planGate.fromRub)} в месяц` : ""}.`
+                : "Продлите тариф, и новые задачи снова пойдут. Старые чаты и отчёты на месте."}
+            </p>
+            <div className="row">
+              <button type="button" data-emphasis="primary" onClick={onChoosePlan}>
+                {planGate.unpaid ? "Выбрать тариф" : "Продлить тариф"}
+              </button>
+            </div>
+          </article>
+        ) : stopped ? (
           <article className="card danger">
             <h2>Лимит исчерпан</h2>
             <p>Неделя или месяц на 100%. Новые задачи остановлены до сброса.</p>
