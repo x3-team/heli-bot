@@ -1,3 +1,5 @@
+import logging
+
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -59,6 +61,9 @@ app = create_app()
 
 
 def main() -> None:
+    # App loggers had no handler: only Python's bare last-resort output reached journald.
+    # Warnings and errors (failed model calls with their reason, retries) now carry level and logger.
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     settings = get_settings()
     uvicorn.run(
         "app.main:app",

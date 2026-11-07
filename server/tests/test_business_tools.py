@@ -383,6 +383,13 @@ def test_direct_get_and_api_error(session, monkeypatch) -> None:
         transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"error": {"error_code": 53, "error_string": "Ошибка авторизации"}})),
     )
     assert bad.error == "api_error" and "53" in bad.content
+    unregistered = yandex_direct.execute(
+        session, user, None, "direct_api", {"service": "campaigns"},
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"error": {
+            "error_code": 58, "error_string": "Незавершенная регистрация", "error_detail": "Необходимо подать заявку на доступ к API"}})),
+    )
+    assert unregistered.error == "registration_incomplete"
+    assert "58" in unregistered.content and "«Инструменты» → «API»" in unregistered.content and "BLOCKED" in unregistered.content
 
 
 def test_direct_without_token_explains_how_to_add_it(session, monkeypatch) -> None:
