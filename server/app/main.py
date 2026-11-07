@@ -20,7 +20,7 @@ from app.cloud_browser import register as register_cloud_browser
 from app.config import get_settings
 from app.files import register as register_files
 from app.masking import install_redact_filter
-from app.schedules import install_ticker
+from app.schedules import install_ticker, ticker_status
 
 
 def create_app() -> FastAPI:
@@ -38,6 +38,10 @@ def create_app() -> FastAPI:
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/health/schedules")
+    def health_schedules() -> dict:
+        return ticker_status()
 
     app.include_router(router)
     install_reaper()

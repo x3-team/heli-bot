@@ -145,3 +145,26 @@ def test_ticker_is_off_in_tests_and_by_switch(monkeypatch) -> None:
     assert not autorun_enabled()
     monkeypatch.setenv("HELI_SCHEDULES_AUTORUN", "1")
     assert autorun_enabled()
+
+
+def test_health_shows_what_the_ticker_did(session, factory, client) -> None:
+    _due(session, _user(session))
+    tick(factory, lambda: _heli(_Scripted([CLASSIFY, "Готово"])), MemoryDriver, now=MONDAY_0901)
+
+    body = client.get("/health/schedules").json()
+    assert body["autorun"] is False  # off in tests
+    assert body["last_tick"] == "2026-11-09T06:01:20+00:00"
+    assert body["last_due"] == 1 and body["last_ran"] == 1 and body["last_skip"] is None
+    assert body["ticks"] >= 1
+    assert set(body) == {"autorun", "started_at", "last_tick", "ticks", "last_due", "last_ran", "last_skip"}
+
+
+def test_health_names_why_a_tick_ran_nothing(session, factory, client) -> None:
+    _due(session, _user(session))
+
+    def no_key():
+        raise HeliError("no_api_key", "нет ключа")
+
+    tick(factory, no_key, MemoryDriver, now=MONDAY_0901)
+    body = client.get("/health/schedules").json()
+    assert body["last_due"] == 1 and body["last_ran"] == 0 and body["last_skip"] == "no_api_key"
