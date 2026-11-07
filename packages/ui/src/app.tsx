@@ -74,7 +74,7 @@ import {
 import { feedbackRequest, type FeedbackAction } from "./feedback";
 import { FeedbackCard } from "./feedbackCard";
 
-type View = "chat" | "limits" | "schedules" | "memory" | "settings";
+type View = "chat" | "limits" | "schedules" | "connections" | "memory" | "settings";
 type Theme = "light" | "dark";
 
 interface Message {
@@ -454,7 +454,7 @@ function Workspace({
   const [trainingAsked, setTrainingAsked] = useState(readTrainingAsked);
   // Asked once, under the first finished task, never during a run.
   const trainingAsk = consentsLoaded && !consents.training && !trainingAsked;
-  const [historyOpen, setHistoryOpen] = useState(false);
+  const [email, setEmail] = useState("");
   const [computerOpen, setComputerOpen] = useState(false);
   const [computerWidth, setComputerWidth] = useState<number | null>(() => readComputerWidth());
   const [, setViewport] = useState(0);
@@ -495,6 +495,7 @@ function Workspace({
       .then((me) => {
         setConsents({ pdn: me.consentPdn, training: me.consentTraining });
         setConsentsLoaded(true);
+        setEmail(me.email ?? "");
       })
       .catch((err) => {
         if (err instanceof ApiError && err.message.includes("войти снова")) {
@@ -560,9 +561,8 @@ function Workspace({
   }
 
   function newThread() {
-    const thread: Thread = { id: crypto.randomUUID(), title: "Новая задача", messages: [] };
-    setThreads((list) => [thread, ...list]);
-    setActiveId(thread.id);
+    // «Новая задача» opens the home screen; the thread is created by the first message.
+    setActiveId(null);
     setView("chat");
     setMascot("waiting");
     setPending(null);
@@ -748,83 +748,45 @@ function Workspace({
   }
 
   const week = clampPercent(usage.weekPercent);
-  const weekTone = limitTone(week);
+  const month = clampPercent(usage.monthPercent);
   const showComputer = computerOpen && view === "chat";
+  const sideWidth = sidebarWidth();
+  const waiting = pending || ask ? 1 : 0;
 
   return (
     <div
       className="workspace"
       data-view={view}
-      data-history={historyOpen ? "open" : "closed"}
       data-computer={showComputer ? "open" : "closed"}
       style={
         computerWidth
-          ? ({ "--computer-w": `${clampComputerWidth(computerWidth, historyOpen)}px` } as CSSProperties)
+          ? ({ "--computer-w": `${clampComputerWidth(computerWidth, sideWidth)}px` } as CSSProperties)
           : undefined
       }
     >
-      <nav className="rail" aria-label="Разделы">
-        <RailButton label="Новая задача" onClick={newThread} icon={ICONS.plus} />
-        <RailButton
-          label="Задачи"
-          current={historyOpen}
-          onClick={() => {
-            setHistoryOpen((open) => !open);
-            setView("chat");
-          }}
-          icon={ICONS.list}
-        />
-        <RailButton label="Расписания" current={view === "schedules"} onClick={() => setView("schedules")} icon={ICONS.clock} />
-        <RailButton label="Память" current={view === "memory"} onClick={() => setView("memory")} icon={ICONS.memory} />
-        <RailButton
-          label="Компьютер агента"
-          current={showComputer}
-          onClick={() => {
-            setComputerOpen((open) => !open);
-            setView("chat");
-          }}
-          icon={ICONS.screen}
-        />
-        <span className="rail-gap" />
-        <button
-          type="button"
-          className={`limit-ring ${weekTone}`}
-          title={`Лимит недели: ${week}%${usage.trialActive ? ` · ${trialLabel(usage.trialEndsAt)}` : ""}`}
-          aria-label={`Лимиты, неделя ${week}%`}
-          aria-current={view === "limits" ? "page" : undefined}
-          onClick={() => setView("limits")}
-        >
-          <svg viewBox="0 0 36 36" aria-hidden="true">
-            <circle cx="18" cy="18" r="15" className="track" />
-            <circle cx="18" cy="18" r="15" className="fill" strokeDasharray={`${(week / 100) * 94.2} 94.2`} />
-          </svg>
-          <span>{week}</span>
-        </button>
-        <RailButton label="Настройки" current={view === "settings"} onClick={() => setView("settings")} icon={ICONS.gear} />
-      </nav>
-      {historyOpen ? (
-        <aside className="history" aria-label="Задачи">
-          <p className="history-title">Задачи</p>
-          {threads.length === 0 ? <p className="muted">Здесь появятся ваши задачи.</p> : null}
-          {threads.map((thread) => (
-            <button
-              key={thread.id}
-              type="button"
-              aria-current={thread.id === activeId && view === "chat" ? "page" : undefined}
-              onClick={() => {
-                setActiveId(thread.id);
-                setView("chat");
-              }}
-            >
-              {thread.title}
-            </button>
-          ))}
-        </aside>
-      ) : null}
+      <Sidebar
+        view={view}
+        email={email}
+        week={week}
+        month={month}
+        waiting={waiting}
+        onNew={newThread}
+        onView={(next) => {
+          if (next === "chat") setActiveId(null);
+          setView(next);
+        }}
+      />
       <section className="main">
         {view === "chat" ? (
           <Chat
             title={active?.title ?? ""}
+            recent={threads.filter((thread) => thread.id !== activeId && thread.messages.length > 0).slice(0, 6)}
+            onOpenThread={(id) => {
+              setActiveId(id);
+              setView("chat");
+            }}
+            computerOpen={showComputer}
+            onToggleComputer={() => setComputerOpen((open) => !open)}
             mascot={stopped ? "waiting" : mascot}
             messages={active?.messages ?? []}
             draft={draft}
@@ -891,6 +853,7 @@ function Workspace({
         ) : null}
         {view === "limits" ? <Limits usage={usage} /> : null}
         {view === "schedules" ? <Schedules apiBase={apiBase} token={token} /> : null}
+        {view === "connections" ? <Connections apiBase={apiBase} token={token} /> : null}
         {view === "memory" ? <Memory apiBase={apiBase} token={token} /> : null}
         {view === "settings" ? (
           <Settings
@@ -926,7 +889,7 @@ function Workspace({
         onInput={() => void receiveFiles()}
         onClose={() => setComputerOpen(false)}
         onResize={(width, done) => {
-          const next = width === null ? null : clampComputerWidth(width, historyOpen);
+          const next = width === null ? null : clampComputerWidth(width, sideWidth);
           setComputerWidth(next);
           if (done) writeComputerWidth(next);
         }}
@@ -945,6 +908,8 @@ const ICONS = {
   send: "M12 19V5M6 11l6-6 6 6",
   clip: "M20 11.5l-8.2 8.2a5 5 0 0 1-7.1-7.1l8.6-8.6a3.4 3.4 0 0 1 4.8 4.8l-8.6 8.6a1.7 1.7 0 0 1-2.4-2.4l7.9-7.9",
   close: "M6 6l12 12M18 6L6 18",
+  link: "M9 7H7a5 5 0 0 0 0 10h2M15 7h2a5 5 0 0 1 0 10h-2M8 12h8",
+  plan: "M4 7h16v12H4zM4 11h16M8 3v4M16 3v4",
 };
 
 function Icon({ d }: { d: string }) {
@@ -955,12 +920,90 @@ function Icon({ d }: { d: string }) {
   );
 }
 
-function RailButton({ label, icon, current, onClick }: { label: string; icon: string; current?: boolean; onClick: () => void }) {
+const NAV: { view: View; label: string; short?: string; icon: string }[] = [
+  { view: "chat", label: "Задачи", icon: ICONS.list },
+  { view: "schedules", label: "Расписания", icon: ICONS.clock },
+  { view: "connections", label: "Подключения", short: "Доступы", icon: ICONS.link },
+  { view: "memory", label: "Память", icon: ICONS.memory },
+  { view: "limits", label: "Тариф", icon: ICONS.plan },
+  { view: "settings", label: "Настройки", short: "Ещё", icon: ICONS.gear },
+];
+
+/** Left menu of the cabinet (bot.getheli.ru and the desktop app): sections, limits, account. */
+function Sidebar({
+  view,
+  email,
+  week,
+  month,
+  waiting,
+  onNew,
+  onView,
+}: {
+  view: View;
+  email: string;
+  week: number;
+  month: number;
+  waiting: number;
+  onNew: () => void;
+  onView: (view: View) => void;
+}) {
   return (
-    <button type="button" className="rail-button" title={label} aria-label={label} aria-current={current ? "page" : undefined} onClick={onClick}>
-      <Icon d={icon} />
-    </button>
+    <nav className="side" aria-label="Разделы">
+      <div className="side-brand">
+        <span className="side-logo" aria-hidden="true">
+          <Mascot state="waiting" size={30} />
+        </span>
+        <span className="side-name">
+          Heli bot
+          <small>bot.getheli.ru</small>
+        </span>
+      </div>
+      <button type="button" className="side-new" onClick={onNew} title="Новая задача">
+        <Icon d={ICONS.plus} />
+        <span>Новая задача</span>
+      </button>
+      <div className="side-nav">
+        {NAV.map((item) => (
+          <button
+            key={item.view}
+            type="button"
+            className="side-link"
+            title={item.label}
+            aria-current={view === item.view ? "page" : undefined}
+            onClick={() => onView(item.view)}
+          >
+            <Icon d={item.icon} />
+            <span data-short={item.short ?? item.label}>{item.label}</span>
+            {item.view === "chat" && waiting ? <em className="side-count">{waiting}</em> : null}
+          </button>
+        ))}
+      </div>
+      <span className="side-gap" />
+      <button type="button" className="side-fuel" onClick={() => onView("limits")} title={`Неделя ${week}% · месяц ${month}%`}>
+        <span className="side-meter">
+          <span>Неделя</span>
+          <b>{week}%</b>
+          <i className={limitTone(week)} style={{ "--p": `${week}%` } as CSSProperties} />
+        </span>
+        <span className="side-meter">
+          <span>Месяц</span>
+          <b>{month}%</b>
+          <i className={limitTone(month)} style={{ "--p": `${month}%` } as CSSProperties} />
+        </span>
+      </button>
+      {email ? (
+        <div className="side-me" title={email}>
+          <span className="side-ava" aria-hidden="true">{email.slice(0, 1).toUpperCase()}</span>
+          <span className="side-email">{email}</span>
+        </div>
+      ) : null}
+    </nav>
   );
+}
+
+function todayLabel(): string {
+  const text = new Date().toLocaleDateString("ru-RU", { weekday: "long", day: "numeric", month: "long" });
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 const IDEAS = [
@@ -971,6 +1014,10 @@ const IDEAS = [
 
 function Chat({
   title,
+  recent,
+  onOpenThread,
+  computerOpen,
+  onToggleComputer,
   mascot,
   messages,
   draft,
@@ -1001,6 +1048,10 @@ function Chat({
   onTrainingAnswer,
 }: {
   title: string;
+  recent: Thread[];
+  onOpenThread: (id: string) => void;
+  computerOpen: boolean;
+  onToggleComputer: () => void;
   mascot: MascotState;
   messages: Message[];
   draft: string;
@@ -1120,10 +1171,20 @@ function Chat({
   if (empty) {
     return (
       <div className="chat-empty">
-        <div className="hero-mascot">
-          <Mascot state="waiting" size={72} />
+        <div className="home-top">{trial ? <span className="trial-chip">{trial}</span> : null}</div>
+        <div className="hello">
+          <div>
+            <p className="eyebrow">{todayLabel()}</p>
+            <h1>
+              Привет!
+              <br />
+              <em>Чем займёмся?</em>
+            </h1>
+          </div>
+          <span className="hello-mascot" aria-hidden="true">
+            <Mascot state="waiting" size={132} />
+          </span>
         </div>
-        <h1>Привет! Чем займёмся?</h1>
         {composer}
         <div className="ideas">
           {IDEAS.map((idea) => (
@@ -1133,10 +1194,23 @@ function Chat({
           ))}
         </div>
         <p className="composer-hint">
-          Опасные действия Heli спросит заранее · Ctrl+Alt+Пробел ставит на паузу
-          {trial ? ` · ${trial}` : ""}
+          Всё, что меняет данные, Хели спросит заранее · Ctrl+Alt+Пробел ставит на паузу
         </p>
         {error ? <p className="error">{error}</p> : null}
+        {recent.length ? (
+          <section className="recent" aria-label="Недавние задачи">
+            <p className="section-title">Недавние</p>
+            {recent.map((thread) => {
+              const last = [...thread.messages].reverse().find((message) => message.role === "assistant" && message.text.trim());
+              return (
+                <button key={thread.id} type="button" className="task-card" onClick={() => onOpenThread(thread.id)}>
+                  <strong>{thread.title}</strong>
+                  {last ? <span>{last.text.replace(/[#*_`>]/g, "").slice(0, 160)}</span> : null}
+                </button>
+              );
+            })}
+          </section>
+        ) : null}
       </div>
     );
   }
@@ -1146,6 +1220,16 @@ function Chat({
       <header className="chat-head">
         <span className="chat-title">{title}</span>
         <span className={`live ${mascot}`}>{mascotLabel(mascot)}</span>
+        <button
+          type="button"
+          className="computer-toggle"
+          aria-pressed={computerOpen}
+          title={computerOpen ? "Скрыть компьютер Хели" : "Показать компьютер Хели"}
+          onClick={onToggleComputer}
+        >
+          <Icon d={ICONS.screen} />
+          <span>Компьютер</span>
+        </button>
       </header>
       <div className="thread">
         {messages.map((message) =>
@@ -1476,10 +1560,10 @@ function Limits({ usage }: { usage: Usage }) {
   const warned = usage.warning || weekTone === "warn" || monthTone === "warn";
   return (
     <div className="page">
-      <div>
-        <h1>Лимиты</h1>
-        <p className="muted">Использовано {week}% недели · {month}% месяца, сброс пн 00:00 МСК</p>
-      </div>
+      <PageHead
+        title="Тариф"
+        lede={`Лимит считается в процентах. Использовано ${week}% недели и ${month}% месяца, неделя обновляется в понедельник в 00:00 МСК.`}
+      />
       {usage.trialActive ? (
         <article className="card">{trialLabel(usage.trialEndsAt)}. Лимиты показаны в процентах.</article>
       ) : null}
@@ -1521,8 +1605,7 @@ function Memory({ apiBase, token }: { apiBase: string; token: string }) {
 
   return (
     <div className="page">
-      <h1>Память</h1>
-      <p className="muted">Факты подставляются в задачу. Их можно удалить.</p>
+      <PageHead title="Память" lede="Факты, которые Хели помнит о вашей работе. Подставляются в задачи, их можно удалить." />
       <form
         className="stack"
         onSubmit={(event) => {
@@ -1575,8 +1658,10 @@ function Schedules({ apiBase, token }: { apiBase: string; token: string }) {
 
   return (
     <div className="page">
-      <h1>Расписания</h1>
-      <p className="muted">Запуск идёт в облаке и списывает лимит. Результат остаётся в задаче.</p>
+      <PageHead
+        title="Расписания"
+        lede="Хели запускает задачу сам, в облаке, даже когда компьютер выключен. Запуск списывает лимит, результат остаётся в задаче."
+      />
       <form
         className="stack"
         onSubmit={(event) => {
@@ -1613,34 +1698,12 @@ function Schedules({ apiBase, token }: { apiBase: string; token: string }) {
   );
 }
 
-function Settings({
-  apiBase,
-  token,
-  theme,
-  consents,
-  onTheme,
-  onConsents,
-  onSignOut,
-  autopause,
-  onAutopause,
-}: {
-  apiBase: string;
-  token: string;
-  theme: Theme;
-  consents: { pdn: boolean; training: boolean };
-  onTheme: (theme: Theme) => void;
-  onConsents: (next: { pdn: boolean; training: boolean }) => Promise<void>;
-  onSignOut: () => void;
-  autopause: boolean;
-  onAutopause: (on: boolean) => void;
-}) {
+function Connections({ apiBase, token }: { apiBase: string; token: string }) {
   const [site, setSite] = useState("");
   const [username, setUsername] = useState("");
   const [secret, setSecret] = useState("");
   const [links, setLinks] = useState<CredentialItem[]>([]);
   const [note, setNote] = useState("");
-  const [reportBusy, setReportBusy] = useState(false);
-  const [privacyNote, setPrivacyNote] = useState("");
 
   useEffect(() => {
     void loadCredentials(apiBase, token).then(setLinks).catch(() => undefined);
@@ -1648,71 +1711,12 @@ function Settings({
 
   return (
     <div className="page">
-      <h1>Настройки</h1>
+      <PageHead
+        title="Подключения"
+        lede="Через официальный доступ, где он есть: вебхук, токен, OData. Пароли хранятся отдельно, шифруются и не попадают ни в ответы, ни в журнал."
+      />
       <section className="card">
-        <h2>Тема</h2>
-        <div className="row">
-          <button type="button" aria-pressed={theme === "light"} onClick={() => onTheme("light")}>Светлая</button>
-          <button type="button" aria-pressed={theme === "dark"} onClick={() => onTheme("dark")}>Тёмная</button>
-        </div>
-      </section>
-      <section className="card">
-        <h2>Задачи</h2>
-        <label className="check">
-          <input type="checkbox" checked={autopause} onChange={(event) => onAutopause(event.target.checked)} />
-          <span>Ставить задачу на паузу, если она стоит больше чем в 1,5 раза дороже оценки</span>
-        </label>
-      </section>
-      <section className="card">
-        <h2>Согласия</h2>
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={consents.pdn}
-            onChange={(event) => {
-              void onConsents({ ...consents, pdn: event.target.checked }).catch(() => undefined);
-            }}
-          />
-          <span>Согласие на обработку персональных данных (обязательно: без него Heli не выполняет задачи)</span>
-        </label>
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={consents.training}
-            onChange={(event) => {
-              void onConsents({ ...consents, training: event.target.checked }).catch(() => undefined);
-            }}
-          />
-          <span>{TRAINING_CONSENT_TEXT}</span>
-        </label>
-        <div className="row">
-          <button
-            type="button"
-            onClick={() => {
-              void deleteTrainingCopy(apiBase, token)
-                .then((count) => setPrivacyNote(count ? `Обучающая копия удалена: ${count}.` : "Обучающей копии нет."))
-                .catch(() => setPrivacyNote("Не получилось удалить. Попробуйте позже."));
-            }}
-          >
-            Удалить обучающую копию
-          </button>
-          <button
-            type="button"
-            data-emphasis="danger"
-            onClick={() => {
-              if (!window.confirm("Удалить историю задач? Доступы и память останутся.")) return;
-              void deleteTaskHistory(apiBase, token)
-                .then((count) => setPrivacyNote(`История задач удалена: ${count}.`))
-                .catch(() => setPrivacyNote("Не получилось удалить. Попробуйте позже."));
-            }}
-          >
-            Удалить историю задач
-          </button>
-        </div>
-        {privacyNote ? <p className="muted">{privacyNote}</p> : null}
-      </section>
-      <section className="card">
-        <h2>Подключения</h2>
+        <h2>Свой сервис или сайт</h2>
         <p className="muted">Сайт и имя видны вам. Секрет шифруется и в ответы не попадает.</p>
         <ConnectHelp />
         <ul className="integration-logos" aria-label="Поддерживаемые сервисы">
@@ -1776,6 +1780,111 @@ function Settings({
           ))}
         </ul>
       </section>
+    </div>
+  );
+}
+
+/** Page title in the cabinet style: serif heading and a short explanation. */
+function PageHead({ title, lede, aside }: { title: string; lede?: string; aside?: string }) {
+  return (
+    <header className="page-head">
+      {aside ? <span className="page-aside">{aside}</span> : null}
+      <h1>{title}</h1>
+      {lede ? <p className="muted">{lede}</p> : null}
+    </header>
+  );
+}
+
+function Settings({
+  apiBase,
+  token,
+  theme,
+  consents,
+  onTheme,
+  onConsents,
+  onSignOut,
+  autopause,
+  onAutopause,
+}: {
+  apiBase: string;
+  token: string;
+  theme: Theme;
+  consents: { pdn: boolean; training: boolean };
+  onTheme: (theme: Theme) => void;
+  onConsents: (next: { pdn: boolean; training: boolean }) => Promise<void>;
+  onSignOut: () => void;
+  autopause: boolean;
+  onAutopause: (on: boolean) => void;
+}) {
+  const [note, setNote] = useState("");
+  const [reportBusy, setReportBusy] = useState(false);
+  const [privacyNote, setPrivacyNote] = useState("");
+
+  return (
+    <div className="page">
+      <PageHead title="Настройки" />
+      <section className="card">
+        <h2>Тема</h2>
+        <div className="row">
+          <button type="button" aria-pressed={theme === "light"} onClick={() => onTheme("light")}>Светлая</button>
+          <button type="button" aria-pressed={theme === "dark"} onClick={() => onTheme("dark")}>Тёмная</button>
+        </div>
+      </section>
+      <section className="card">
+        <h2>Задачи</h2>
+        <label className="check">
+          <input type="checkbox" checked={autopause} onChange={(event) => onAutopause(event.target.checked)} />
+          <span>Ставить задачу на паузу, если она стоит больше чем в 1,5 раза дороже оценки</span>
+        </label>
+      </section>
+      <section className="card">
+        <h2>Согласия</h2>
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={consents.pdn}
+            onChange={(event) => {
+              void onConsents({ ...consents, pdn: event.target.checked }).catch(() => undefined);
+            }}
+          />
+          <span>Согласие на обработку персональных данных (обязательно: без него Heli не выполняет задачи)</span>
+        </label>
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={consents.training}
+            onChange={(event) => {
+              void onConsents({ ...consents, training: event.target.checked }).catch(() => undefined);
+            }}
+          />
+          <span>{TRAINING_CONSENT_TEXT}</span>
+        </label>
+        <div className="row">
+          <button
+            type="button"
+            onClick={() => {
+              void deleteTrainingCopy(apiBase, token)
+                .then((count) => setPrivacyNote(count ? `Обучающая копия удалена: ${count}.` : "Обучающей копии нет."))
+                .catch(() => setPrivacyNote("Не получилось удалить. Попробуйте позже."));
+            }}
+          >
+            Удалить обучающую копию
+          </button>
+          <button
+            type="button"
+            data-emphasis="danger"
+            onClick={() => {
+              if (!window.confirm("Удалить историю задач? Доступы и память останутся.")) return;
+              void deleteTaskHistory(apiBase, token)
+                .then((count) => setPrivacyNote(`История задач удалена: ${count}.`))
+                .catch(() => setPrivacyNote("Не получилось удалить. Попробуйте позже."));
+            }}
+          >
+            Удалить историю задач
+          </button>
+        </div>
+        {privacyNote ? <p className="muted">{privacyNote}</p> : null}
+      </section>
       <AppVersionCard />
       <section className="card">
         <h2>Сообщить об ошибке</h2>
@@ -1808,6 +1917,7 @@ function Settings({
         >
           Отправить отчёт
         </button>
+        {note ? <p className="muted">{note}</p> : null}
       </section>
       <AdminTesters apiBase={apiBase} token={token} />
       <button type="button" onClick={onSignOut}>Выйти</button>
@@ -1838,8 +1948,14 @@ function rememberTrainingAsked(): void {
   }
 }
 
-function clampComputerWidth(width: number, historyOpen: boolean): number {
-  return clampWidth(width, historyOpen, window.innerWidth);
+function clampComputerWidth(width: number, sideWidth: number): number {
+  return clampWidth(width, sideWidth, window.innerWidth);
+}
+
+/** Width of the left menu: full with labels on wide windows, icons only on narrow ones (see tokens.css). */
+function sidebarWidth(): number {
+  if (window.innerWidth <= 720) return 0;
+  return window.innerWidth < 1100 ? 72 : 248;
 }
 
 /** The width the user dragged the «Компьютер агента» panel to; null: the default. */
