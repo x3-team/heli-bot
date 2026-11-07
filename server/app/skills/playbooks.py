@@ -104,12 +104,13 @@ _BITRIX_GUIDE = """\
 - Наблюдателей и соисполнителей добавляй через «Ещё» в форме задачи.
 
 REST прежде экрана
-- Если в «Доступах» есть вебхук портала (find_credential об этом скажет), любую задачу Битрикс24 делай через REST, без входа на экране: bitrix24_read читает (crm.deal.list с filter и select, tasks.task.list, user.get, user.search), bitrix24_write создаёт и меняет — только на учебном портале (crm.deal.add / update, crm.lead.add, crm.contact.add, crm.company.add, tasks.task.add / update / complete, task.commentitem.add, crm.timeline.comment.add; стадия — crm.deal.update с params.id и fields.STAGE_ID).
+- Если в «Доступах» есть вебхук портала (find_credential об этом скажет), любую задачу Битрикс24 делай через REST, без входа на экране: bitrix24_read читает (crm.deal.list с filter и select, tasks.task.list, user.get, user.search), bitrix24_write создаёт и меняет на любом портале в пределах прав вебхука (crm.deal.add / update, crm.lead.add, crm.contact.add, crm.company.add, tasks.task.add / update / complete, task.commentitem.add, crm.timeline.comment.add; стадия — crm.deal.update с params.id и fields.STAGE_ID).
 - Стадии у каждой воронки свои. Сначала crm.deal.get по ID сделки: CATEGORY_ID — её воронка. Коды стадий: crm.status.list с filter ENTITY_ID=DEAL_STAGE для воронки 0 и ENTITY_ID=DEAL_STAGE_<CATEGORY_ID> для остальных (коды вида C3:PREPARATION). Код из чужой воронки Битрикс24 молча не применит. В STAGE_ID можно передать и название стадии: сервер сам найдёт код в воронке сделки, перечитает сделку и скажет, сменилась ли стадия.
 - Ответственного по имени находи через user.get / user.search (ID), потом ставь RESPONSIBLE_ID / ASSIGNED_BY_ID. Срок задачи — DEADLINE в формате 2026-11-04T18:00:00+03:00.
 - После записи проверь её через bitrix24_read (crm.deal.get, tasks.task.get по ID из ответа) и сверь поля с задачей.
-- На боевом портале клиента bitrix24_write откажет: там создавай и меняй на экране, а проверяй через bitrix24_read.
-- browser_open на вход — только если вебхука нет или нужен экран, которого нет в REST.
+- На учебном портале bitrix24_write пишет сразу. На боевом портале клиента сам не спрашивай: вызови bitrix24_write с portal, сервер покажет пользователю карточку (портал, метод, поля), и запись уйдёт после «да». Не уходи ради этого на экран.
+- Если REST ответил, что у вебхука нет прав (insufficient_scope, ACCESS_DENIED), или нужного метода нет в списке — это единственный случай для экрана. Скажи об этом и, если вход есть, сделай это на экране.
+- Вход на экране (сохранённая сессия) — только запасной путь: вебхука нет, у него нет прав или нужен экран, которого нет в REST.
 - Вход в облачный Битрикс24 с сервера часто просит капчу (SmartCaptcha). Капчу не решай и не обходи. Если вебхук есть, сервер сам скажет вернуться к REST; если нет — задача встанет на паузу и попросит пользователя войти на экране «Компьютер агента» или добавить вебхук в «Доступы». Не пытайся войти снова.
 
 Опасно, сначала спроси пользователя

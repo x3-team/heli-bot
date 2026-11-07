@@ -236,6 +236,17 @@ def fetch(base: str, method: str, params: dict, transport: httpx.BaseTransport |
     with httpx.Client(timeout=TIMEOUT_S, transport=transport, follow_redirects=False) as client:
         response = client.post(url, json=params)
     if response.status_code in (401, 403):
+        code = ""
+        try:
+            code = str(response.json().get("error") or "").lower()
+        except (ValueError, AttributeError):
+            pass
+        if code in {"insufficient_scope", "access_denied"}:
+            raise BxError(
+                "insufficient_scope",
+                "Ошибка: у вебхука из «Доступов» нет прав на этот раздел Битрикс24. Скажи пользователю добавить права "
+                "вебхуку (CRM, задачи, пользователи); если вход на экране есть, это можно сделать там — запасной путь.",
+            )
         raise BxError("auth_failed", "Ошибка: Битрикс24 не принял вебхук из «Доступов» (проверьте права вебхука: CRM, задачи, пользователи).")
     try:
         data = response.json()
