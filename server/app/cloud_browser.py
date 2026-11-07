@@ -53,6 +53,15 @@ BUSY_NOTICE = "Все облачные браузеры сейчас занят�
 CALL_TIMEOUT_S = 60
 # A worker stuck in one page this long is replaced by a new one.
 RESTART_AFTER_S = 150
+# Callers wait in slices this long and give up at once when the run is stopped.
+STOP_POLL_S = 0.25
+# Browser calls of one run that timed out in a row: the page hangs, close it and start a clean browser.
+STUCK_TIMEOUTS = 2
+STUCK_TEXT = (
+    "Облачный браузер завис на этой странице, я его перезапустил: вкладки закрыты, входы сохранены. "
+    "Открой нужную страницу заново через browser_open и не повторяй действие, после которого он завис."
+)
+STOPPED_TEXT = "Остановлено: задачу остановили."
 TIMEOUT_TEXT = (
     "Ошибка облачного браузера: tool_timeout — страница не ответила за минуту. Не повторяй то же действие: "
     "сделай browser_screenshot, открой раздел иначе или закончи и скажи, что не получилось."
@@ -88,6 +97,22 @@ KEYS = {
     # 1С and lists: search in a list, pick a value (F4), clear it, add a row, edit a cell.
     "Control+F", "Alt+F", "F4", "Shift+F4", "Insert", "F2",
 }
+
+
+def _await(future: Future, timeout: float, halted: Callable[[], bool] | None = None):
+    """future.result(timeout), but give up as soon as halted() says the run was stopped."""
+    if halted is None:
+        return future.result(timeout=timeout)
+    deadline = time.monotonic() + timeout
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise FutureTimeout()
+        try:
+            return future.result(timeout=min(STOP_POLL_S, left))
+        except FutureTimeout:
+            if halted():
+                raise CloudError("stopped") from None
 
 
 class CloudError(Exception):
@@ -1509,9 +1534,9 @@ class CloudBrowser:
 
     # --- public, any thread ---------------------------------------------------
 
-    def call(self, user_id: uuid.UUID, tool: str, args: dict, task_id=None) -> Result:
-        """Run one browser_* tool for the agent."""
-        return self._run(user_id, lambda page: run_tool(page, tool, args), task_id=task_id)
+    def call(self, user_id: uuid.UUID, tool: str, args: dict, task_id=None, halted=None) -> Result:
+        """Run one browser_* tool for the agent. halted(): the run was stopped, stop waiting."""
+        return self._run(user_id, lambda page: run_tool(page, tool, args), task_id=task_id, halted=halted)
 
     def search(
         self,
@@ -1544,25 +1569,25 @@ class CloudBrowser:
             self._ya_captcha.pop(user_id, None)
         return self._run(user_id, lambda page: format_hits(page.serp()))
 
-    def url(self, user_id: uuid.UUID) -> str:
+    def url(self, user_id: uuid.UUID, halted=None) -> str:
         """Address of the user's page now ("" without one)."""
         def job() -> str:
             page = self.sessions.get(user_id)
             return page.location()[0] if page else ""
 
         try:
-            return str(self._submit(job).result(timeout=CALL_TIMEOUT_S) or "")
+            return str(_await(self._submit(job), CALL_TIMEOUT_S, halted) or "")
         except Exception:  # noqa: BLE001
             return ""
 
-    def captcha(self, user_id: uuid.UUID) -> bool:
+    def captcha(self, user_id: uuid.UUID, halted=None) -> bool:
         """The current page asks to prove a human is there."""
         def job() -> bool:
             page = self.sessions.get(user_id)
             return bool(page and page.is_captcha())
 
         try:
-            return bool(self._submit(job).result(timeout=CALL_TIMEOUT_S))
+            return bool(_await(self._submit(job), CALL_TIMEOUT_S, halted))
         except Exception:  # noqa: BLE001
             return False
 
@@ -1574,9 +1599,25 @@ class CloudBrowser:
         """A click or keystroke from the user in the panel."""
         return self._run(user_id, lambda page: (page.user_input(action), "ok")[1], save=True)
 
-    def stop(self, user_id: uuid.UUID) -> None:
-        if self._thread is not None:
-            self._submit(lambda: self._close(user_id)).result(timeout=CALL_TIMEOUT_S)
+    def stop(self, user_id: uuid.UUID, wait_s: float = CALL_TIMEOUT_S) -> None:
+        """Close this account's browser. A page that hangs the worker is not waited for: the worker is
+        replaced at once (sign-ins were saved after the last good call) and the slot is free again."""
+        if self._thread is None:
+            return
+        if self._restart_if_stuck():
+            return
+        try:
+            self._submit(lambda: self._close(user_id)).result(timeout=wait_s)
+        except CloudError:
+            self._restart_if_stuck()
+        except FutureTimeout:
+            if not self._restart_if_stuck():
+                log.info("cloud browser: close of a browser is still queued")
+
+    def _restart_if_stuck(self) -> bool:
+        """The worker sits in one job longer than any caller waits for it: replace it now."""
+        with self._lock:
+            return self._maybe_restart_locked(after=CALL_TIMEOUT_S)
 
     def forget(self, user_id: uuid.UUID) -> None:
         """Sign out everywhere: close the browser and delete the saved sign-ins."""
@@ -1653,11 +1694,15 @@ class CloudBrowser:
 
     # --- worker thread ----------------------------------------------------------
 
-    def _run(self, user_id: uuid.UUID, action: Callable[[Page], str], save: bool = True, task_id=None) -> Result:
+    def _run(
+        self, user_id: uuid.UUID, action: Callable[[Page], str], save: bool = True, task_id=None, halted=None
+    ) -> Result:
         try:
             future = self._submit(lambda: self._do(user_id, action, save, task_id))
-            return future.result(timeout=CALL_TIMEOUT_S)
+            return _await(future, CALL_TIMEOUT_S, halted)
         except CloudError as exc:
+            if exc.code == "stopped":
+                return Result(STOPPED_TEXT, "stopped", self.frame(user_id))
             if exc.code.startswith("needs_confirmation:"):
                 under = exc.code.split(":", 1)[1]
                 return Result(
@@ -1690,11 +1735,11 @@ class CloudBrowser:
         with self._lock:
             self._maybe_restart_locked()
 
-    def _maybe_restart_locked(self) -> None:
-        """Stuck longer than RESTART_AFTER_S: leave that worker and its browsers behind (it closes them
+    def _maybe_restart_locked(self, after: float = RESTART_AFTER_S) -> bool:
+        """Stuck longer than `after`: leave that worker and its browsers behind (it closes them
         when the page lets go) and start a clean one. Sign-ins were saved after the last good call."""
-        if not self._busy_since or time.monotonic() - self._busy_since < RESTART_AFTER_S:
-            return
+        if not self._busy_since or time.monotonic() - self._busy_since < after:
+            return False
         log.warning("cloud browser worker stuck for %.0f s, starting a new one", time.monotonic() - self._busy_since)
         old = self._thread
         self._orphans[old] = (dict(self.sessions), self._shutdown)
@@ -1712,6 +1757,7 @@ class CloudBrowser:
             if pending.set_running_or_notify_cancel():
                 pending.set_exception(CloudError("tool_timeout"))
         self._thread = None
+        return True
 
     def _retire(self) -> None:
         """This worker was replaced while stuck: close what it owned and end."""
@@ -1897,7 +1943,7 @@ class CloudBrowser:
         try:
             while True:
                 try:
-                    self._submit(lambda: (self._page(user_id), None)[1]).result(timeout=CALL_TIMEOUT_S)
+                    _await(self._submit(lambda: (self._page(user_id), None)[1]), CALL_TIMEOUT_S, halted)
                     return None
                 except CloudError as exc:
                     if exc.code != "browser_busy" or time.monotonic() >= deadline or (halted and halted()):
@@ -2040,14 +2086,19 @@ def execute(session, user, task_id, name: str, args: dict):
     """app.agent.executors contract: run(session, user, task_id, name, args) -> ClientResult."""
     from app.agent.control import ClientResult
 
+    from app.agent.control import Stopped
+
     browser = pool()
     agent_run = _run_for(task_id, user.id)
     publish = agent_run.publish if agent_run else (lambda event: None)
+    halted = (lambda: agent_run.control.stopped) if agent_run else None
     busy = browser.reserve(
         user.id,
         on_wait=lambda on: publish({"type": "notice", "text": BUSY_NOTICE if on else ""}),
-        halted=(lambda: agent_run.control.stopped) if agent_run else None,
+        halted=halted,
     )
+    if halted is not None and halted():
+        raise Stopped(agent_run.control.reason)
     if busy:
         text = "Ошибка: все облачные браузеры заняты, попробуй позже" if busy == "browser_busy" else f"Ошибка облачного браузера: {busy}"
         return ClientResult(text, busy)
@@ -2065,10 +2116,10 @@ def execute(session, user, task_id, name: str, args: dict):
         except heli_files.FileError:
             return ClientResult("Ошибка: нет такого приложенного файла", "file_not_found")
         payload = {"name": info.name, "mimeType": _mime(info.name), "buffer": blob.read_bytes()}
-        result = browser.call(user.id, name, {**args, "_payload": payload}, task_id=task_id)
+        result = browser.call(user.id, name, {**args, "_payload": payload}, task_id=task_id, halted=halted)
     else:
-        result = browser.call(user.id, name, args, task_id=task_id)
-        if name in _CAPTCHA_TOOLS and not result.error and browser.captcha(user.id):
+        result = browser.call(user.id, name, args, task_id=task_id, halted=halted)
+        if name in _CAPTCHA_TOOLS and not result.error and browser.captcha(user.id, halted=halted):
             publish({"type": "screen", "version": browser.frame_version(user.id)})
             portal = _bitrix_portal(browser.url(user.id), str(args.get("url") or "") if name == "browser_open" else "")
             webhook = _bitrix_webhook(session, user, portal) if portal is not None else None
@@ -2098,8 +2149,6 @@ def execute(session, user, task_id, name: str, args: dict):
             elif agent_run is not None and not agent_run.control.stopped:
                 # Nobody passed it in time: the agent never solves captchas. The run ends with what it did,
                 # and «продолжи» picks it up once a person has signed in on the live screen.
-                from app.agent.control import Stopped
-
                 for info in result.files:
                     publish(heli_files.published(info))
                 raise Stopped("captcha")
@@ -2111,11 +2160,37 @@ def execute(session, user, task_id, name: str, args: dict):
                     browser.frame(user.id),
                     result.files,
                 )
+    if result.error == "stopped" or (halted is not None and halted()):
+        for info in result.files:
+            publish(heli_files.published(info))
+        raise Stopped(agent_run.control.reason if agent_run is not None else "stop")
+    if agent_run is not None:
+        result = _after_timeout(browser, user.id, agent_run, result)
     for info in result.files:
         publish(heli_files.published(info))
     publish({"type": "screen", "version": browser.frame_version(user.id)})
     shot = result.frame if (name in _SHOT_TOOLS or result.error) else None
     return ClientResult(result.text, result.error, shot)
+
+
+def _after_timeout(browser: CloudBrowser, user_id: uuid.UUID, agent_run, result: Result) -> Result:
+    """Count browser calls of this run that timed out in a row. After STUCK_TIMEOUTS the page hangs the
+    browser: close it (a stuck worker is replaced at once, the slot is free again) and tell the model to
+    open the page anew, instead of letting every next call wait out its minute."""
+    if result.error != "tool_timeout":
+        agent_run.browser_timeouts = 0
+        return result
+    agent_run.browser_timeouts = getattr(agent_run, "browser_timeouts", 0) + 1
+    if agent_run.browser_timeouts < STUCK_TIMEOUTS:
+        return result
+    agent_run.browser_timeouts = 0
+    log.warning("cloud browser hangs for user=%s, restarting it", user_id)
+    try:
+        browser.stop(user_id, wait_s=5)
+    except Exception:  # noqa: BLE001
+        log.info("cloud browser restart failed", exc_info=True)
+    agent_run.publish({"type": "notice", "text": "Облачный браузер завис — перезапускаю его, входы сохранены."})
+    return Result(STUCK_TEXT, "browser_restarted", result.frame, result.files)
 
 
 def _bitrix_portal(current: str, opened: str) -> str | None:

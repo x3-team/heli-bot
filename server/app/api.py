@@ -1125,7 +1125,7 @@ def run_control(task_id: uuid.UUID, body: ControlBody, user: User = Depends(get_
     elif body.action == "resume":
         agent_run.control.resume()
     else:
-        agent_run.control.stop()
+        agent_run.stop()
     return {"paused": agent_run.control.paused, "stopped": agent_run.control.stopped, "finished": agent_run.finished}
 
 
