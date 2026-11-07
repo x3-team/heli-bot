@@ -55,6 +55,22 @@ class Plan:
 
 
 PLANS: dict[str, Plan] = {
+    # A paid-only sign-up before the first purchase: no limits, every task asks for a plan.
+    "unpaid": Plan(
+        id="unpaid",
+        title="Тариф не выбран",
+        price_rub=Decimal("0"),
+        month_limit_rub=Decimal("0"),
+        day_limit_rub=Decimal("0"),
+        days=0,
+        schedules=0,
+        max_steps=0,
+        extend_steps=0,
+        task_max_rub=Decimal("0"),
+        smart=False,
+        features=(),
+        public=False,
+    ),
     "trial": Plan(
         id="trial",
         title="Пробная неделя",
@@ -156,10 +172,12 @@ def plan_of(user: User) -> Plan | None:
 
 
 def plan_status(user: User, now: datetime | None = None) -> str:
-    """none (no plan: beta/training account, old limits) | trial | active | expired."""
+    """none (no plan: beta/training account, old limits) | unpaid (signed up, nothing bought) | trial | active | expired."""
     plan = plan_of(user)
     if plan is None:
         return "none"
+    if plan.id == "unpaid":
+        return "unpaid"
     if user.plan_ends_at is None or aware(now) >= aware(user.plan_ends_at):
         return "expired"
     return "trial" if plan.id == "trial" else "active"
@@ -215,10 +233,19 @@ def post_tx(
 
 
 def start_trial(user: User, now: datetime | None = None) -> None:
-    """New sign-ups get the trial week when HELI_BILLING is on. Off: old behaviour, no plan."""
-    if not get_settings().billing_enabled:
+    """New sign-ups with HELI_BILLING on: the trial week if HELI_TRIAL is on, else nothing until they buy a plan.
+
+    HELI_BILLING off: old behaviour, no plan."""
+    settings = get_settings()
+    if not settings.billing_enabled:
         return
     moment = aware(now)
+    if not settings.trial_enabled:
+        user.plan = "unpaid"
+        user.plan_started_at = None
+        user.plan_ends_at = None
+        user.trial_ends_at = None  # no «Пробная неделя» badge in the apps
+        return
     user.plan = "trial"
     user.plan_started_at = moment
     user.plan_ends_at = moment + timedelta(days=PLANS["trial"].days)

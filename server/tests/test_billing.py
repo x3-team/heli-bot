@@ -128,6 +128,7 @@ def test_schedule_limit_by_plan(session):
 
 def test_billing_api_flow(client, session, monkeypatch):
     monkeypatch.setenv("HELI_BILLING", "1")
+    monkeypatch.setenv("HELI_TRIAL", "1")
     monkeypatch.setenv("HELI_ADMIN_EMAILS", "admin@example.com")
     headers = _signup(client)
     view = client.get("/v1/billing", headers=headers).json()
@@ -192,3 +193,24 @@ def test_plan_caps_task_and_smart_model(session):
     assert billing.task_caps(user) == (30, 0, Decimal("10"))
     assert not billing.smart_allowed(user)
     assert billing.tasks_left(Decimal("120")) == 85
+
+
+def test_paid_only_signup_needs_a_plan(client, session, monkeypatch):
+    monkeypatch.setenv("HELI_BILLING", "1")
+    headers = _signup(client, "paid@example.com")
+    view = client.get("/v1/billing", headers=headers).json()
+    assert view["plan"]["id"] == "unpaid"
+    assert view["plan"]["status"] == "unpaid"
+    assert view["usage"]["blocked"]
+    user = session.query(User).filter_by(email="paid@example.com").one()
+    assert user.trial_ends_at is None
+    with pytest.raises(QuotaError) as err:
+        _ensure_room(session, user, Decimal("0.1"))
+    assert err.value.code == "plan_required"
+    with pytest.raises(ScheduleError):
+        create_schedule(session, user, "a", "0 9 * * *", "сводка", now=NOW)
+    billing.post_tx(session, user, "topup", Decimal("390"), "Пополнение")
+    billing.buy_plan(session, user, "start")
+    assert billing.plan_status(user) == "active"
+    assert billing.balance(user) == Decimal("0.00")
+    _ensure_room(session, user, Decimal("0.1"))

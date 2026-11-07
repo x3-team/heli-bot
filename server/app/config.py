@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     )
     # Bot plans and wallet: new sign-ups start on the trial week (app/billing.py). Off: no plan, old limits.
     billing_enabled: bool = Field(default=False, validation_alias="HELI_BILLING")
+    # With HELI_BILLING: new sign-ups get the 7-day trial. Off (default): access is paid from the start.
+    trial_enabled: bool = Field(default=False, validation_alias="HELI_TRIAL")
     # PC hands (use_computer on the user's own Windows). Off in v0.1: the agent works
     # in the cloud computer. Turn on when desktop 1С needs it.
     pc_hands: bool = Field(default=False, validation_alias="HELI_PC_HANDS")

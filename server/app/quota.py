@@ -120,7 +120,7 @@ def snapshot(session: Session, user: User, now: datetime | None = None) -> Usage
     )
     week_percent = _percent(week_used, weekly_limit)
     month_percent = _percent(month_used, monthly_limit)
-    plan_expired = plan is not None and billing.plan_status(user, now) == "expired"
+    plan_expired = plan is not None and billing.plan_status(user, now) in ("expired", "unpaid")
     overage = billing.overage_budget(session, user, month_start) if plan is not None else Decimal("0")
     day_out = daily_limit > 0 and daily_used >= daily_limit
     if plan is not None:
