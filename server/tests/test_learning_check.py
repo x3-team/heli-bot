@@ -100,3 +100,55 @@ def test_email_places_name_the_key_not_the_value(session):
     places = learning_check(session)["export"]["raw"]["email_places"]
 
     assert places == {"task (not_a_tld)": 1, "task (non_ascii)": 1}
+
+
+def test_lost_task_is_closed_at_the_next_start(session):
+    from app.models import TaskSignal  # noqa: F401
+
+    user = _user(session, "client@example.com")
+    lost = start_task(session, user, "Задача до рестарта", {})
+    fresh = start_task(session, user, "Только что", {})
+    lost.created_at = datetime.now(timezone.utc) - timedelta(hours=2)
+    session.commit()
+    assert lost.outcome is None and fresh.outcome is None
+
+    start_task(session, user, "Следующая задача", {})
+    session.commit()
+
+    session.refresh(lost)
+    session.refresh(fresh)
+    assert lost.outcome == "aborted" and lost.stopped == "lost" and lost.finished_at is not None
+    assert session.scalar(select(Trajectory).where(Trajectory.task_id == lost.id)) is not None
+    assert fresh.outcome is None  # younger than an hour: may still be running
+
+
+def test_internal_account_is_marked_in_raw_and_never_counted_as_sft_ready(session, monkeypatch):
+    from app.quality import quality_summary
+    from app.trajectories import list_documents
+
+    monkeypatch.setenv("HELI_OPEN_ACCESS_EMAIL", "owner@heli.local")
+    user = _user(session, "owner@heli.local")
+    task = start_task(session, user, "Задача", {})
+    auto_finish(session, task.id, "success", "Готово")
+    rate_task(session, user, task.id, rating=1)
+    row = session.scalar(select(Trajectory).where(Trajectory.task_id == task.id))
+    row.payload = {k: v for k, v in row.payload.items() if k != "internal"}  # a document from before the flag
+    session.commit()
+
+    assert [doc["internal"] for doc in list_documents(session)] == [True]
+    assert list_documents(session, exclude_internal=True) == []
+    dataset = quality_summary(session)["dataset"]
+    assert dataset["confirmed_good"] == 1 and dataset["sft_ready"] == 0
+
+
+def test_revision_falls_back_to_the_deploy_file(tmp_path, monkeypatch):
+    from app import trajectories
+
+    for name in ("APP_REVISION", "GIT_SHA", "GIT_COMMIT", "SOURCE_COMMIT"):
+        monkeypatch.delenv(name, raising=False)
+    file = tmp_path / "REVISION"
+    file.write_text("10f8ab0 main 2026-11-07T12:58:08Z\n")
+    monkeypatch.setattr(trajectories, "REVISION_FILE", file)
+    assert trajectories.revision() == "10f8ab0"
+    monkeypatch.setattr(trajectories, "REVISION_FILE", tmp_path / "missing")
+    assert trajectories.revision() is None

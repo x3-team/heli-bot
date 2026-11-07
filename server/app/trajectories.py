@@ -11,7 +11,8 @@ import hashlib
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from decimal import Decimal
 from typing import Any
 
@@ -84,12 +85,20 @@ def is_internal(user: User | None) -> bool:
     return user is not None and _norm_email(user.email) in internal_emails()
 
 
+REVISION_FILE = Path(__file__).resolve().parent.parent / "REVISION"
+
+
 def revision() -> str | None:
+    """Which build ran the task: env first, else server/REVISION (written by deploy-pinvds: «<sha> <ref> <time>»)."""
     for name in ("APP_REVISION", "GIT_SHA", "GIT_COMMIT", "SOURCE_COMMIT"):
         value = os.environ.get(name, "").strip()
         if value:
             return value[:64]
-    return None
+    try:
+        first = REVISION_FILE.read_text(encoding="utf-8").split()
+    except OSError:
+        return None
+    return first[0][:64] if first else None
 
 
 def _aware(moment: datetime) -> datetime:
@@ -107,6 +116,37 @@ def _mark_finished(task: Task, stopped: str | None) -> None:
         task.duration_ms = max(0, int((now - _aware(task.created_at)).total_seconds() * 1000))
 
 
+# A run lives in the API process: a restart (every deploy) ends it and nobody closes its task. Such a task
+# never got an outcome, a journal or a dataset document. It is closed as aborted/«lost» this long after start.
+LOST_AFTER = timedelta(hours=1)
+
+
+def close_lost_tasks(
+    session: Session, user: User, *, keep: set[uuid.UUID] | None = None, older_than: timedelta = LOST_AFTER
+) -> int:
+    """Close this user's tasks that are open, older than `older_than` and have no live run."""
+    from app.agent.runs import registry
+
+    cutoff = _now() - older_than
+    running = registry.running_for(user.id) | (keep or set())
+    lost = [
+        task
+        for task in session.scalars(
+            select(Task).where(Task.user_id == user.id, Task.outcome.is_(None), Task.finished_at.is_(None))
+        )
+        if task.id not in running and task.created_at is not None and _aware(task.created_at) < cutoff
+    ]
+    for task in lost:
+        try:
+            with session.begin_nested():
+                auto_finish(session, task.id, "aborted", None, stopped="lost")
+        except Exception:  # noqa: BLE001
+            log.exception("could not close lost task=%s", task.id)
+    if lost:
+        log.info("closed %d lost task(s) user=%s", len(lost), user.id)
+    return len(lost)
+
+
 def start_task(session: Session, user: User, request_text: str, context: dict | None) -> Task:
     if not user.consent_pdn:
         raise TrajectoryError("pdn_consent_required")
@@ -120,6 +160,7 @@ def start_task(session: Session, user: User, request_text: str, context: dict | 
     )
     session.add(task)
     session.flush()
+    close_lost_tasks(session, user, keep={task.id})
     from app import signals
 
     signals.safe(signals.on_task_start, session, user, task)
@@ -533,12 +574,16 @@ def list_documents(
     exclude_internal: bool = False,
 ) -> list[dict[str, Any]]:
     rows = session.scalars(select(Trajectory).where(Trajectory.consent.is_(True))).all()
-    internal_ids = _internal_user_ids(session) if exclude_internal else set()
+    internal_ids = _internal_user_ids(session)
     documents = []
     for row in rows:
         payload = row.payload
-        if exclude_internal and (payload.get("internal") or row.user_id in internal_ids):
+        internal = bool(payload.get("internal")) or row.user_id in internal_ids
+        if exclude_internal and internal:
             continue
+        if internal and not payload.get("internal"):
+            # Documents written before the flag existed: raw marks them by the account, as the export promises.
+            payload = {**payload, "internal": True}
         if success_only and payload.get("result") != "success":
             continue
         if thumbs_up_only:
