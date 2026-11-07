@@ -18,6 +18,8 @@ run journal (finished_at/stopped/duration, tasks never closed), feedback, signal
 export (line counts, no forbidden keys or account emails) and `/v1/admin/quality` + export called on the running
 API as an admin. Prints counts only: no task texts, emails, ids or tokens. Nothing on the host changes.
 
+Input `admin_emails` (with `mode = deploy`): writes `HELI_ADMIN_EMAILS` into `.env` (replaces the list; `.env` is backed up first). A listed address signs up in the app with a password and no invite, and gets admin rights (`/v1/admin/*`).
+
 `.env`, `var/` (database, browser profiles, files) and the venv are kept as they are.
 
 ## Which build is on prod
