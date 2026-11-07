@@ -907,6 +907,16 @@ button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink
 .bill-sub { color: var(--muted); font-size: 13px; }
 .bill-card.dark .bill-sub { color: #c5cbc6; }
 .bill-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+/* No plan yet (paid from the start): the first step card on «Тариф». */
+.bill-start { gap: 10px; margin-bottom: 18px; animation: bill-rise 360ms cubic-bezier(.2,.7,.2,1) both; }
+.bill-steps { display: grid; gap: 8px; margin: 6px 0 0; padding: 0; list-style: none; counter-reset: step; max-width: 460px; }
+.bill-steps li { counter-increment: step; display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid rgba(255,255,255,0.12); border-radius: 12px; color: #eceae3; font-size: 14px; }
+.bill-steps li::before { content: counter(step); display: grid; place-items: center; flex: none; width: 24px; height: 24px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.3); font-size: 12px; font-weight: 700; }
+.bill-steps li[data-done]::before { content: "✓"; background: #3fd08f; border-color: #3fd08f; color: #111412; }
+.bill-steps li span { flex: 1; }
+.bill-steps li b { color: #fff; font-weight: 600; }
+@keyframes bill-rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .bill-start { animation: none; } }
 .bill-actions button { height: 44px; padding: 0 20px; border-radius: 12px; }
 button.on-dark, button.on-dark[aria-pressed] { background: #111412; color: #fff; border-color: #2b312d; }
 button.on-dark:hover { border-color: #4a514c; }
