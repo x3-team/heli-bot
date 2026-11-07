@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.browser import BrowserError, pool_start
 from app.llm.client import HeliClient, HeliError
 from app.llm.run import run_turn
+from app.billing import schedule_limit
 from app.masking import redact_secrets_text
 from app.models import Schedule, User
 from app.notify import notify
@@ -89,6 +90,13 @@ def describe(expression: str) -> str:
 def create_schedule(session: Session, user: User, label: str, expression: str, request: str, now: datetime | None = None) -> Schedule:
     cron = parse_expression(expression)
     moment = _aware(now)
+    limit = schedule_limit(user)
+    if limit is not None:
+        count = session.scalar(
+            select(func.count(Schedule.id)).where(Schedule.user_id == user.id, Schedule.enabled.is_(True))
+        )
+        if (count or 0) >= limit:
+            raise ScheduleError("schedule_limit")
     row = Schedule(
         user_id=user.id,
         label=label.strip()[:200],

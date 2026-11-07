@@ -56,6 +56,7 @@ from app.agent.control import ClientResult
 from app.agent.task_run import decode_screenshot
 from app.llm.run import run_turn
 from app.memory import MemoryError, delete_memory, list_memory, remember
+from app import billing
 from app.quota import (
     QuotaError,
     estimate_turn_reserve,
@@ -103,6 +104,10 @@ _STATUS = {
     "bad_mail_disposition": 400,
     "bad_screenshot": 400,
     "limit_reached": 403,
+    "plan_required": 402,
+    "insufficient_funds": 402,
+    "bad_plan": 400,
+    "bad_kind": 400,
     "local_browser_required": 409,
     "bad_browser": 400,
     "bad_port": 400,
@@ -761,6 +766,153 @@ def usage(
     view = public_usage(snapshot(session, user), trial_active=trial_active(user))
     view["trial_ends_at"] = _iso_utc(user.trial_ends_at)
     return view
+
+
+class BillingPlanBody(BaseModel):
+    plan: str = Field(min_length=1, max_length=16)
+
+
+class BillingSettingsBody(BaseModel):
+    auto_renew: bool | None = None
+    overage_enabled: bool | None = None
+    overage_cap_rub: Decimal | None = Field(default=None, ge=0, le=Decimal("100000"))
+
+
+class TopupBody(BaseModel):
+    amount_rub: Decimal = Field(gt=0, le=Decimal("100000"))
+
+
+class WalletAdjustBody(BaseModel):
+    """Operator movement: a paid invoice (+), a correction (− or +). ref makes a retry safe."""
+
+    amount_rub: Decimal = Field(ge=Decimal("-100000"), le=Decimal("100000"))
+    note: str = Field(default="", max_length=200)
+    ref: str | None = Field(default=None, min_length=1, max_length=100)
+
+
+TOPUP_MIN_RUB = Decimal("100")
+
+
+def _billing_fail(exc: billing.BillingError) -> None:
+    raise HTTPException(status_code=_STATUS.get(exc.code, 400), detail=exc.code)
+
+
+def billing_view(session: Session, user: User) -> dict:
+    billing.refresh(session, user)
+    snap = snapshot(session, user)
+    plan = billing.plan_of(user)
+    status = billing.plan_status(user)
+    since = snap.month_start or datetime.now(timezone.utc)
+    return {
+        "plan": {
+            "id": plan.id if plan else None,
+            "title": plan.title if plan else "Бета-тест",
+            "price_rub": str(billing.rub(plan.price_rub)) if plan else None,
+            "status": status,
+            "started_at": _iso_utc(user.plan_started_at) if plan else None,
+            "period_ends_at": _iso_utc(user.plan_ends_at) if plan else None,
+            "auto_renew": bool(user.plan_auto_renew),
+        },
+        "wallet": {"balance_rub": str(billing.balance(user))},
+        "usage": {
+            "month_percent": float(min(Decimal(100), snap.month_percent)),
+            "day_percent": float(min(Decimal(100), snap.day_percent)),
+            "blocked": snap.blocked,
+            "warning": snap.warning,
+            "in_overage": plan is not None and snap.month_used >= snap.monthly_limit and not snap.blocked,
+            "period_ends_at": _iso_utc(snap.period_ends_at),
+        },
+        "overage": {
+            "enabled": bool(user.overage_enabled),
+            "cap_rub": str(billing.rub(user.overage_cap_rub)),
+            "spent_rub": str(billing.overage_spent(session, user, since)) if plan else "0.00",
+        },
+        "plans": billing.public_plans(),
+        "topup": {"available": False, "min_rub": str(TOPUP_MIN_RUB)},
+    }
+
+
+@router.get("/billing")
+def billing_get(user: User = Depends(get_current_user), session: Session = Depends(get_db)) -> dict:
+    return billing_view(session, user)
+
+
+@router.get("/billing/history")
+def billing_history(
+    limit: int = 50,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    return {"items": billing.history(session, user, limit)}
+
+
+@router.post("/billing/plan")
+def billing_plan(
+    body: BillingPlanBody,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    try:
+        billing.buy_plan(session, user, body.plan)
+    except billing.BillingError as exc:
+        _billing_fail(exc)
+    return billing_view(session, user)
+
+
+@router.put("/billing/settings")
+def billing_settings(
+    body: BillingSettingsBody,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    if body.auto_renew is not None:
+        user.plan_auto_renew = body.auto_renew
+    if body.overage_enabled is not None:
+        user.overage_enabled = body.overage_enabled
+    if body.overage_cap_rub is not None:
+        user.overage_cap_rub = billing.rub(body.overage_cap_rub)
+    session.flush()
+    return billing_view(session, user)
+
+
+@router.post("/billing/topup")
+def billing_topup(body: TopupBody, user: User = Depends(get_current_user)) -> dict:
+    # Acquiring is not connected yet: the operator credits paid invoices (POST /admin/users/{id}/wallet).
+    raise HTTPException(status_code=501, detail="payments_not_configured")
+
+
+@router.get("/admin/users/{user_id}/billing")
+def admin_user_billing(
+    user_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    _require_admin(user)
+    target = session.get(User, user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="not_found")
+    return {"email": target.email, **billing_view(session, target), "history": billing.history(session, target, 50)}
+
+
+@router.post("/admin/users/{user_id}/wallet")
+def admin_wallet(
+    user_id: uuid.UUID,
+    body: WalletAdjustBody,
+    user: User = Depends(get_current_user),
+    session: Session = Depends(get_db),
+) -> dict:
+    _require_admin(user)
+    target = session.get(User, user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="not_found")
+    kind = "topup" if body.amount_rub > 0 else "adjust"
+    title = body.note.strip() or ("Пополнение" if kind == "topup" else "Корректировка")
+    try:
+        billing.post_tx(session, target, kind, body.amount_rub, title, ref=f"admin:{body.ref}" if body.ref else billing.new_ref())
+    except billing.BillingError as exc:
+        _billing_fail(exc)
+    log.info("wallet adjusted by admin kind=%s", kind)
+    return billing_view(session, target)
 
 
 def _iso_utc(moment: datetime | None) -> str | None:

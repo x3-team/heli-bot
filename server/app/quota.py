@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app import billing
 from app.config import get_settings
 from app.llm.client import Completion, HeliClient
 from app.llm.prices import cost_rub
@@ -47,9 +48,26 @@ class UsageSnapshot:
     warning: bool
     week_key: str
     month_key: str
+    # Plan accounts (app/billing.py): the month is the paid period, overage may extend it.
+    month_start: datetime | None = None
+    period_ends_at: datetime | None = None
+    plan_expired: bool = False
+    overage_budget: Decimal = Decimal("0")
+
+    @property
+    def day_percent(self) -> Decimal:
+        return _percent(self.daily_used, self.daily_limit) if self.daily_limit > 0 else Decimal("0")
+
+    def overage_needed(self, extra: Decimal = Decimal("0")) -> Decimal:
+        """Wallet rubles (with markup) the cost above the month limit needs, counting `extra` more cost."""
+        over = self.month_used + extra - max(self.monthly_limit, self.month_used)
+        return max(Decimal("0"), over) * billing.OVERAGE_MARKUP
 
 
 def weekly_limit_of(user: User) -> Decimal:
+    if billing.plan_of(user) is not None:
+        # Plans have day + month limits only: the week never binds before the month.
+        return monthly_limit_of(user)
     if user.weekly_limit_rub is not None:
         return _money(user.weekly_limit_rub)
     monthly = _money(user.monthly_limit_rub)
@@ -59,6 +77,9 @@ def weekly_limit_of(user: User) -> Decimal:
 
 
 def monthly_limit_of(user: User) -> Decimal:
+    plan = billing.plan_of(user)
+    if plan is not None:
+        return _money(plan.month_limit_rub)
     monthly = _money(user.monthly_limit_rub)
     if monthly <= 0:
         return _money(get_settings().default_monthly_limit_rub)
@@ -70,6 +91,11 @@ def snapshot(session: Session, user: User, now: datetime | None = None) -> Usage
     week_start = week_local.astimezone(timezone.utc)
     month_start = month_local.astimezone(timezone.utc)
     day_start = day_local.astimezone(timezone.utc)
+    plan = billing.plan_of(user)
+    month_key = month_local.strftime("%Y-%m")
+    if plan is not None and user.plan_started_at is not None:
+        month_start = billing.aware(user.plan_started_at)
+        month_key = month_start.astimezone(MSK).strftime("%Y-%m-%dT%H:%M")
     week_used = _spent(session, UsageLedger.user_id == user.id, UsageLedger.created_at >= week_start)
     month_used = _spent(session, UsageLedger.user_id == user.id, UsageLedger.created_at >= month_start)
     # Every limit is per account: a training pack and a tester never share a day.
@@ -77,7 +103,7 @@ def snapshot(session: Session, user: User, now: datetime | None = None) -> Usage
     weekly_limit = weekly_limit_of(user)
     monthly_limit = monthly_limit_of(user)
     settings = get_settings()
-    daily_limit = _money(settings.daily_limit_rub)
+    daily_limit = _money(plan.day_limit_rub) if plan is not None else _money(settings.daily_limit_rub)
     # Server-wide day cap only when GLOBAL_DAILY_LIMIT_RUB > 0 (off by default).
     global_daily_limit = _money(settings.global_daily_limit_rub)
     global_daily_used = (
@@ -85,9 +111,13 @@ def snapshot(session: Session, user: User, now: datetime | None = None) -> Usage
     )
     week_percent = _percent(week_used, weekly_limit)
     month_percent = _percent(month_used, monthly_limit)
+    plan_expired = plan is not None and billing.plan_status(user, now) == "expired"
+    overage = billing.overage_budget(session, user, month_start) if plan is not None else Decimal("0")
+    month_over = month_used >= monthly_limit and (overage <= 0 or plan_expired)
     blocked = (
-        week_percent >= 100
-        or month_percent >= 100
+        plan_expired
+        or (plan is None and week_percent >= 100)
+        or month_over
         or (daily_limit > 0 and daily_used >= daily_limit)
         or (global_daily_limit > 0 and global_daily_used >= global_daily_limit)
     )
@@ -106,7 +136,11 @@ def snapshot(session: Session, user: User, now: datetime | None = None) -> Usage
         blocked=blocked,
         warning=warning,
         week_key=week_local.date().isoformat(),
-        month_key=month_local.strftime("%Y-%m"),
+        month_key=month_key,
+        month_start=month_start,
+        period_ends_at=billing.aware(user.plan_ends_at) if plan is not None and user.plan_ends_at else None,
+        plan_expired=plan_expired,
+        overage_budget=overage,
     )
 
 
@@ -208,6 +242,7 @@ def metered_complete(
     hold.amount_rub = completion.cost_rub
     hold.reserved = False
     session.flush()
+    settle_overage(session, user, hold)
     record_alerts(session, user)
     return completion
 
@@ -233,8 +268,35 @@ def record_charge(
     )
     session.add(row)
     session.flush()
+    settle_overage(session, user, row, at)
     record_alerts(session, user, at)
     return row
+
+
+def settle_overage(session: Session, user: User, row: UsageLedger, now: datetime | None = None) -> None:
+    """The part of this charge above the plan's month limit is paid from the wallet (× markup)."""
+    if billing.plan_of(user) is None or not user.overage_enabled:
+        return
+    snap = snapshot(session, user, now)
+    amount = _money(row.amount_rub)
+    prior = snap.month_used - amount
+    over = snap.month_used - max(prior, snap.monthly_limit)
+    if over <= 0:
+        return
+    budget = billing.overage_budget(session, user, snap.month_start or _aware(now))
+    debit = min(billing.rub(over * billing.OVERAGE_MARKUP), budget)
+    if debit <= 0:
+        return
+    billing.post_tx(
+        session,
+        user,
+        "overage",
+        -debit,
+        "Сверх лимита тарифа",
+        ref=f"overage:{row.id}",
+        allow_partial=True,
+        now=now,
+    )
 
 
 def record_alerts(session: Session, user: User, now: datetime | None = None) -> None:
@@ -278,12 +340,15 @@ def period_bounds(now: datetime | None = None) -> tuple[datetime, datetime, date
 
 
 def _ensure_room(session: Session, user: User, reserve: Decimal) -> None:
+    billing.refresh(session, user)
     snap = snapshot(session, user)
+    if snap.plan_expired:
+        raise QuotaError("plan_required")
     if snap.blocked:
         raise QuotaError("limit_reached")
-    if snap.week_used + reserve > snap.weekly_limit:
+    if billing.plan_of(user) is None and snap.week_used + reserve > snap.weekly_limit:
         raise QuotaError("limit_reached")
-    if snap.month_used + reserve > snap.monthly_limit:
+    if snap.month_used + reserve > snap.monthly_limit and snap.overage_needed(reserve) > snap.overage_budget:
         raise QuotaError("limit_reached")
     if snap.daily_limit > 0 and snap.daily_used + reserve > snap.daily_limit:
         raise QuotaError("limit_reached")

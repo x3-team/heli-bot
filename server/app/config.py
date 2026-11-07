@@ -41,6 +41,8 @@ class Settings(BaseSettings):
         default=Decimal("1000"),
         validation_alias="DEFAULT_MONTHLY_LIMIT_RUB",
     )
+    # Bot plans and wallet: new sign-ups start on the trial week (app/billing.py). Off: no plan, old limits.
+    billing_enabled: bool = Field(default=False, validation_alias="HELI_BILLING")
     # PC hands (use_computer on the user's own Windows). Off in v0.1: the agent works
     # in the cloud computer. Turn on when desktop 1С needs it.
     pc_hands: bool = Field(default=False, validation_alias="HELI_PC_HANDS")

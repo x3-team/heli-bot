@@ -40,6 +40,14 @@ class User(Base):
     password_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     trial_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Bot plan and wallet (app/billing.py). plan=None: beta/training account on the old limits.
+    plan: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    plan_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    plan_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    plan_auto_renew: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1", nullable=False)
+    wallet_rub: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"), server_default="0", nullable=False)
+    overage_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    overage_cap_rub: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0"), server_default="0", nullable=False)
 
     tasks: Mapped[list["Task"]] = relationship(back_populates="user")
 
@@ -300,3 +308,19 @@ class KnowledgeNote(Base):
     # search until an admin approves it. Seeds and older notes have approved_at=None but are not candidates.
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reviewed_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+
+
+class WalletTx(Base):
+    """One movement of the bot wallet. amount_rub: + top-up/refund, − plan/overage."""
+
+    __tablename__ = "wallet_tx"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    amount_rub: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    balance_rub: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    # Idempotency key: payment id, overage:<ledger row>, plan:<user>:<time>.
+    ref: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
