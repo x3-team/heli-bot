@@ -93,42 +93,6 @@ def test_yandex_xml_is_parsed() -> None:
     assert hits[0].snippet == "Система для продаж"
 
 
-def test_search_uses_yandex_when_key_is_set(monkeypatch) -> None:
-    monkeypatch.delenv("HELI_SEARCH_PROVIDER", raising=False)
-    monkeypatch.setenv("YANDEX_SEARCH_API_KEY", "k")
-    monkeypatch.setenv("YANDEX_SEARCH_FOLDER_ID", "f")
-    xml = "<r><doc><url>https://a.ru/</url><title>A</title></doc></r>".encode()
-    seen = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen["host"] = request.url.host
-        seen["auth"] = request.headers["authorization"]
-        seen["body"] = json.loads(request.content)
-        return httpx.Response(200, json={"rawData": base64.b64encode(xml).decode()})
-
-    hits = web_search("амо", http=httpx.Client(transport=httpx.MockTransport(handler)))
-    assert seen["host"] == "searchapi.api.cloud.yandex.net"
-    assert seen["auth"] == "Api-Key k"
-    assert seen["body"]["query"]["queryText"] == "амо"
-    assert [hit.url for hit in hits] == ["https://a.ru/"]
-
-
-def test_search_falls_back_to_wikipedia_without_keys(monkeypatch) -> None:
-    for name in ["HELI_SEARCH_PROVIDER", "YANDEX_SEARCH_API_KEY", "YANDEX_SEARCH_FOLDER_ID", "TAVILY_API_KEY"]:
-        monkeypatch.delenv(name, raising=False)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.host == "ru.wikipedia.org"
-        return httpx.Response(
-            200,
-            json={"query": {"search": [{"title": "Битрикс24", "snippet": "<span>CRM</span> система"}]}},
-        )
-
-    hits = web_search("битрикс", http=httpx.Client(transport=httpx.MockTransport(handler)))
-    assert hits[0].url == "https://ru.wikipedia.org/wiki/Битрикс24"
-    assert hits[0].snippet == "CRM система"
-
-
 class _ToolScript:
     """Fake gateway: classify, then one tool call, then the answer."""
 

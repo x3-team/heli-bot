@@ -324,3 +324,24 @@ class WalletTx(Base):
     # Idempotency key: payment id, overage:<ledger row>, plan:<user>:<time>.
     ref: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+
+
+class WebPage(Base):
+    """Cache of public pages Heli has read (open_url) or indexed (official help sitemaps).
+
+    Shared by all accounts: only pages read without the client's sign-ins go here, and the text is masked.
+    It is raw material for search, not the checked knowledge base (KnowledgeNote)."""
+
+    __tablename__ = "web_pages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    url: Mapped[str] = mapped_column(String(1000), nullable=False, unique=True)
+    host: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # "docs" — official help index, "agent" — a page the agent opened.
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="agent")
+    etag: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

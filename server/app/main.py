@@ -21,6 +21,7 @@ from app.config import get_settings
 from app.files import register as register_files
 from app.masking import install_redact_filter
 from app.schedules import install_ticker, ticker_status
+from app.search.crawl import install_crawler
 
 
 def create_app() -> FastAPI:
@@ -36,8 +37,11 @@ def create_app() -> FastAPI:
     app.state.mail_sink = []
 
     @app.get("/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok"}
+    def health() -> dict[str, str | None]:
+        # revision: the git SHA deploy-pinvds wrote into server/REVISION, so prod can be matched to main.
+        from app.trajectories import revision
+
+        return {"status": "ok", "revision": revision()}
 
     @app.get("/health/schedules")
     def health_schedules() -> dict:
@@ -58,6 +62,7 @@ def create_app() -> FastAPI:
     register_knowledge()
     register_cloud_browser(background=True)
     install_ticker()
+    install_crawler()
     return app
 
 

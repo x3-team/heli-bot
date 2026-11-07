@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from app.web import WebError, fetch_page, web_search
 
@@ -39,6 +40,10 @@ TOOLS: list[dict] = [
                 "type": "object",
                 "properties": {
                     "url": {"type": "string", "description": "Адрес страницы, http или https"},
+                    "fresh": {
+                        "type": "boolean",
+                        "description": "true — не брать копию из кеша, а прочитать страницу заново (свежие цены, новости)",
+                    },
                 },
                 "required": ["url"],
             },
@@ -90,24 +95,73 @@ def call_tool(name: str, args: dict) -> tuple[str, str | None]:
     name = ALIASES.get(name, name)
     try:
         if name == "web_search":
-            hits = web_search(str(args.get("query", "")))
+            query = str(args.get("query", ""))
+            hits = web_search(query)
+            hint = _weak_hint(query, hits)
             if not hits:
-                return "Ничего не найдено.", None
+                return "Ничего не найдено." + hint, None
             hits = sorted(hits, key=lambda hit: official_rank(hit.url))  # stable: search order within a group
             lines = [
                 f"{i}. {hit.title}{' (официальный источник)' if official_rank(hit.url) == 0 else ''}\n{hit.url}\n{hit.snippet}"
                 for i, hit in enumerate(hits, 1)
             ]
-            return "\n\n".join(lines), None
+            return "\n\n".join(lines) + hint, None
         if name == "open_url":
-            page = fetch_page(str(args.get("url", "")))
-            parts = [f"Адрес: {page.url}"]
-            if page.title:
-                parts.append(f"Заголовок: {page.title}")
-            parts.append(page.text or "(текста на странице нет)")
-            if page.links:
-                parts.append("Ссылки:\n" + "\n".join(f"- {label}: {href}" for label, href in page.links))
-            return "\n\n".join(parts), None
+            return _open_url(str(args.get("url", "")), bool(args.get("fresh"))), None
     except WebError as exc:
         return f"Ошибка: {exc.code}", exc.code
     return f"Ошибка: неизвестный инструмент {name}", "unknown_tool"
+
+
+WEAK_HINT = (
+    "\n\nВыдача слабая: общего веб-поиска без ключа нет, ищутся справки сервисов, прочитанные страницы, "
+    "Викиданные и Википедия. Открой официальный сайт сам (open_url или browser_open; адрес — из результатов "
+    "выше, из Викиданных или известный тебе) и ищи на нём: разделы «Цены», «Тарифы», «Помощь», поиск по сайту."
+)
+# Query parameters that may carry a secret: such pages are never cached.
+_SECRET_PARAM = re.compile(r"(^|&)(token|key|apikey|api_key|sig|signature|auth|session|sid|code|password)=", re.I)
+
+
+def _weak_hint(query: str, hits) -> str:
+    from app.search import is_weak
+
+    return WEAK_HINT if is_weak(hits) else ""
+
+
+def _cacheable(url: str) -> bool:
+    from urllib.parse import urlsplit
+
+    return not _SECRET_PARAM.search(urlsplit(url).query or "")
+
+
+def _render(url: str, title: str, body: str, note: str = "") -> str:
+    parts = [f"Адрес: {url}" + note]
+    if title:
+        parts.append(f"Заголовок: {title}")
+    parts.append(body or "(текста на странице нет)")
+    return "\n\n".join(parts)
+
+
+def _open_url(url: str, fresh: bool) -> str:
+    """Read a page, through the cache of public pages. Raises WebError."""
+    from app.search import cache
+
+    normal = url.strip()
+    if normal and "://" not in normal:
+        normal = "https://" + normal
+    if not fresh and _cacheable(normal):
+        with cache.cache_session() as session:
+            page = cache.get(session, normal) if session is not None else None
+            if page is not None and cache.is_fresh(page):
+                cache.touch(session, page)
+                note = f" (копия из кеша от {page.fetched_at:%d.%m.%Y}; fresh=true — прочитать заново)"
+                return _render(page.url, page.title, page.text, note)
+    page = fetch_page(normal)
+    body = page.text
+    if page.links:
+        body += "\n\nСсылки:\n" + "\n".join(f"- {label}: {href}" for label, href in page.links)
+    if _cacheable(page.url):
+        with cache.cache_session() as session:
+            if session is not None:
+                cache.store(session, page.url, page.title, body, source="agent")
+    return _render(page.url, page.title, body)

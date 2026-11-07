@@ -18,7 +18,25 @@ run journal (finished_at/stopped/duration, tasks never closed), feedback, signal
 export (line counts, no forbidden keys or account emails) and `/v1/admin/quality` + export called on the running
 API as an admin. Prints counts only: no task texts, emails, ids or tokens. Nothing on the host changes.
 
+Input `admin_emails` (with `mode = deploy`): writes `HELI_ADMIN_EMAILS` into `.env` (replaces the list; `.env` is backed up first). A listed address signs up in the app with a password and no invite, and gets admin rights (`/v1/admin/*`).
+
 `.env`, `var/` (database, browser profiles, files) and the venv are kept as they are.
+
+## Which build is on prod
+
+- `GET https://bot-api.getheli.ru/health` → `{"status": "ok", "revision": "<git sha>"}`: the commit that
+  `deploy-pinvds` packed into `server/REVISION`. `null` means a copy that did not come from the workflow.
+- `mode = diff` prints the running `REVISION`, the rsync dry run for `server/`, and since 07.11 also:
+  the top-level layout of `/opt/heli-bot` (names only), files outside `server/` that are not in git
+  (`.env`, `var`, `backups`, `venv` are skipped), the diff of `/opt/heli-bot/infra/deploy` against the
+  release, and any `issue-cert*` script with long values masked (so its steps can be kept in this README).
+- `mode = deploy` also refreshes `/opt/heli-bot/infra/deploy` from the release **without deleting**
+  anything that exists only on the host, after the API is up. The old copy is in the backup tarball.
+  Reason: the hand-copied `ensure-open-access-in-env.sh` / `env.venv.example` there still suggested
+  `HELI_OPEN_ACCESS=1`; a `.env` restored from them would have opened the shared account.
+
+Reconciled 07.11.2026: `server/` on the host equals main `89d2263` file for file (diff run 42380315746:
+only `REVISION` differs).
 
 The API must run only under the `heli-bot-api` unit. If another process (for example `python -m app.main`
 started by hand) holds port 8001, `deploy` stops it before the restart and then checks that the process

@@ -1,7 +1,7 @@
 """Internet access for the agent: web search and reading a page.
 
-Search goes through an official API (Yandex Search API or Tavily) when a key is set.
-Without a key it falls back to Wikipedia search, which needs no key. Page reading
+Search is hybrid and needs no paid key (app.search): own index of official help, the cache of
+pages Heli has read, Wikidata and Wikipedia. Yandex Search API and Tavily join only behind flags. Page reading
 works without any key. Private and loopback addresses are refused, so the agent
 cannot reach services on the server itself.
 """
@@ -57,38 +57,27 @@ class Page:
 
 
 def search_provider() -> str:
-    explicit = os.environ.get("HELI_SEARCH_PROVIDER", "").strip().lower()
-    if explicit:
-        return explicit
-    if os.environ.get("YANDEX_SEARCH_API_KEY") and os.environ.get("YANDEX_SEARCH_FOLDER_ID"):
-        return "yandex"
-    if os.environ.get("TAVILY_API_KEY"):
-        return "tavily"
-    return "wikipedia"
+    """Which web search runs: "yandex" when the Yandex Search API is switched on, else "hybrid"
+    (own help index, page cache, Wikidata, Wikipedia; see app.search)."""
+    from app.search import yandex_enabled
+
+    return "yandex" if yandex_enabled() else "hybrid"
 
 
-def web_search(query: str, limit: int = 6, http: httpx.Client | None = None) -> list[SearchHit]:
+def web_search(query: str, limit: int = 8, http: httpx.Client | None = None) -> list[SearchHit]:
+    from app.search import hybrid_search
+
     query = query.strip()
     if not query:
         raise WebError("empty_query")
     limit = max(1, min(limit, 10))
-    provider = search_provider()
-    own = http is None
-    client = http or _client()
     try:
-        if provider == "yandex":
-            return _yandex(client, query, limit)
-        if provider == "tavily":
-            return _tavily(client, query, limit)
-        return _wikipedia(client, query, limit)
+        return hybrid_search(query, limit, http=http)
     except WebError:
         raise
     except Exception:
-        log.info("web search failed provider=%s", provider)
+        log.info("web search failed")
         raise WebError("search_failed") from None
-    finally:
-        if own:
-            client.close()
 
 
 def _yandex(client: httpx.Client, query: str, limit: int) -> list[SearchHit]:
@@ -151,27 +140,9 @@ def _tavily(client: httpx.Client, query: str, limit: int) -> list[SearchHit]:
 
 
 def _wikipedia(client: httpx.Client, query: str, limit: int) -> list[SearchHit]:
-    lang = "ru" if re.search(r"[а-яё]", query, re.I) else "en"
-    response = client.get(
-        f"https://{lang}.wikipedia.org/w/api.php",
-        params={
-            "action": "query",
-            "list": "search",
-            "srsearch": query,
-            "srlimit": str(limit),
-            "format": "json",
-            "utf8": "1",
-        },
-    )
-    if response.status_code != 200:
-        raise WebError("search_failed")
-    hits = []
-    for item in response.json().get("query", {}).get("search", []):
-        title = str(item.get("title", ""))
-        snippet = re.sub(r"<[^>]+>", "", unescape(str(item.get("snippet", ""))))
-        url = f"https://{lang}.wikipedia.org/wiki/{title.replace(' ', '_')}"
-        hits.append(SearchHit(title=title, url=url, snippet=snippet))
-    return hits
+    from app.search import wikipedia
+
+    return wikipedia(client, query, limit)
 
 
 # --- page reading -----------------------------------------------------------
@@ -224,7 +195,9 @@ def check_url(url: str, resolver=socket.getaddrinfo) -> str:
     return url
 
 
-def fetch_page(url: str, http: httpx.Client | None = None, resolver=socket.getaddrinfo) -> Page:
+def fetch_page(
+    url: str, http: httpx.Client | None = None, resolver=socket.getaddrinfo, links_limit: int = LINKS_LIMIT
+) -> Page:
     own = http is None
     client = http or _client()
     try:
@@ -246,7 +219,7 @@ def fetch_page(url: str, http: httpx.Client | None = None, resolver=socket.getad
                 encoding = response.encoding or "utf-8"
             raw = bytes(body).decode(encoding, errors="replace")
             if "html" in kind or raw.lstrip()[:15].lower().startswith(("<!doctype", "<html")):
-                return parse_html(current, raw)
+                return parse_html(current, raw, links_limit)
             if kind.startswith("text/") or "json" in kind or "xml" in kind:
                 return Page(url=current, title="", text=_squeeze(raw)[:PAGE_TEXT_LIMIT])
             raise WebError("unsupported_content")
@@ -313,7 +286,7 @@ class _TextParser(HTMLParser):
             self._anchor.append(data)
 
 
-def parse_html(url: str, raw: str) -> Page:
+def parse_html(url: str, raw: str, links_limit: int = LINKS_LIMIT) -> Page:
     parser = _TextParser(url)
     try:
         parser.feed(raw)
@@ -327,7 +300,7 @@ def parse_html(url: str, raw: str) -> Page:
             continue
         seen.add(href)
         links.append((label, href))
-        if len(links) >= LINKS_LIMIT:
+        if len(links) >= links_limit:
             break
     return Page(
         url=url,

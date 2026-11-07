@@ -38,7 +38,7 @@ from app.memory import relevant, with_memory
 from app.models import Task, User
 from app.quota import QuotaError, estimate_turn_reserve, metered_complete, remaining_ratio, snapshot
 from app.trajectories import add_step
-from app.web import search_provider
+from app.search import browser_serp_enabled, yandex_enabled
 
 log = logging.getLogger(__name__)
 
@@ -62,7 +62,9 @@ SYSTEM = (
     "Когда нужны свежие данные, ссылки, цены, контакты или проверка фактов, сначала найди и открой источник, "
     "потом отвечай. Давай прямые ссылки на сайты и указывай, откуда взял данные. "
     "Не говори, что у тебя нет доступа к интернету. Если поиск не дал результата, открой известный "
-    "официальный сайт через open_url. Не называй другие модели. "
+    "официальный сайт через open_url. web_search без ключа ищет по справкам сервисов, прочитанным "
+    "страницам, Викиданным и Википедии, а не по всему интернету: за ценами, тарифами и контактами "
+    "компании сразу иди на её официальный сайт. Не называй другие модели. "
     "Цифры, законы, ставки, курсы и цены всегда проверяй поиском, даже если думаешь, что знаешь: "
     "ответ из памяти может быть устаревшим. Если поиск ничего не нашёл, повтори его короче: 2–3 ключевых "
     "слова, без дат и лишних слов; открывай найденные страницы через open_url. "
@@ -399,7 +401,9 @@ def execute_task(
     declared = set(client_tools or []) | on_server
     offered = [name for name in client_tool_names() if name in declared]
     tools = tools_for(offered)
-    browser_search = BROWSER_SEARCH in declared and search_provider() == "wikipedia"
+    # ya.ru / go.mail.ru result pages in the cloud browser: only when the owner turned the flag on
+    # (their robots.txt forbids automated searches) and no search API is on.
+    browser_search = BROWSER_SEARCH in declared and browser_serp_enabled() and not yandex_enabled()
 
     from app.files import attachments_note
 
@@ -497,7 +501,7 @@ def execute_task(
 
     def call_tool(call_id: str, name: str, args: dict) -> ToolResult:
         if name == "web_search" and browser_search:
-            # No search API key: search like a person in the user's own browser (ya.ru).
+            # HELI_SEARCH_BROWSER_SERP=1 and no search API: search on ya.ru / go.mail.ru in the browser.
             result = ask_client(call_id, BROWSER_SEARCH, args, args)
             if not result.error:
                 return ToolResult(result.content)
