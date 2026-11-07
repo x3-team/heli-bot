@@ -73,8 +73,11 @@ import {
 } from "./files";
 import { feedbackRequest, type FeedbackAction } from "./feedback";
 import { FeedbackCard } from "./feedbackCard";
+import { PageHead } from "./pageHead";
+import { loadBilling, type Billing } from "./billing";
+import { PlanPage, WalletPage } from "./billingViews";
 
-type View = "chat" | "limits" | "schedules" | "connections" | "memory" | "settings";
+type View = "chat" | "limits" | "wallet" | "schedules" | "connections" | "memory" | "settings";
 type Theme = "light" | "dark";
 
 interface Message {
@@ -455,6 +458,9 @@ function Workspace({
   // Asked once, under the first finished task, never during a run.
   const trainingAsk = consentsLoaded && !consents.training && !trainingAsked;
   const [email, setEmail] = useState("");
+  // Own wallet and plan (null: the server has no wallet yet, the old percent limits are shown).
+  const [billing, setBilling] = useState<Billing | null>(null);
+  const [topupAmount, setTopupAmount] = useState<number | null>(null);
   const [computerOpen, setComputerOpen] = useState(false);
   const [computerWidth, setComputerWidth] = useState<number | null>(() => readComputerWidth());
   const [, setViewport] = useState(0);
@@ -481,6 +487,9 @@ function Workspace({
   const stopped = usage.blocked || limitTone(usage.weekPercent) === "stop" || limitTone(usage.monthPercent) === "stop";
 
   useEffect(() => {
+    void loadBilling(apiBase, token)
+      .then(setBilling)
+      .catch(() => undefined);
     void loadUsage(apiBase, token)
       .then(setUsage)
       .catch((err) => {
@@ -699,6 +708,7 @@ function Workspace({
       });
       void receiveFiles(threadId);
       void loadUsage(apiBase, token).then(setUsage).catch(() => undefined);
+      void loadBilling(apiBase, token).then(setBilling).catch(() => undefined);
     }
   }
 
@@ -767,6 +777,7 @@ function Workspace({
       <Sidebar
         view={view}
         email={email}
+        billing={billing}
         week={week}
         month={month}
         waiting={waiting}
@@ -851,7 +862,31 @@ function Workspace({
             onStop={stopRun}
           />
         ) : null}
-        {view === "limits" ? <Limits usage={usage} /> : null}
+        {view === "limits" && billing ? (
+          <PlanPage
+            apiBase={apiBase}
+            token={token}
+            billing={billing}
+            onBilling={setBilling}
+            onWallet={(amount) => {
+              setTopupAmount(amount ?? null);
+              setView("wallet");
+            }}
+          />
+        ) : null}
+        {view === "limits" && !billing ? <Limits usage={usage} /> : null}
+        {view === "wallet" && billing ? (
+          <WalletPage
+            apiBase={apiBase}
+            token={token}
+            billing={billing}
+            email={email}
+            onBilling={setBilling}
+            topupAmount={topupAmount}
+            onTopup={() => setTopupAmount(1000)}
+            onTopupClose={() => setTopupAmount(null)}
+          />
+        ) : null}
         {view === "schedules" ? <Schedules apiBase={apiBase} token={token} /> : null}
         {view === "connections" ? <Connections apiBase={apiBase} token={token} /> : null}
         {view === "memory" ? <Memory apiBase={apiBase} token={token} /> : null}
@@ -909,6 +944,7 @@ const ICONS = {
   clip: "M20 11.5l-8.2 8.2a5 5 0 0 1-7.1-7.1l8.6-8.6a3.4 3.4 0 0 1 4.8 4.8l-8.6 8.6a1.7 1.7 0 0 1-2.4-2.4l7.9-7.9",
   close: "M6 6l12 12M18 6L6 18",
   link: "M9 7H7a5 5 0 0 0 0 10h2M15 7h2a5 5 0 0 1 0 10h-2M8 12h8",
+  wallet: "M4 7h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4zM4 7l11-3v3M16 13h1",
   plan: "M4 7h16v12H4zM4 11h16M8 3v4M16 3v4",
 };
 
@@ -920,12 +956,13 @@ function Icon({ d }: { d: string }) {
   );
 }
 
-const NAV: { view: View; label: string; short?: string; icon: string }[] = [
+const NAV: { view: View; label: string; short?: string; icon: string; desk?: boolean }[] = [
   { view: "chat", label: "Задачи", icon: ICONS.list },
   { view: "schedules", label: "Расписания", icon: ICONS.clock },
   { view: "connections", label: "Подключения", short: "Доступы", icon: ICONS.link },
-  { view: "memory", label: "Память", icon: ICONS.memory },
+  { view: "memory", label: "Память", icon: ICONS.memory, desk: true },
   { view: "limits", label: "Тариф", icon: ICONS.plan },
+  { view: "wallet", label: "Кошелёк", icon: ICONS.wallet },
   { view: "settings", label: "Настройки", short: "Ещё", icon: ICONS.gear },
 ];
 
@@ -933,6 +970,7 @@ const NAV: { view: View; label: string; short?: string; icon: string }[] = [
 function Sidebar({
   view,
   email,
+  billing,
   week,
   month,
   waiting,
@@ -941,12 +979,26 @@ function Sidebar({
 }: {
   view: View;
   email: string;
+  billing: Billing | null;
   week: number;
   month: number;
   waiting: number;
   onNew: () => void;
   onView: (view: View) => void;
 }) {
+  const fuel: [string, number][] = billing
+    ? [
+        ["Сегодня", clampPercent(billing.usage.dayPercent)],
+        ["Месяц", clampPercent(billing.usage.monthPercent)],
+      ]
+    : [
+        ["Неделя", week],
+        ["Месяц", month],
+      ];
+  const planEnds = billing?.plan.periodEndsAt
+    ? new Date(billing.plan.periodEndsAt).toLocaleDateString("ru-RU", { day: "numeric", month: "short" }).replace(".", "")
+    : "";
+  const planLine = billing ? (planEnds && billing.plan.status !== "none" ? `${billing.plan.title} · до ${planEnds}` : billing.plan.title) : "";
   return (
     <nav className="side" aria-label="Разделы">
       <div className="side-brand">
@@ -963,11 +1015,11 @@ function Sidebar({
         <span>Новая задача</span>
       </button>
       <div className="side-nav">
-        {NAV.map((item) => (
+        {NAV.filter((item) => item.view !== "wallet" || billing).map((item) => (
           <button
             key={item.view}
             type="button"
-            className="side-link"
+            className={item.desk ? "side-link desk-only" : "side-link"}
             title={item.label}
             aria-current={view === item.view ? "page" : undefined}
             onClick={() => onView(item.view)}
@@ -979,17 +1031,20 @@ function Sidebar({
         ))}
       </div>
       <span className="side-gap" />
-      <button type="button" className="side-fuel" onClick={() => onView("limits")} title={`Неделя ${week}% · месяц ${month}%`}>
-        <span className="side-meter">
-          <span>Неделя</span>
-          <b>{week}%</b>
-          <i className={limitTone(week)} style={{ "--p": `${week}%` } as CSSProperties} />
-        </span>
-        <span className="side-meter">
-          <span>Месяц</span>
-          <b>{month}%</b>
-          <i className={limitTone(month)} style={{ "--p": `${month}%` } as CSSProperties} />
-        </span>
+      <button type="button" className="side-fuel" onClick={() => onView("limits")} title="Тариф и лимиты">
+        {fuel.map(([label, value]) => (
+          <span key={label} className="side-meter">
+            <span>{label}</span>
+            <b>{value}%</b>
+            <i className={limitTone(value)} style={{ "--p": `${value}%` } as CSSProperties} />
+          </span>
+        ))}
+        {billing ? (
+          <span className="side-plan">
+            <span>{planLine}</span>
+            <em>Тариф</em>
+          </span>
+        ) : null}
       </button>
       {email ? (
         <div className="side-me" title={email}>
@@ -1781,17 +1836,6 @@ function Connections({ apiBase, token }: { apiBase: string; token: string }) {
         </ul>
       </section>
     </div>
-  );
-}
-
-/** Page title in the cabinet style: serif heading and a short explanation. */
-function PageHead({ title, lede, aside }: { title: string; lede?: string; aside?: string }) {
-  return (
-    <header className="page-head">
-      {aside ? <span className="page-aside">{aside}</span> : null}
-      <h1>{title}</h1>
-      {lede ? <p className="muted">{lede}</p> : null}
-    </header>
   );
 }
 

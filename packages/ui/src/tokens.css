@@ -880,3 +880,104 @@ button.link { background: none; border: 0; padding: 0; color: inherit; text-deco
 button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .page > button { max-width: 760px; }
 .ideas button { text-align: left; }
+
+/* ---------- Тариф и Кошелёк (Figma «Кабинет bot.getheli.ru») ---------- */
+.page.billing { max-width: 1180px; }
+.billing-top { display: grid; grid-template-columns: 1.15fr 1fr 1fr; gap: 16px; }
+.wallet-top { display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; }
+.bill-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 20px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.bill-card.dark { background: #111412; border-color: #111412; color: #eceae3; }
+.bill-card.glow { background: radial-gradient(circle at 85% 20%, rgba(27, 107, 79, 0.55), transparent 55%), #111412; padding: 26px; }
+.bill-card h2 { margin: 0 0 6px; font-family: var(--serif); font-size: 21px; font-weight: 700; }
+.bill-label { color: var(--muted); font-size: 13px; }
+.bill-card.dark .bill-label { color: #8f9891; }
+.bill-big { font-family: var(--serif); font-size: 44px; line-height: 1; font-weight: 700; letter-spacing: -0.01em; }
+.bill-card.dark .bill-big { color: #fff; }
+.bill-big.huge { font-size: 58px; }
+.bill-value { display: flex; align-items: baseline; gap: 6px; color: var(--muted); font-size: 13px; }
+.bill-sub { color: var(--muted); font-size: 13px; }
+.bill-card.dark .bill-sub { color: #c5cbc6; }
+.bill-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+.bill-actions button { height: 44px; padding: 0 20px; border-radius: 12px; }
+button.on-dark, button.on-dark[aria-pressed] { background: #111412; color: #fff; border-color: #2b312d; }
+button.on-dark:hover { border-color: #4a514c; }
+.bar.on-dark { background: #2b312d; }
+.bar span { background: var(--go); }
+.bill-note { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-radius: 14px; background: var(--mint); color: var(--live); }
+.bill-note.warn { background: var(--signal-soft); color: var(--fg); }
+.bill-info { margin: 4px 0 0; padding: 12px 14px; border-radius: 12px; background: var(--mint); color: var(--live); font-size: 13px; }
+.small { font-size: 13px; }
+
+.plans { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.plan { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 24px; display: flex; flex-direction: column; gap: 6px; }
+.plan header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.plan h2 { margin: 0; font-family: var(--serif); font-size: 24px; font-weight: 700; }
+.plan-who { margin: 0; color: var(--muted); font-size: 13px; }
+.plan-price { margin: 10px 0; color: var(--muted); font-size: 13px; }
+.plan-price strong { font-family: var(--serif); font-size: 40px; color: var(--fg); font-weight: 700; margin-right: 4px; }
+.plan ul { list-style: none; padding: 0; margin: 0 0 18px; display: flex; flex-direction: column; gap: 9px; flex: 1; }
+.plan li { position: relative; padding-left: 16px; }
+.plan li::before { content: ""; position: absolute; left: 0; top: 8px; width: 6px; height: 6px; border-radius: 50%; background: var(--go); }
+.plan-cta { height: 44px; border-radius: 12px; font-weight: 600; }
+.plan.current { background: #111412; border-color: #111412; color: #eceae3; box-shadow: 0 24px 50px -28px rgba(17, 20, 18, 0.45); }
+.plan.current h2, .plan.current .plan-price strong { color: #fff; }
+.plan.current .plan-who, .plan.current .plan-price { color: #8f9891; }
+.plan.current .plan-cta { background: #111412; color: #fff; border-color: #2b312d; opacity: 1; }
+.chip { display: inline-flex; align-items: center; height: 24px; padding: 0 9px; border-radius: 7px; font-size: 12.5px; font-weight: 500; background: var(--soft); }
+.chip.go { background: var(--mint); color: #1b6b4f; }
+
+.switch-row { display: flex; gap: 16px; align-items: flex-start; justify-content: space-between; }
+.switch-row p { margin: 4px 0 0; font-size: 13px; }
+.switch { width: 44px; height: 26px; padding: 0; border-radius: 13px; border: 0; background: var(--line); position: relative; flex: none; }
+.switch span { position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: transform 0.15s; }
+.switch[aria-checked="true"] { background: var(--live); }
+.switch[aria-checked="true"] span { transform: translateX(18px); }
+.cap { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.cap-row { display: flex; align-items: center; gap: 16px; }
+.cap-row b { font-family: var(--serif); font-size: 21px; min-width: 90px; text-align: right; }
+.cap input[type="range"] { flex: 1; padding: 0; border: 0; background: transparent; accent-color: var(--live); }
+
+.ops .op { display: grid; grid-template-columns: 130px minmax(0, 1fr) auto; gap: 16px; padding: 13px 0; border-top: 1px solid var(--line); align-items: center; }
+.op-date { color: var(--muted); }
+.op b { font-variant-numeric: tabular-nums; font-weight: 600; }
+.op b.plus { color: var(--live); }
+
+.veil { position: fixed; inset: 0; z-index: 60; background: rgba(17, 20, 18, 0.45); display: grid; place-items: center; padding: 16px; }
+.dialog { width: min(460px, 100%); background: var(--panel); border-radius: 22px; padding: 28px; display: flex; flex-direction: column; gap: 14px; box-shadow: 0 30px 60px -20px rgba(0, 0, 0, 0.3); }
+.dialog h2 { margin: 0; font-family: var(--serif); font-size: 30px; line-height: 1.1; }
+.dialog p { margin: 0; }
+.bill-from { display: flex; flex-direction: column; padding: 12px 14px; border-radius: 12px; background: var(--bg); font-size: 13px; color: var(--muted); }
+.bill-from strong { color: var(--fg); font-size: 15px; }
+.amount { display: flex; align-items: center; gap: 8px; height: 60px; padding: 0 16px; border: 1.5px solid var(--fg); border-radius: 14px; }
+.amount input { border: 0; padding: 0; background: transparent; font-family: var(--serif); font-size: 30px; font-weight: 700; outline: none; }
+.amount span { font-family: var(--serif); font-size: 30px; color: var(--muted); }
+.quick { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.quick button { padding: 6px 4px; font-size: 14px; }
+.dialog-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 4px; }
+.dialog-actions button { height: 44px; border-radius: 12px; }
+
+.side-plan { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; color: var(--side-muted); }
+.side-plan em { font-style: normal; color: var(--go); font-weight: 500; }
+
+@media (max-width: 1099px) {
+  .billing-top, .plans { grid-template-columns: 1fr; }
+  .wallet-top { grid-template-columns: 1fr; }
+  .side-plan { display: none; }
+}
+@media (max-width: 720px) {
+  .desk-only { display: none !important; }
+  .bill-big { font-size: 36px; }
+  .bill-big.huge { font-size: 46px; }
+  .ops .op { grid-template-columns: minmax(0, 1fr) auto; }
+  .op-date { grid-column: 1; grid-row: 2; font-size: 13px; }
+  .bill-note { flex-direction: column; align-items: flex-start; }
+}

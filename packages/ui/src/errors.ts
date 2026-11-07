@@ -11,6 +11,8 @@ const ERRORS: Record<string, string> = {
   request_failed: "Модель не ответила. Попробуйте ещё раз.",
   unknown_alias: "Сервер не принял шаг.",
   limit_reached: "Лимит исчерпан",
+  plan_required: "Тариф закончился. Продлите его в разделе «Тариф», чтобы ставить новые задачи.",
+  insufficient_funds: "На кошельке не хватает денег.",
   email_taken: "Этот адрес уже зарегистрирован.",
   credentials_invalid: "Почта или пароль не подошли.",
   password_weak: "Пароль должен быть не короче 8 символов.",
