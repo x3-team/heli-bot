@@ -42,7 +42,8 @@ _UPSTREAM_WORDS = (
     "mistral",
 )
 
-_EMAIL = re.compile(r"\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+# Unicode-aware: Cyrillic addresses (петя@почта.рф) and punycode zones (xn--p1ai) are masked too.
+_EMAIL = re.compile(r"[\w.%+\-]+@[\w\-]+(?:\.[\w\-]+)*\.(?:xn--[\w\-]+|[^\W\d_]{2,})\b", re.IGNORECASE)
 _PHONE = re.compile(
     r"(?<!\d)(?:\+7|8)[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}(?!\d)"
 )

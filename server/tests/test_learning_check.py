@@ -93,13 +93,13 @@ def test_live_endpoints_without_admin_renders_in_process(session, client):
 
 def test_email_places_name_the_key_not_the_value(session):
     user = _user(session, "client@example.com")
-    task = start_task(session, user, "Сборка build@1.2.3 и почта петя@почта.рф", {})
+    task = start_task(session, user, "Сборка build@1.2.3", {})
     auto_finish(session, task.id, "success", "ok")
     session.commit()
 
     places = learning_check(session)["export"]["raw"]["email_places"]
 
-    assert places == {"task (not_a_tld)": 1, "task (non_ascii)": 1}
+    assert places == {"task (not_a_tld)": 1}
 
 
 def test_lost_task_is_closed_at_the_next_start(session):
@@ -152,3 +152,11 @@ def test_revision_falls_back_to_the_deploy_file(tmp_path, monkeypatch):
     assert trajectories.revision() == "10f8ab0"
     monkeypatch.setattr(trajectories, "REVISION_FILE", tmp_path / "missing")
     assert trajectories.revision() is None
+
+
+def test_cyrillic_and_punycode_emails_are_masked():
+    from app.masking import mask_text
+
+    assert mask_text("пишите петя@почта.рф или info@кц-сервис.рф.") == "пишите [email] или [email]."
+    assert mask_text("a.b@site.xn--p1ai") == "[email]"
+    assert mask_text("сборка build@1.2.3") == "сборка build@1.2.3"
