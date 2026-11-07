@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models import KnowledgeNote, Task, TaskFeedback, TaskSignal, TaskStep, Trajectory, User
-from app.trajectories import confirmed_good, internal_emails
+from app.trajectories import _internal_user_ids, confirmed_good, internal_emails
 
 
 def _avg(values: list) -> float | None:
@@ -42,6 +42,7 @@ def quality_summary(session: Session, days: int = 7) -> dict:
         session.scalars(select(TaskSignal.kind).where(TaskSignal.created_at >= since))
     )
     documents = list(session.scalars(select(Trajectory).where(Trajectory.task_id.in_(ids)))) if ids else []
+    internal_ids = _internal_user_ids(session)
     internal = internal_emails()
 
     rated = [fb for fb in feedback.values() if fb.rating is not None or fb.acceptance is not None]
@@ -72,7 +73,18 @@ def quality_summary(session: Session, days: int = 7) -> dict:
             "with_outcome": sum(1 for task, _, _ in rows if task.outcome is not None),
             "with_consent_training": sum(1 for _, _, consent in rows if consent),
             "documents": len(documents),
-            "sft_ready": sum(1 for doc in documents if confirmed_good(doc.payload) and not doc.payload.get("internal")),
+            # The same rule as GET /v1/admin/trajectories.jsonl?kind=sft: consent, success, a real «good»,
+            # not the shared or a training account (by the account too: old documents lack the flag).
+            "confirmed_good": sum(1 for doc in documents if doc.consent and confirmed_good(doc.payload)),
+            "sft_ready": sum(
+                1
+                for doc in documents
+                if doc.consent
+                and doc.payload.get("result") == "success"
+                and confirmed_good(doc.payload)
+                and not doc.payload.get("internal")
+                and doc.user_id not in internal_ids
+            ),
         },
         "knowledge_candidates_pending": int(
             session.scalar(select(func.count()).select_from(KnowledgeNote).where(KnowledgeNote.origin == "candidate")) or 0

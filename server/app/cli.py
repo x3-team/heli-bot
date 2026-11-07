@@ -45,8 +45,14 @@ def main() -> None:
     docs = sub.add_parser("crawl-docs", help="проиндексировать официальные справки сервисов (по sitemap)")
     docs.add_argument("--site", action="append", help="только этот сайт, например dev.moysklad.ru")
     docs.add_argument("--limit", type=int, default=100, help="страниц на сайт за запуск")
+    check = sub.add_parser("learning-check", help="только чтение: журнал задач, выгрузки, /admin/quality (счётчики)")
+    check.add_argument("--days", type=int, default=7)
+    check.add_argument("--api", help="адрес запущенного API, например http://127.0.0.1:8001")
 
     args = parser.parse_args()
+    if args.command == "learning-check":
+        _learning_check(args.days, args.api)
+        return
     engine = get_engine()
     Base.metadata.create_all(engine)
     session = get_session_factory()()
@@ -92,6 +98,26 @@ def main() -> None:
         session.rollback()
         raise SystemExit(exc.code) from None
     finally:
+        session.close()
+
+
+def _learning_check(days: int, api: str | None) -> None:
+    """Read-only: no create_all, no commit. Prints counts only."""
+    import json
+
+    from app.learning_check import learning_check, live_endpoints
+
+    session = get_session_factory()()
+    try:
+        report = learning_check(session, days=days)
+        if api:
+            try:
+                report["live"] = live_endpoints(session, api, days=days)
+            except Exception as exc:  # noqa: BLE001
+                report["live"] = {"error": type(exc).__name__}
+        print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+    finally:
+        session.rollback()
         session.close()
 
 

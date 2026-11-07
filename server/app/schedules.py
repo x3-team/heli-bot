@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -211,7 +212,9 @@ def tick(session_factory, client_factory, driver_factory, now: datetime | None =
 
 def install_ticker(session_factory=None, client_factory=None, driver_factory=None) -> bool:
     """Start the background ticker: once a minute, a few seconds after the minute turns."""
-    if not autorun_enabled():
+    # Never under pytest: app.main builds the app at import, while pytest collects the tests and before
+    # PYTEST_CURRENT_TEST is set; a real ticker started then overwrote TICKER during test_schedule_ticker.
+    if not autorun_enabled() or "pytest" in sys.modules:
         return False
 
     def loop() -> None:

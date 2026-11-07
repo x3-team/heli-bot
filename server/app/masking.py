@@ -42,7 +42,8 @@ _UPSTREAM_WORDS = (
     "mistral",
 )
 
-_EMAIL = re.compile(r"\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+# Unicode-aware: Cyrillic addresses (петя@почта.рф) and punycode zones (xn--p1ai) are masked too.
+_EMAIL = re.compile(r"[\w.%+\-]+@[\w\-]+(?:\.[\w\-]+)*\.(?:xn--[\w\-]+|[^\W\d_]{2,})\b", re.IGNORECASE)
 _PHONE = re.compile(
     r"(?<!\d)(?:\+7|8)[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}(?!\d)"
 )
@@ -168,6 +169,17 @@ def mask_text(text: str) -> str:
     if len(masked) > _TEXT_LIMIT:
         masked = masked[:_TEXT_LIMIT]
     return masked
+
+
+def mask_emails(value: Any) -> Any:
+    """Only the address pass, over a whole document: for documents written before the pattern got wider."""
+    if isinstance(value, str):
+        return _EMAIL.sub("[email]", value) if "@" in value else value
+    if isinstance(value, dict):
+        return {key: mask_emails(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [mask_emails(item) for item in value]
+    return value
 
 
 def mask_value(value: Any) -> Any:
