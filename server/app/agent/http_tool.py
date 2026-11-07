@@ -354,6 +354,8 @@ TOOL = _fn(
     "браузер для этого не нужен. Запись в кабинет клиента (CRM, Директ, Метрика, МойСклад, Ozon…) — сервер "
     "сам покажет пользователю карточку подтверждения, сам ask_confirmation для этого не вызывай. "
     "User-Agent сервер ставит свой (HeliBot); браузерный User-Agent не подставляй. "
+    "Учебный СДЭК (api.edu.cdek.ru): токен держит сервер — ставь заголовок Authorization: Bearer "
+    "{{secret:api.edu.cdek.ru}}, свои client_id/client_secret не нужны. "
     "Курс валют ЦБ РФ — GET https://www.cbr.ru/scripts/XML_daily.asp с query date_req=ДД/ММ/ГГГГ, не SOAP "
     "DailyInfo.asmx. "
     "Перед первым запросом к незнакомому API найди его документацию (web_search, open_url).",
@@ -553,9 +555,15 @@ def execute(
     transport: httpx.BaseTransport | None = None, resolver=None,
 ) -> ClientResult:
     """app.agent.executors contract. transport and resolver are for tests."""
+    from app.agent import cdek_edu
+
     secrets: list[str] = []
+    if cdek_edu.is_token_call(args):
+        # The server holds the training СДЭК token; the model gets the placeholder, never the token.
+        return ClientResult(*cdek_edu.stub_answer(transport))
     try:
-        req, secrets = prepare(args, vault_lookup(session, user), resolver=resolver)
+        lookup = cdek_edu.wrap_lookup(vault_lookup(session, user), transport)
+        req, secrets = prepare(args, lookup, resolver=resolver)
         response = send(req, transport)
         error = None if response.status_code < 400 else f"http_{response.status_code}"
         if user_agent_rejected(response):
