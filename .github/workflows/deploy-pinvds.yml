@@ -25,6 +25,11 @@ on:
         description: "Учебные Measurement ID GA4 → HELI_GA4_SANDBOX_IDS (через запятую, G-…). Пусто — не менять."
         type: string
         default: ""
+      docs_crawl:
+        description: "Справочник официальных документов раз в сутки → HELI_DOCS_CRAWL (1 включить, 0 выключить). Пусто — не менять."
+        type: choice
+        options: ["", "1", "0"]
+        default: ""
       admin_emails:
         description: "Почты админов → HELI_ADMIN_EMAILS (через запятую; заменяет список целиком). Пусто — не менять."
         type: string
@@ -74,6 +79,7 @@ jobs:
       AMO_HOSTS: ${{ inputs.amo_sandbox_hosts }}
       GA4_IDS: ${{ inputs.ga4_sandbox_ids }}
       ADMIN_EMAILS: ${{ inputs.admin_emails }}
+      DOCS_CRAWL: ${{ inputs.docs_crawl }}
     steps:
       - uses: actions/checkout@v4
 
@@ -123,4 +129,4 @@ jobs:
           ssh pinvds 'chmod +x /tmp/deploy.sh'
 
       - name: ${{ inputs.mode }}
-        run: ssh pinvds "SET_HELI_AMO_SANDBOX_HOSTS='$AMO_HOSTS' SET_HELI_GA4_SANDBOX_IDS='$GA4_IDS' SET_HELI_ADMIN_EMAILS='$ADMIN_EMAILS' bash /tmp/deploy.sh '$MODE' /tmp/heli-bot-server.tgz; rc=\$?; rm -f /tmp/heli-bot-server.tgz /tmp/deploy.sh; exit \$rc"
+        run: ssh pinvds "SET_HELI_AMO_SANDBOX_HOSTS='$AMO_HOSTS' SET_HELI_GA4_SANDBOX_IDS='$GA4_IDS' SET_HELI_ADMIN_EMAILS='$ADMIN_EMAILS' SET_HELI_DOCS_CRAWL='$DOCS_CRAWL' bash /tmp/deploy.sh '$MODE' /tmp/heli-bot-server.tgz; rc=\$?; rm -f /tmp/heli-bot-server.tgz /tmp/deploy.sh; exit \$rc"
