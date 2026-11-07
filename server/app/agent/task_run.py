@@ -109,7 +109,8 @@ CONFIRM_HINT = (
     "Для записи в боевом кабинете через bitrix24_write, amocrm_write, direct_api или http_request сам не спрашивай: сервер "
     "покажет карточку (где, что изменится, бюджет) и выполнит только после «да». Песочницы и публичные учебные "
     "API (api.edu.cdek.ru, reqres.in, petstore.swagger.io, httpbin.org и т.п.) и POST за OAuth-токеном — не "
-    "боевой кабинет: вызывай http_request сразу и показывай ответ API как есть."
+    "боевой кабинет: вызывай http_request сразу и показывай ответ API как есть. Справочные запросы (DaData: "
+    "компания по ИНН, адрес, банк; проверки ФНС) ничего не меняют: подтверждение для них не нужно."
 )
 ANSWER_MAX_TOKENS = 1500
 # Earlier turns of the chat thread (task.context["history"]); the oldest are dropped first.
@@ -575,6 +576,15 @@ def execute_task(
             public["screenshot"] = True
         publish(public)
 
+    def prepare_args(name: str, args: dict) -> dict:
+        if name == "bitrix24_write" and executor_for(name) is not None:
+            from app.agent.bitrix import fill_portal
+
+            return fill_portal(session, user, args)
+        return args
+
+    from app.auth import is_training_account
+
     control.on_pause = lambda reason, details: publish({"type": "paused", "reason": reason, **details})
     control.on_resume = lambda: publish({"type": "resumed"})
 
@@ -595,6 +605,8 @@ def execute_task(
         control=control,
         on_event=on_event,
         start_cost=classified.cost_rub,
+        training=is_training_account(user),
+        prepare_args=prepare_args,
     )
     save_checkpoint(task, outcome, state["url"])
     session.commit()

@@ -111,6 +111,15 @@ READ_ENDPOINTS: tuple[ReadRule, ...] = (
     # Wildberries statistics and content: POST list/filter endpoints that only read.
     ReadRule("content-api.wildberries.ru", re.compile(r"^/content/v\d+/(?:get/cards/list|cards/limits|directory/[\w-]+)/?$")),
     ReadRule("seller-analytics-api.wildberries.ru", re.compile(r"^/api/v\d+/nm-report/(?:detail|grouped)(?:/history)?/?$")),
+    # DaData suggestions: company by ИНН/ОГРН, address, bank. POST by protocol, a lookup in their directory.
+    ReadRule("suggestions.dadata.ru", re.compile(
+        r"^/suggestions/api/4_1/rs/(?:suggest|findById|findAffiliated|geolocate|iplocate)/[\w-]+/?$"
+    )),
+    # ФНС: ЕГРЮЛ search, self-employed status, ИНН lookup, «Прозрачный бизнес». Public checks, nothing changes.
+    ReadRule("egrul.nalog.ru", re.compile(r"^/?$")),
+    ReadRule("statusnpd.nalog.ru", re.compile(r"^/api/v\d+/tracker/taxpayer_status/?$")),
+    ReadRule("service.nalog.ru", re.compile(r"^/inn-(?:new-)?proc\.(?:do|json)$")),
+    ReadRule("pb.nalog.ru", re.compile(r"^/search-proc\.json$")),
 )
 
 

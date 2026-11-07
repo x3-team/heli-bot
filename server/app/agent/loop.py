@@ -26,6 +26,9 @@ from app.masking import SECRET_KEYS, mask_passwords
 TOOL_RESULT_LIMIT = 9000
 AUTOPAUSE_RATIO = Decimal("1.5")
 CONFIRM_TOOL = "ask_confirmation"
+# Training accounts (HELI_TRAINING_EMAILS) work only on training stands: nobody is there to answer a card,
+# and a question stops the test run. The loop approves for them, except a live write (policy card).
+TRAINING_APPROVED = "approved: учебный аккаунт, подтверждение не требуется."
 
 
 @dataclass
@@ -401,7 +404,13 @@ def run_agent(
     control: Control | None = None,
     on_event: Callable[[dict], None] | None = None,
     start_cost: Decimal = Decimal("0"),
+    training: bool = False,
+    prepare_args: Callable[[str, dict], dict] | None = None,
 ) -> Outcome:
+    """`training`: a training account. Its own ask_confirmation and the loop's question before a risky
+    action are approved without a person; a live write (write_policy card) still asks.
+    `prepare_args(name, args)`: fills what the model left out (the only Битрикс24 portal) before the guard
+    judges the call, so the guard and the tool see the same arguments."""
     control = control or NoControl()
     emit = on_event or (lambda event: None)
     spent = start_cost
@@ -450,10 +459,13 @@ def run_agent(
                 clean["text"] = "<CREDENTIAL>"
         return {k: (mask_passwords(v) if isinstance(v, str) else v) for k, v in clean.items()}
 
-    def run_call(call_id: str, name: str, args: dict) -> ToolResult:
+    def run_call(call_id: str, name: str, args: dict, self_approve: bool = False) -> ToolResult:
         shown = safe_args(name, args)
         emit({"type": "step", "kind": "tool_call", "call_id": call_id, "tool": name, "args": shown})
-        result = call_tool(call_id, name, args)
+        if self_approve:
+            result = ToolResult(TRAINING_APPROVED)
+        else:
+            result = call_tool(call_id, name, args)
         content = result.content[:TOOL_RESULT_LIMIT]
         emit(
             {
@@ -600,6 +612,11 @@ def run_agent(
                     continue
                 control.checkpoint()
                 args = parse_args(call.arguments)
+                if prepare_args is not None and call.name != CONFIRM_TOOL:
+                    try:
+                        args = prepare_args(call.name, args)
+                    except Exception:  # noqa: BLE001
+                        pass  # the model's own arguments; the guard judges them as they are
                 key = repeat_key(call.name, args)
                 if key and key in failed:
                     # The model repeats a call that already failed the same way: don't spend a step on it.
@@ -658,6 +675,9 @@ def run_agent(
                     policy_card = guard.card(call.name, args)
                     if policy_card is None and guard.consume(call.name):
                         approved_here = True
+                    elif policy_card is None and training:
+                        emit({"type": "step", "kind": "training_approved", "tool": call.name})
+                        approved_here = True
                     elif not can_ask:
                         # The model skipped ask_confirmation: the loop asks, and never runs the tool unasked.
                         messages.append(
@@ -693,7 +713,9 @@ def run_agent(
                     # The browser refuses a risky click by coordinates, and a write tool a live write,
                     # unless the loop says this very call was approved.
                     run_args[write_policy.CONFIRMED_ARG] = True
-                result = run_call(call.id, call.name, run_args)
+                # The model's own question on a training account: approved here. A live write never
+                # counts on it (its card is asked above, always from a person).
+                result = run_call(call.id, call.name, run_args, self_approve=training and call.name == CONFIRM_TOOL)
                 calls_used += 1
                 content = result.content
                 if call.name != CONFIRM_TOOL:
