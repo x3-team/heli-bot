@@ -21,10 +21,17 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    section = config.get_section(config.config_ini_section, {})
+    kwargs: dict = {}
+    if str(section.get("sqlalchemy.url", "")).startswith("sqlite"):
+        # Deploys migrate while the API keeps running (schedule ticker, docs crawler write to the same file):
+        # wait for their write lock instead of failing with «database is locked» after the default 5 s.
+        kwargs["connect_args"] = {"timeout": 120}
     connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
+        section,
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        **kwargs,
     )
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata)
