@@ -6,6 +6,8 @@ v0.1: чат, облачный браузер, простые действия �
 
 ## Репозиторий
 
+Что лежит в heli-bot, а что в helicopter и heli-bot-data, домены и пути на сервере: [docs/repository-map.md](docs/repository-map.md).
+
 - `apps/desktop` — Tauri 2 + React
 - `apps/web` — веб-версия того же интерфейса
 - `packages/ui` — общая оболочка. Визуал — заглушки с `data-design-slot`; макет и маскот подставляет отдельный дизайн-проект
