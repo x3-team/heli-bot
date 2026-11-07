@@ -8,6 +8,10 @@
 #                                read-only: run journal, SFT/DPO export and /admin/quality as counts
 #                                (code from the tarball, data from the running copy; nothing changes)
 #
+# Training-stand settings (optional, from the workflow inputs): SET_HELI_AMO_SANDBOX_HOSTS and
+# SET_HELI_GA4_SANDBOX_IDS in the environment write those keys into .env on deploy (the .env is backed
+# up first and restored on rollback). Only these keys, only strict formats; nothing else in .env changes.
+#
 # Touches only /opt/heli-bot and the heli-bot-api unit. getheli.ru (/opt/heli), nginx and certificates
 # are never touched. The .env, var/ (database, browser profiles, files) and the venv are kept.
 set -euo pipefail
@@ -79,6 +83,52 @@ stop_orphans() {
   [ -z "$(orphan_pids)" ]
 }
 
+# Training-stand keys this script may write into .env, with the only format each accepts.
+TRAINING_KEYS=(HELI_AMO_SANDBOX_HOSTS HELI_GA4_SANDBOX_IDS)
+training_format() {
+  case "$1" in
+    HELI_AMO_SANDBOX_HOSTS) echo '^[a-z0-9-]+\.(amocrm\.(ru|com)|kommo\.com)(,[a-z0-9-]+\.(amocrm\.(ru|com)|kommo\.com))*$' ;;
+    HELI_GA4_SANDBOX_IDS) echo '^G-[A-Z0-9]{4,16}(,G-[A-Z0-9]{4,16})*$' ;;
+  esac
+}
+training_requested() {
+  local key val var
+  for key in "${TRAINING_KEYS[@]}"; do
+    var="SET_$key"; val="${!var:-}"
+    [ -n "$val" ] && return 0
+  done
+  return 1
+}
+check_training_values() {
+  local key val var
+  for key in "${TRAINING_KEYS[@]}"; do
+    var="SET_$key"; val="${!var:-}"
+    [ -z "$val" ] && continue
+    if ! printf '%s' "$val" | grep -Eq "$(training_format "$key")"; then
+      log "$key: '$val' is not in the expected format, nothing written"; return 1
+    fi
+  done
+}
+show_training_values() {
+  local key
+  for key in "${TRAINING_KEYS[@]}"; do
+    log "env $key=$($SUDO grep -E "^$key=" "$APP_DIR/.env" | tail -n 1 | cut -d= -f2- || true)"
+  done
+}
+write_training_values() {
+  local key val var tmp
+  for key in "${TRAINING_KEYS[@]}"; do
+    var="SET_$key"; val="${!var:-}"
+    [ -z "$val" ] && continue
+    tmp="$(mktemp /tmp/heli-env.XXXXXX)"
+    $SUDO grep -Ev "^$key=" "$APP_DIR/.env" > "$tmp" || true
+    printf '%s=%s\n' "$key" "$val" >> "$tmp"
+    $SUDO cp "$tmp" "$APP_DIR/.env"   # cp keeps the owner and mode of the existing .env
+    rm -f "$tmp"
+    log "env $key=$val"
+  done
+}
+
 [ -d "$APP_DIR/server" ] || { log "no $APP_DIR/server on this host"; exit 1; }
 [ -f "$APP_DIR/.env" ] || { log "no $APP_DIR/.env on this host"; exit 1; }
 
@@ -92,8 +142,12 @@ log "release $REV"
 RSYNC_EXCLUDES=(--exclude '__pycache__/' --exclude '*.pyc' --exclude '*.egg-info/' --exclude '.pytest_cache/'
   --exclude '/var/' --exclude '/.env' --exclude '/backups/')
 
+check_training_values || exit 1
+
 if [ "$MODE" = diff ]; then
   log "unit $UNIT: $(systemctl is-active "$UNIT" 2>/dev/null || true)"
+  show_training_values
+  if training_requested; then log "deploy would write the training keys given in the inputs"; fi
   for pid in $(port_pids); do
     if unit_owns "$pid"; then log "port $PORT: $(describe_pid "$pid") (in $UNIT)";
     else log "port $PORT: $(describe_pid "$pid") OUTSIDE $UNIT, deploy will stop it"; fi
@@ -130,13 +184,24 @@ if [ -f "$APP_DIR/var/heli.db" ]; then
   log "sqlite backup: $BACKUPS/heli-$STAMP.db"
 fi
 # Keep the last KEEP_BACKUPS of each kind.
-for pattern in 'server-*.tgz' 'heli-*.db'; do
+for pattern in 'server-*.tgz' 'heli-*.db' 'env-*'; do
   # shellcheck disable=SC2012
   ls -1t "$BACKUPS"/$pattern 2>/dev/null | tail -n +"$((KEEP_BACKUPS + 1))" | xargs -r $SUDO rm -f
 done
 
+ENV_BACKUP=""
+if training_requested; then
+  ENV_BACKUP="$BACKUPS/env-$STAMP"
+  $SUDO cp -p "$APP_DIR/.env" "$ENV_BACKUP"
+  $SUDO chmod 600 "$ENV_BACKUP"
+  log "env backup: $ENV_BACKUP"
+  # Written before the code sync: if .env cannot be written, nothing has changed yet.
+  write_training_values
+fi
+
 rollback() {
   log "ROLLBACK to $BACKUP"
+  if [ -n "$ENV_BACKUP" ]; then $SUDO cp -p "$ENV_BACKUP" "$APP_DIR/.env"; log "restored .env from $ENV_BACKUP"; fi
   $SUDO rm -rf "$APP_DIR/server.failed"
   $SUDO mkdir -p "$APP_DIR/server.failed"
   $SUDO rsync -a "${RSYNC_EXCLUDES[@]}" "$APP_DIR/server/" "$APP_DIR/server.failed/"

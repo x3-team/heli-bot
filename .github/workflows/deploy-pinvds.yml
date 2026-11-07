@@ -17,6 +17,14 @@ on:
         type: choice
         options: [diff, learning-check, deploy]
         default: diff
+      amo_sandbox_hosts:
+        description: "Учебные аккаунты amoCRM → HELI_AMO_SANDBOX_HOSTS (через запятую, xxx.amocrm.ru). Пусто — не менять."
+        type: string
+        default: ""
+      ga4_sandbox_ids:
+        description: "Учебные Measurement ID GA4 → HELI_GA4_SANDBOX_IDS (через запятую, G-…). Пусто — не менять."
+        type: string
+        default: ""
   pull_request:
     paths:
       - "infra/deploy/pinvds/**"
@@ -59,8 +67,23 @@ jobs:
       SSH_HOST: ${{ secrets.PINVDS_SSH_HOST }}
       SSH_USER: ${{ secrets.PINVDS_SSH_USER }}
       SSH_PORT: ${{ secrets.PINVDS_SSH_PORT || '22' }}
+      AMO_HOSTS: ${{ inputs.amo_sandbox_hosts }}
+      GA4_IDS: ${{ inputs.ga4_sandbox_ids }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check training-stand inputs
+        run: |
+          set -eu
+          AMO_HOSTS="$(printf '%s' "$AMO_HOSTS" | tr -d ' ' | tr 'A-Z' 'a-z')"
+          GA4_IDS="$(printf '%s' "$GA4_IDS" | tr -d ' ' | tr 'a-z' 'A-Z')"
+          host='[a-z0-9-]+\.(amocrm\.(ru|com)|kommo\.com)'
+          if [ -n "$AMO_HOSTS" ] && ! printf '%s' "$AMO_HOSTS" | grep -Eq "^$host(,$host)*$"; then
+            echo "amo_sandbox_hosts: нужен адрес вида xxx.amocrm.ru (через запятую)"; exit 1; fi
+          if [ -n "$GA4_IDS" ] && ! printf '%s' "$GA4_IDS" | grep -Eq '^G-[A-Z0-9]{4,16}(,G-[A-Z0-9]{4,16})*$'; then
+            echo "ga4_sandbox_ids: нужен Measurement ID вида G-XXXXXXX (через запятую)"; exit 1; fi
+          echo "AMO_HOSTS=$AMO_HOSTS" >> "$GITHUB_ENV"
+          echo "GA4_IDS=$GA4_IDS" >> "$GITHUB_ENV"
 
       - name: Pack the release
         run: |
@@ -90,4 +113,4 @@ jobs:
           ssh pinvds 'chmod +x /tmp/deploy.sh'
 
       - name: ${{ inputs.mode }}
-        run: ssh pinvds "bash /tmp/deploy.sh '$MODE' /tmp/heli-bot-server.tgz; rc=\$?; rm -f /tmp/heli-bot-server.tgz /tmp/deploy.sh; exit \$rc"
+        run: ssh pinvds "SET_HELI_AMO_SANDBOX_HOSTS='$AMO_HOSTS' SET_HELI_GA4_SANDBOX_IDS='$GA4_IDS' bash /tmp/deploy.sh '$MODE' /tmp/heli-bot-server.tgz; rc=\$?; rm -f /tmp/heli-bot-server.tgz /tmp/deploy.sh; exit \$rc"
