@@ -136,9 +136,10 @@ write_training_values() {
 infra_report() {
   log "host layout (names only; .env, var, backups and venv are not read):"
   $SUDO find "$APP_DIR" -mindepth 1 -maxdepth 1 -printf '  %y %M %u %TY-%Tm-%Td %f\n' 2>/dev/null | sort -k5 || true
-  log "files outside server/ that are not in git (except .env, var, backups, venv):"
+  log "files outside server/ that are not in git (except .env, var, backups, venv and hidden folders such as .local):"
   $SUDO find "$APP_DIR" -mindepth 1 \( -path "$APP_DIR/server" -o -path "$APP_DIR/var" -o -path "$APP_DIR/backups" \
-    -o -path "$APP_DIR/venv" -o -path "$APP_DIR/.env" -o -path "$APP_DIR/server.failed" -o -path "$APP_DIR/infra" \) -prune \
+    -o -path "$APP_DIR/venv" -o -path "$APP_DIR/.env" -o -path "$APP_DIR/server.failed" -o -path "$APP_DIR/infra" \
+    -o \( -type d -name '.*' \) \) -prune \
     -o -type f -printf '  %P %s bytes\n' 2>/dev/null | head -n 50 || true
   if [ -d "$STAGE/infra/deploy" ]; then
     if [ -d "$APP_DIR/infra/deploy" ]; then
@@ -151,7 +152,8 @@ infra_report() {
   local f
   for f in $($SUDO find "$APP_DIR" -maxdepth 3 -name 'issue-cert*' -type f -not -path "$APP_DIR/backups/*" 2>/dev/null); do
     log "operational script $f (long values masked):"
-    $SUDO sed -E 's/([A-Za-z0-9_+\/=-]{24,})/<masked>/g; s/((key|token|secret|password|passwd)[A-Za-z_]*=)[^ ]+/\1<masked>/Ig' "$f" | head -n 80 | sed 's/^/  | /'
+    if ! $SUDO test -r "$f"; then log "  not readable as $ME ($($SUDO stat -c '%U %a' "$f" 2>/dev/null || echo '?')), steps not shown"; continue; fi
+    { $SUDO sed -E 's/([A-Za-z0-9_+\/=-]{24,})/<masked>/g; s/((key|token|secret|password|passwd)[A-Za-z_]*=)[^ ]+/\1<masked>/Ig' "$f" || true; } | head -n 80 | sed 's/^/  | /' || true
   done
 }
 sync_infra() {
