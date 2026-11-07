@@ -22,7 +22,7 @@ Input `admin_emails` (with `mode = deploy`): writes `HELI_ADMIN_EMAILS` into `.e
 
 Input `docs_crawl` (with `mode = deploy`): `1` writes `HELI_DOCS_CRAWL=1`, the API then indexes the official docs sites (`OFFICIAL_SOURCES`) two minutes after start and once a day (robots.txt, 1 request/s per site, 100 pages per site per run); `0` turns it off. Empty leaves `.env` as is.
 
-Input `paid_signup` (with `mode = deploy`): `1` writes `HELI_INVITE_ONLY=0` and `HELI_BILLING=1` together: anyone can sign up and starts on the trial week, then buys a plan from the bot wallet (`server/app/billing.py`). `0` goes back to invite-only sign-up without plans. The two keys only change together, because open sign-up without plans would give new accounts the old free limits. Accounts created before keep their old limits. Empty leaves `.env` as is.
+Input `paid_signup` (with `mode = deploy`): `1` writes `HELI_INVITE_ONLY=0` and `HELI_BILLING=1` together: anyone can sign up and buys a plan from the bot wallet before the first task (the 7-day trial only with `HELI_TRIAL=1`, off by default) (`server/app/billing.py`). `0` goes back to invite-only sign-up without plans. The two keys only change together, because open sign-up without plans would give new accounts the old free limits. Accounts created before keep their old limits. Empty leaves `.env` as is.
 
 `.env`, `var/` (database, browser profiles, files) and the venv are kept as they are.
 
