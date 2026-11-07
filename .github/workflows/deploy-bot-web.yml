@@ -1,0 +1,107 @@
+name: deploy-bot-web
+
+# Web cabinet bot.getheli.ru on pinvds (static build of apps/web in /var/www/bot.getheli.ru). Manual only.
+#   mode=diff    show what is served now (release, nginx block, DNS, HTTPS), change nothing
+#   mode=deploy  build apps/web against https://bot-api.getheli.ru, unpack it as a new release,
+#                switch to it and check https://bot.getheli.ru; switches back if it is not served
+# One-time root setup (web root, nginx block, certificate): infra/deploy/pinvds/bot-web-setup.sh.
+# getheli.ru (/opt/heli), the API, nginx and certificates are never touched by this workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "diff = only show what is served, deploy = build and publish the cabinet"
+        type: choice
+        options: [diff, deploy]
+        default: diff
+  pull_request:
+    paths:
+      - "infra/deploy/pinvds/web.sh"
+      - "infra/deploy/pinvds/bot-web-setup.sh"
+      - ".github/workflows/deploy-bot-web.yml"
+
+concurrency:
+  group: heli-bot-web-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the host scripts
+        run: bash -n infra/deploy/pinvds/web.sh && bash -n infra/deploy/pinvds/bot-web-setup.sh
+
+  build:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'deploy'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: UI behavior
+        run: pnpm --filter @heli/ui test
+      - name: Build
+        env:
+          VITE_HELI_API_BASE: https://bot-api.getheli.ru
+        run: pnpm build:web
+      - name: Pack
+        run: |
+          set -eu
+          echo "${GITHUB_SHA}" > apps/web/dist/REVISION
+          tar -czf bot-web.tgz -C apps/web/dist .
+          ls -l bot-web.tgz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bot-web
+          path: bot-web.tgz
+          retention-days: 7
+
+  pinvds:
+    if: github.event_name == 'workflow_dispatch' && !failure() && !cancelled()
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    environment: pinvds
+    env:
+      MODE: ${{ inputs.mode }}
+      SSH_HOST: ${{ secrets.PINVDS_SSH_HOST }}
+      SSH_USER: ${{ secrets.PINVDS_SSH_USER }}
+      SSH_PORT: ${{ secrets.PINVDS_SSH_PORT || '22' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        if: inputs.mode == 'deploy'
+        with:
+          name: bot-web
+
+      - name: SSH key and pinned host key
+        env:
+          SSH_KEY: ${{ secrets.PINVDS_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.PINVDS_SSH_KNOWN_HOSTS }}
+        run: |
+          set -eu
+          test -n "$SSH_HOST" && test -n "$SSH_USER" && test -n "$SSH_KEY" && test -n "$KNOWN_HOSTS" \
+            || { echo "Missing PINVDS_SSH_HOST / PINVDS_SSH_USER / PINVDS_SSH_KEY / PINVDS_SSH_KNOWN_HOSTS secrets"; exit 1; }
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/pinvds && chmod 600 ~/.ssh/pinvds
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts
+          printf 'Host pinvds\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/pinvds\n  StrictHostKeyChecking yes\n  BatchMode yes\n' \
+            "$SSH_HOST" "$SSH_USER" "$SSH_PORT" > ~/.ssh/config
+
+      - name: Copy build and scripts
+        run: |
+          set -eu
+          files="infra/deploy/pinvds/web.sh infra/deploy/pinvds/bot-web-setup.sh"
+          if [ "$MODE" = deploy ]; then files="$files bot-web.tgz"; fi
+          scp -q $files pinvds:/tmp/
+
+      - name: ${{ inputs.mode }}
+        run: ssh pinvds "bash /tmp/web.sh '$MODE' /tmp/bot-web.tgz; rc=\$?; rm -f /tmp/bot-web.tgz /tmp/web.sh /tmp/bot-web-setup.sh; exit \$rc"
