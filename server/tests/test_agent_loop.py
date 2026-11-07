@@ -846,3 +846,65 @@ def test_search_typing_elsewhere_does_not_ask_to_save() -> None:
     out = run_agent([{"role": "user", "content": "x"}], tools=BROWSER_TOOLS,
                     call_tool=lambda *a: ToolResult("ок"), complete=complete, budget=Budget())
     assert out.final_answer == "Нашёл 3 товара."
+
+
+def test_greeting_on_a_task_gets_one_nudge_to_do_it() -> None:
+    """dx-api-01 / ja-web-01, 07.11.2026: «Чем могу помочь?» on a real task, no tool called."""
+    from app.agent.loop import IDLE_NOTE
+
+    complete = _scripted(
+        _completion("Здравствуйте! Чем могу помочь?"),
+        _completion(calls=[("web_search", {"query": "курс доллара ЦБ"})]),
+        _completion("Курс ЦБ на 07.11 — 80,50 ₽, источник https://cbr.ru"),
+    )
+    events = []
+    out = run_agent(
+        [{"role": "user", "content": "Добрый день! Найди курс доллара ЦБ на сегодня"}],
+        tools=TOOLS,
+        call_tool=lambda cid, name, args: ToolResult("80,50"),
+        complete=complete,
+        budget=Budget(),
+        on_event=events.append,
+    )
+    assert out.final_answer.startswith("Курс ЦБ")
+    assert complete.seen[1][0][-1] == {"role": "user", "content": IDLE_NOTE}
+    assert [e["kind"] for e in events].count("idle_nudge") == 1
+
+
+def test_greeting_nudge_is_given_once() -> None:
+    complete = _scripted(_completion("Привет! Чем могу помочь?"), _completion("Здравствуйте! Какая у вас задача?"))
+    out = run_agent(
+        [{"role": "user", "content": "Привет! Через API Директа выгрузи расход за неделю"}],
+        tools=TOOLS,
+        call_tool=lambda cid, name, args: ToolResult(""),
+        complete=complete,
+        budget=Budget(),
+    )
+    assert out.final_answer == "Здравствуйте! Какая у вас задача?" and out.steps == 2
+
+
+@pytest.mark.parametrize("request_text", ["Привет!", "Здравствуйте, Heli", "привет, как дела?", "Спасибо, отлично!"])
+def test_small_talk_is_answered_in_words(request_text: str) -> None:
+    complete = _scripted(_completion("Здравствуйте! Чем могу помочь?"))
+    out = run_agent(
+        [{"role": "user", "content": "[Память] клиент любит кратко\n\n" + request_text}],
+        tools=TOOLS,
+        call_tool=lambda cid, name, args: ToolResult(""),
+        complete=complete,
+        budget=Budget(request=request_text),
+    )
+    assert out.steps == 1 and out.final_answer == "Здравствуйте! Чем могу помочь?"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Курс доллара на 07.11 — 80,5 ₽ (https://cbr.ru). Чем могу помочь?",
+        "BLOCKED: нет токена Директа. Чем помочь?",
+        "Рекомендую второй вариант: он дешевле. Чем ещё помочь?",
+    ],
+)
+def test_a_real_answer_ending_with_an_offer_is_not_idle(text: str) -> None:
+    from app.agent.loop import is_idle_answer
+
+    assert not is_idle_answer(text)
