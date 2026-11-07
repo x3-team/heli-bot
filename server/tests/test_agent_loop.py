@@ -355,9 +355,10 @@ def _run_with_client(client, session, monkeypatch, request_text, script, client_
     return _sse_events(response.text)
 
 
-def test_search_goes_through_the_users_browser_without_api_key(client, session, monkeypatch) -> None:
+def test_search_goes_through_the_users_browser_with_serp_flag(client, session, monkeypatch) -> None:
     from app.llm import tools as server_tools
 
+    monkeypatch.setenv("HELI_SEARCH_BROWSER_SERP", "1")
     monkeypatch.delenv("YANDEX_SEARCH_API_KEY", raising=False)
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     monkeypatch.delenv("HELI_SEARCH_PROVIDER", raising=False)
@@ -377,6 +378,7 @@ def test_browser_search_falls_back_to_server_search_on_captcha(client, session, 
     from app.llm import tools as server_tools
     from app.web import SearchHit
 
+    monkeypatch.setenv("HELI_SEARCH_BROWSER_SERP", "1")
     monkeypatch.delenv("YANDEX_SEARCH_API_KEY", raising=False)
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     monkeypatch.delenv("HELI_SEARCH_PROVIDER", raising=False)
@@ -388,6 +390,22 @@ def test_browser_search_falls_back_to_server_search_on_captcha(client, session, 
     )
     assert "ru.wikipedia.org" in script.requests[2]["messages"][-1]["content"]
     assert events[-1]["type"] == "done"
+
+
+def test_search_stays_on_the_server_without_serp_flag(client, session, monkeypatch) -> None:
+    """Default: no ya.ru / go.mail.ru result pages in the browser (their robots.txt forbids it)."""
+    from app.llm import tools as server_tools
+    from app.web import SearchHit
+
+    monkeypatch.delenv("HELI_SEARCH_BROWSER_SERP", raising=False)
+    monkeypatch.setattr(server_tools, "web_search", lambda q: [SearchHit("amoCRM", "https://www.amocrm.ru/", "CRM")])
+    script = _BrowserScript("web_search", '{"query": "amoCRM"}')
+    events = _run_with_client(
+        client, session, monkeypatch, "Что такое amoCRM?", script,
+        ["browser_open", "browser_search"], {"content": "не должно вызываться"},
+    )
+    assert not [e for e in events if e["type"] == "client_action" and e["tool"] == "browser_search"]
+    assert "amocrm.ru" in script.requests[2]["messages"][-1]["content"]
 
 
 def test_cloud_executor_runs_browser_tools_on_the_server(client, session, monkeypatch) -> None:

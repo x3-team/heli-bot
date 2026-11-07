@@ -42,6 +42,9 @@ def main() -> None:
     limit.add_argument("--monthly", type=Decimal)
     limit.add_argument("--weekly", type=Decimal)
 
+    docs = sub.add_parser("crawl-docs", help="проиндексировать официальные справки сервисов (по sitemap)")
+    docs.add_argument("--site", action="append", help="только этот сайт, например dev.moysklad.ru")
+    docs.add_argument("--limit", type=int, default=100, help="страниц на сайт за запуск")
     check = sub.add_parser("learning-check", help="только чтение: журнал задач, выгрузки, /admin/quality (счётчики)")
     check.add_argument("--days", type=int, default=7)
     check.add_argument("--api", help="адрес запущенного API, например http://127.0.0.1:8001")
@@ -66,6 +69,19 @@ def main() -> None:
         elif args.command == "training-token":
             user = training_user(session, args.email)
             print(issue_token(user.id, via="training"))
+        elif args.command == "crawl-docs":
+            from app.search.crawl import crawl, official_sites
+
+            sites = official_sites()
+            if args.site:
+                wanted = {s.lower().removeprefix("www.") for s in args.site}
+                sites = [s for s in sites if s.host.removeprefix("www.") in wanted]
+            for report in crawl(sites, per_site=args.limit):
+                print(
+                    f"{report.site}: sitemap {report.sitemap_urls}, сохранено {report.stored}, "
+                    f"свежие {report.skipped_fresh}, robots {report.refused_robots}, ошибки {report.errors}"
+                    + (f" ({report.note})" if report.note else "")
+                )
         elif args.command == "set-limit":
             user = session.scalar(select(User).where(User.email == args.email.strip().lower()))
             if user is None:

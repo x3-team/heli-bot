@@ -21,6 +21,7 @@ from app.config import get_settings
 from app.files import register as register_files
 from app.masking import install_redact_filter
 from app.schedules import install_ticker, ticker_status
+from app.search.crawl import install_crawler
 
 
 def create_app() -> FastAPI:
@@ -58,6 +59,7 @@ def create_app() -> FastAPI:
     register_knowledge()
     register_cloud_browser(background=True)
     install_ticker()
+    install_crawler()
     return app
 
 
