@@ -131,7 +131,7 @@ class Result:
 
 # Same snapshot as packages/ui/src/cdp.ts, so the model reads pages the same way everywhere.
 SNAPSHOT = r"""() => {
-  const MAX_TEXT = 6000, MAX_ELEMENTS = 150, MAX_ROWS = 40, BUDGET_MS = 2500;
+  const MAX_TEXT = 6000, MAX_ELEMENTS = 150, MAX_ROWS = 40, MAX_REPORT_ROWS = 80, BUDGET_MS = 2500;
   const t0 = performance.now();
   const late = () => performance.now() - t0 > BUDGET_MS;
   const visible = (el) => {
@@ -163,25 +163,108 @@ SNAPSHOT = r"""() => {
     }
     return el.getAttribute("role") || "элемент";
   };
+  const zOf = (el) => {
+    let z = 0;
+    for (let p = el; p && p !== document.body; p = p.parentElement) {
+      const zi = parseInt(getComputedStyle(p).zIndex, 10);
+      if (!isNaN(zi)) z = Math.max(z, zi);
+    }
+    return z;
+  };
   document.querySelectorAll("[data-heli-ref]").forEach((el) => el.removeAttribute("data-heli-ref"));
   // 1С:Предприятие web client draws its UI with divs: sections, commands, grid cells.
   const onec = /#e1cib|\/ru_RU\//i.test(location.href) || /1С:Предприятие|1C:Enterprise/i.test(document.title)
     || !!document.querySelector("#themesCell, .themesCell, [id^=themesCell], #funcPanel, .ecsCommandBar");
+  // 1С windows (period, question «Сохранить изменения?», choice forms, notices) are div.cloud[id$=win] with a
+  // z-index; a modal one has a dark .surface right under it, and nothing below that surface takes a click.
+  // win: the window on top; modal: the window right above the highest surface, the one that wants an answer
+  // (a guide can lie over it without blocking anything).
+  let win = null, winZ = -1, modal = null;
+  const walls = [], wins = [];
+  if (onec) {
+    for (const w of document.querySelectorAll("[id$=win].cloud")) {
+      if (!visible(w)) continue;
+      const z = zOf(w);
+      wins.push({ w, z });
+      if (z > winZ) { winZ = z; win = w; }
+    }
+    for (const s of document.querySelectorAll(".surface.surfaceBlack")) {
+      if (!visible(s)) continue;
+      const z = zOf(s);
+      if (!win || z < winZ) walls.push({ z, r: s.getBoundingClientRect() });
+    }
+    if (walls.length) {
+      const top = Math.max(...walls.map((w) => w.z));
+      const above = wins.filter((x) => x.z > top).sort((a, b) => a.z - b.z);
+      modal = above.length ? above[0].w : null;
+    }
+  }
+  // Under a dark surface (a tab's surface covers only that tab, the sections panel stays open).
+  const blocked = (el) => {
+    if (!walls.length) return false;
+    const r = el.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2, z = zOf(el);
+    const off = x < 0 || y < 0 || x > innerWidth || y > innerHeight;
+    return walls.some((w) => z < w.z && (off || (x >= w.r.left && x <= w.r.right && y >= w.r.top && y <= w.r.bottom)));
+  };
+  const winTitle = (w) => {
+    const box = w.querySelector(".toplineBox[data-title], [id$=headerTopLine_title]");
+    return clean(box ? (box.getAttribute("data-title") || box.getAttribute("title") || box.innerText) : "").slice(0, 120);
+  };
+  // A 1С field is an input whose caption is a separate element (<id>#title_text), or only its id (form3_КонецПериода_i0).
+  const onecName = (el) => {
+    if (!el.id) return "";
+    const cap = document.getElementById(el.id.replace(/_i0$/, "#title_text"));
+    let n = cap ? clean(cap.innerText) : "";
+    if (!n) {
+      const m = /form\d+_(.+?)_i0$/.exec(el.id);
+      if (m) {
+        n = m[1].replace(/[0-9a-f]{6,}x.*$/i, "").replace(/\d{3,}.*$/, "").replace(/([а-яёa-z0-9])([А-ЯЁA-Z])/g, "$1 $2");
+        n = n.replace(/^Поле\s+(?=\S)/, "");
+        n = n.charAt(0).toUpperCase() + n.slice(1).toLowerCase();
+      }
+    }
+    return n.replace(/\s*:$/, "").slice(0, 60);
+  };
+  const onecValue = (el) => {
+    if ((el.getAttribute("type") || "").toLowerCase() === "password") return "";
+    const v = clean(el.value);
+    return /^[\s.:]*$/.test(v) ? "" : v.slice(0, 120);
+  };
   const elements = [];
   const taken = new Set();
-  const add = (el, k) => {
-    if (elements.length >= MAX_ELEMENTS || taken.has(el) || !visible(el)) return;
-    const name = label(el);
-    if (k !== "поле" && k !== "поле пароля" && !name) return;
+  const add = (el, k, name) => {
+    if (elements.length >= MAX_ELEMENTS || taken.has(el) || !visible(el) || blocked(el)) return;
+    const kk = k || kind(el);
+    const field = kk === "поле" || kk === "поле пароля";
+    let value = null;
+    if (onec && field && el.matches("input, textarea")) {
+      const own = onecName(el);
+      if (own) { name = name || own; value = onecValue(el); }
+    }
+    if (name == null) name = label(el);
+    if (!field && !name) return;
     for (let p = el.parentElement; p; p = p.parentElement) if (taken.has(p) && label(p) === name) return;
     const ref = elements.length + 1;
     taken.add(el);
     el.setAttribute("data-heli-ref", String(ref));
-    elements.push({ ref, kind: k || kind(el), label: name });
+    const item = { ref, kind: kk, label: name };
+    if (value !== null) item.value = value;
+    elements.push(item);
   };
-  const nodes = document.querySelectorAll(
+  if (onec) {
+    // First what is on top: variants of a 1С field being typed into, then the open window's own close button.
+    for (const li of document.querySelectorAll("#editDropDown li, .eddList li")) {
+      add(li, /^\s*создать:/i.test(li.innerText || "") ? "вариант: создаст новый элемент" : "вариант");
+    }
+    for (const { w } of wins.sort((a, b) => b.z - a.z)) {
+      const close = w.querySelector("[id$=headerTopLine_cmd_CloseButton]");
+      if (close) add(close, "кнопка", winTitle(w) ? "Закрыть окно «" + winTitle(w) + "»" : "Закрыть окно");
+    }
+  }
+  const nodes = [...document.querySelectorAll(
     "a[href], button, input:not([type=hidden]), textarea, select, [role=button], [role=link], [role=tab], [role=menuitem], [role=treeitem], [role=gridcell], [contenteditable=true]"
-  );
+  )];
+  if (win) nodes.sort((a, b) => (win.contains(b) ? 1 : 0) - (win.contains(a) ? 1 : 0));
   for (const el of nodes) { if (late()) break; add(el); }
   const rows = [];
   if (onec) {
@@ -189,22 +272,67 @@ SNAPSHOT = r"""() => {
       "[id^=themesCell_theme_]", ".themeCell", ".themeTd", ".funcItem", ".functionItem", ".functionTitle",
       ".press", ".pressButton", ".frameButton", ".hpLink", ".hyperlink", ".submenuText", ".cmdText",
       ".openedItem", ".tabTitle", ".navigationItem", "[id$=_title_text]", "[id^=form][id*=Button]",
-      "[id^=cmd_]", ".gridBoxTitle", ".gridHead .gridBoxText"
+      "[id^=cmd_]", ".gridHead .gridBoxTitle"
     ].join(",");
-    for (const el of document.querySelectorAll(ONEC)) {
+    const own = [...document.querySelectorAll(ONEC)];
+    if (win) own.sort((a, b) => (win.contains(b) ? 1 : 0) - (win.contains(a) ? 1 : 0));
+    for (const el of own) {
       if (late() || elements.length >= MAX_ELEMENTS) break;
-      add(el, el.matches(".openedItem, .tabTitle") ? "вкладка" : el.matches(".gridBoxTitle, .gridHead .gridBoxText") ? "колонка" : "кнопка");
+      add(el, el.matches(".openedItem, .tabTitle") ? "вкладка" : el.matches(".gridHead .gridBoxTitle") ? "колонка" : "кнопка");
     }
     // Grid rows: text of each line, cells joined with |; the row itself can be clicked by ref.
-    for (const line of document.querySelectorAll(".gridLine, .gridBody tr, [role=row]")) {
+    const lines = [...document.querySelectorAll(".gridLine, .gridBody tr, [role=row]")];
+    if (win) lines.sort((a, b) => (win.contains(b) ? 1 : 0) - (win.contains(a) ? 1 : 0));
+    // A table part of a document (Товары, Услуги; not a list «Список»): each cell gets a ref of its own, so the
+    // model can pick a cell and start editing it (F2 or typing) — a row's ref lands on whatever column is in the middle.
+    const part = (line) => {
+      const grid = line.closest("[id^=grid_]");
+      if (!grid || /Список$/.test(grid.id) || line.closest(".gridHead")) return null;
+      if (grid.querySelectorAll(".gridBody .gridLine").length > 12) return null;
+      // Column by position: a header box may cover two body columns (Количество over quantity and unit).
+      const names = [];
+      for (const box of grid.querySelectorAll(".gridHead .gridBox")) {
+        const n = clean(box.innerText);
+        const r = box.getBoundingClientRect();
+        if (n && r.width > 2) names.push({ n: n.slice(0, 40), l: r.left, r: r.right });
+      }
+      if (!names.length) return null;
+      return (cell) => {
+        const r = cell.getBoundingClientRect(), x = r.left + r.width / 2;
+        const hit = names.find((h) => x >= h.l && x <= h.r);
+        return hit ? hit.n : null;
+      };
+    };
+    for (const line of lines) {
       if (late() || rows.length >= MAX_ROWS) break;
-      if (!visible(line)) continue;
+      if (!visible(line) || blocked(line)) continue;
+      const names = part(line);
+      if (names) {
+        const before = elements.length;
+        add(line, "строка");
+        const ref = elements.length > before ? elements[elements.length - 1].ref : null;
+        const cells = [], seen = new Set();
+        for (const box of line.querySelectorAll(".gridBox")) {
+          const col = names(box);
+          if (!col || seen.has(col) || cells.length >= 12) continue;
+          seen.add(col);
+          const t = clean(box.innerText).slice(0, 60);
+          const at = elements.length;
+          add(box, "ячейка", col);
+          if (elements.length > at) elements[at].inline = true;
+          cells.push((elements.length > at ? "[" + elements[at].ref + "] " : "") + col + ": " + t);
+        }
+        const index = parseInt(line.getAttribute("rowindex"), 10);
+        const number = isNaN(index) ? "" : " " + (index + 1);
+        rows.push((ref ? "[" + ref + "] " : "") + "строка" + number + " — " + cells.join(" | "));
+        continue;
+      }
       const cells = [...line.querySelectorAll(".gridBoxText, .gridBox, td, [role=gridcell]")]
         .map((c) => clean(c.innerText || c.value)).filter(Boolean);
       const text = (cells.length ? [...new Set(cells)].join(" | ") : clean(line.innerText)).slice(0, 300);
       if (!text) continue;
       const before = elements.length;
-      add(line, "строка");
+      add(line, line.closest(".gridHead") ? "заголовок таблицы" : "строка");
       const ref = elements.length > before ? elements[elements.length - 1].ref : null;
       rows.push((ref ? "[" + ref + "] " : "") + text);
     }
@@ -223,21 +351,61 @@ SNAPSHOT = r"""() => {
       add(el, "кнопка");
     }
   }
-  // Values in inputs are not part of innerText: 1С forms are mostly inputs.
+  // Values in inputs are not part of innerText: 1С forms are mostly inputs. Those with a ref show it there.
   const fields = [];
   if (onec) {
     for (const el of document.querySelectorAll("input.editInput, input[type=text], textarea")) {
       if (late() || fields.length >= 40) break;
-      if (!visible(el) || !el.value) continue;
-      const title = el.id ? document.getElementById(el.id.replace(/_i0$/, "#title_text")) : null;
-      const name = clean((title && title.innerText) || el.getAttribute("title") || el.getAttribute("aria-label") || el.id || "");
-      fields.push((name ? name + ": " : "") + clean(el.value).slice(0, 120));
+      if (taken.has(el) || !visible(el) || blocked(el) || !onecValue(el)) continue;
+      const name = onecName(el) || clean(el.getAttribute("title") || el.getAttribute("aria-label") || "");
+      fields.push((name ? name + ": " : "") + onecValue(el));
+    }
+  }
+  // A 1С report (табличный документ) is drawn in frames: corner, header, left column and body, each a set of
+  // [y] rows of [x] cells. Put the cells back together by their row and column numbers.
+  const report = [];
+  let reportCut = false;
+  if (onec && !late()) {
+    for (const box of document.querySelectorAll(".moxelContainer")) {
+      if (late() || !visible(box) || blocked(box)) continue;
+      const grid = new Map();
+      for (const frame of box.querySelectorAll("iframe")) {
+        let doc = null;
+        try { doc = frame.contentDocument; } catch (e) { doc = null; }
+        if (!doc || !doc.body) continue;
+        for (const row of doc.querySelectorAll("[y]")) {
+          const y = parseInt(row.getAttribute("y"), 10);
+          if (isNaN(y)) continue;
+          for (const cell of row.children) {
+            const x = parseInt(cell.getAttribute("x"), 10);
+            if (isNaN(x)) continue;
+            const t = clean(cell.innerText || cell.textContent);
+            if (!t) continue;
+            if (!grid.has(y)) grid.set(y, new Map());
+            if (!grid.get(y).has(x)) grid.get(y).set(x, t.slice(0, 80));
+          }
+        }
+      }
+      const cols = [...new Set([...grid.values()].flatMap((line) => [...line.keys()]))].sort((a, b) => a - b);
+      for (const y of [...grid.keys()].sort((a, b) => a - b)) {
+        if (report.length >= MAX_REPORT_ROWS) { reportCut = true; break; }
+        const line = grid.get(y);
+        const cells = cols.map((x) => line.get(x) || "");
+        while (cells.length && !cells[cells.length - 1]) cells.pop();
+        report.push(cells.join(" | ").slice(0, 400));
+      }
     }
   }
   // A window drawn over the page (1С dialogs: period, question, choice form; role=dialog elsewhere).
   // While it is open, clicks on the form behind it do nothing: the model must deal with it first.
   let dialog = null;
-  if (!late()) {
+  if (modal) {
+    const buttons = [...modal.querySelectorAll(".press, .pressButton, button, [role=button]")]
+      .filter(visible).map((b) => clean(b.innerText || b.getAttribute("title") || "")).filter(Boolean);
+    dialog = { title: winTitle(modal) || clean((modal.innerText || "").split("\n").find((t) => t.trim()) || "").slice(0, 120),
+               buttons: [...new Set(buttons)].slice(0, 12), onec: true };
+  }
+  if (!dialog && !late()) {
     const BTN = /^(ок|ok|отмена|закрыть|да|нет|выбрать|сформировать|готово|применить|продолжить|сохранить|записать)$/i;
     const cands = [...document.querySelectorAll(
       "[role=dialog], [role=alertdialog], [aria-modal=true], [class*=indow], [class*=ialog], [class*=opup], [class*=odal], [class*=loud]"
@@ -250,12 +418,10 @@ SNAPSHOT = r"""() => {
       const s = getComputedStyle(el);
       const dialogish = el.matches("[role=dialog], [role=alertdialog], [aria-modal=true]");
       if (!dialogish && s.position !== "absolute" && s.position !== "fixed") continue;
-      let z = 0;
-      for (let p = el; p && p !== document.body; p = p.parentElement) {
-        const zi = parseInt(getComputedStyle(p).zIndex, 10);
-        if (!isNaN(zi)) { z = Math.max(z, zi); }
-      }
+      const z = zOf(el);
       if (!dialogish && z < 10) continue;
+      // 1С: a window with no dark surface under it (a guide, a notice) does not block the form.
+      if (onec && el.matches("[id$=win].cloud") && !walls.length) continue;
       const buttons = [...el.querySelectorAll("button, [role=button], .press, .pressButton, .frameButton, input[type=button], input[type=submit], a")]
         .filter(visible).map((b) => clean(b.innerText || b.value || b.getAttribute("title") || "")).filter(Boolean);
       if (!dialogish && !buttons.some((b) => BTN.test(b))) continue;
@@ -267,39 +433,92 @@ SNAPSHOT = r"""() => {
       }
     }
   }
-  const text = (document.body ? document.body.innerText : "").replace(/\n{3,}/g, "\n\n").slice(0, MAX_TEXT);
-  return JSON.stringify({ url: location.href, title: document.title, text, elements, rows, fields, onec, dialog, partial: late() });
+  // Behind a 1С modal window the page is only noise: read the window itself.
+  const source = dialog && dialog.onec ? modal : document.body;
+  const text = (source ? source.innerText : "").replace(/\n{3,}/g, "\n\n").slice(0, MAX_TEXT);
+  return JSON.stringify({ url: location.href, title: document.title, text, elements, rows, fields, report, reportCut, onec, dialog, partial: late() });
 }"""
 
 FIND = r"""([ref, text]) => {
   let el = ref != null ? document.querySelector('[data-heli-ref="' + ref + '"]') : null;
   const name = (e) => (e.innerText || e.value || e.getAttribute("aria-label") || e.getAttribute("title") || "").trim().replace(/\s+/g, " ").toLowerCase();
   const shown = (e) => { const r = e.getBoundingClientRect(); return r.width > 1 && r.height > 1 && getComputedStyle(e).visibility !== "hidden"; };
+  const zOf = (e) => {
+    let z = 0;
+    for (let p = e; p && p !== document.body; p = p.parentElement) {
+      const zi = parseInt(getComputedStyle(p).zIndex, 10);
+      if (!isNaN(zi)) z = Math.max(z, zi);
+    }
+    return z;
+  };
+  // 1С: dark surfaces of modal windows; what is under one does not take a click.
+  const walls = [...document.querySelectorAll(".surface.surfaceBlack")].filter(shown)
+    .map((s) => ({ z: zOf(s), r: s.getBoundingClientRect() }));
+  const blocked = (e) => {
+    if (!walls.length) return false;
+    const r = e.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2, z = zOf(e);
+    return walls.some((w) => z < w.z && x >= w.r.left && x <= w.r.right && y >= w.r.top && y <= w.r.bottom);
+  };
+  // Several captions alike («Закрыть» of a window and of a tab, «Да» behind a question): the one that takes
+  // the click, then the one on top.
+  const best = (list) => {
+    if (list.length < 2) return list[0] || null;
+    const scored = list.slice(0, 30).map((e, i) => ({ e, i, b: blocked(e) ? 1 : 0, z: zOf(e) }));
+    scored.sort((a, b) => a.b - b.b || b.z - a.z || a.i - b.i);
+    return scored[0].e;
+  };
+  if (!el && text) {
+    const want = text.trim().replace(/\s+/g, " ").toLowerCase();
+    // «Закрыть окно «…»» is the name browser_read gives a 1С window's close button: find that window.
+    const own = /^закрыть окно(?: «(.*)»)?$/.exec(want);
+    if (own) {
+      const wins = [...document.querySelectorAll("[id$=win].cloud")].filter(shown).sort((a, b) => zOf(b) - zOf(a));
+      const title = (w) => ((w.querySelector(".toplineBox[data-title]") || { getAttribute: () => "" }).getAttribute("data-title") || "").trim().toLowerCase();
+      const w = wins.find((x) => own[1] && title(x) === own[1]) || wins[0];
+      el = w ? w.querySelector("[id$=headerTopLine_cmd_CloseButton]") : null;
+    }
+  }
   if (!el && text) {
     const want = text.trim().replace(/\s+/g, " ").toLowerCase();
     const all = [...document.querySelectorAll("[data-heli-ref], a, button, [role=button], input[type=submit], label")].filter(shown);
-    el = all.find((e) => name(e) === want) || all.find((e) => name(e).includes(want));
+    const exact = all.filter((e) => name(e) === want);
+    el = best(exact.length ? exact : all.filter((e) => name(e).includes(want)));
     if (!el) {
-      // Div-based UIs (1С): the smallest visible element whose text is exactly that, then one that contains it.
+      // Div-based UIs (1С): the smallest visible elements whose text is exactly that, then ones that contain it.
       const t0 = performance.now();
-      let exact = null, part = null;
+      const same = [], part = [];
       const nodes = document.body ? document.body.getElementsByTagName("*") : [];
       for (let i = 0; i < nodes.length && i < 15000 && performance.now() - t0 < 2000; i++) {
         const e = nodes[i];
         if (["SCRIPT", "STYLE", "HTML", "BODY"].includes(e.tagName)) continue;
         const n = name(e);
         if (!n || n.length > want.length + 40) continue;
-        if (n === want) { if (shown(e) && (!exact || exact.contains(e))) exact = e; }
-        else if (!part && n.includes(want) && shown(e)) part = e;
-        else if (part && part.contains(e) && n.includes(want) && shown(e)) part = e;
+        if (n === want) { if (shown(e)) same.push(e); }
+        else if (n.includes(want) && shown(e)) part.push(e);
       }
-      el = exact || part;
+      const smallest = (list) => list.filter((e) => !list.some((o) => o !== e && e.contains(o)));
+      el = best(smallest(same)) || best(smallest(part));
     }
   }
   if (!el) return null;
   el.scrollIntoView({ block: "center", inline: "center" });
   const r = el.getBoundingClientRect();
-  return [r.left + r.width / 2, r.top + r.height / 2];
+  const x = r.left + r.width / 2, y = r.top + r.height / 2;
+  // Something else drawn over that point (a 1С window over another one): the browser presses the element itself.
+  const hit = document.elementFromPoint(x, y);
+  const covered = !(hit && (hit === el || el.contains(hit) || hit.contains(el)));
+  document.querySelectorAll("[data-heli-target]").forEach((e) => e.removeAttribute("data-heli-target"));
+  el.setAttribute("data-heli-target", "1");
+  return [x, y, covered, blocked(el)];
+}"""
+
+# Press the element FIND chose with events of its own: for a button another window covers.
+PRESS_TARGET = r"""() => {
+  const el = document.querySelector("[data-heli-target]");
+  if (!el) return false;
+  ["mousedown", "mouseup", "click"].forEach((t) =>
+    el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })));
+  return true;
 }"""
 
 # After «Сохранить»: did the page take it? Validation errors shown, the record's id in the address.
@@ -333,6 +552,17 @@ ONEC_CLOSE_START = r"""() => {
   const fire = (el) => ["mousedown", "mouseup", "click"].forEach((t) =>
     el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })));
   const closed = [];
+  // Windows (div.cloud[id$=win]) carry their caption in data-title, not in the text: «Путеводитель по
+  // демонстрационной базе», «Информация». They stack over other windows and cover their buttons.
+  for (const w of document.querySelectorAll("[id$=win].cloud")) {
+    const r = w.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) continue;
+    const box = w.querySelector(".toplineBox[data-title]");
+    const title = box ? (box.getAttribute("data-title") || "").trim() : "";
+    if (!title || !TITLES.some((re) => re.test(title)) || closed.includes(title)) continue;
+    const button = w.querySelector("[id$=headerTopLine_cmd_CloseButton]");
+    if (button) { fire(button); closed.push(title); }
+  }
   const t0 = performance.now();
   const nodes = document.body ? document.body.getElementsByTagName("*") : [];
   for (let i = 0; i < nodes.length && i < 20000 && performance.now() - t0 < 2000; i++) {
@@ -398,6 +628,21 @@ ONEC_ERRORS = r"""() => {
   return out;
 }"""
 
+# 1С has drawn either its sign-in form or its desktop (sections panel), not the loading screen in between.
+ONEC_READY = r"""() => {
+  const shown = (e) => { const r = e.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
+  if ([...document.querySelectorAll("input[type=password]")].some(shown)) return true;
+  if ([...document.querySelectorAll("#themesCell, [id^=themesCell_theme_], #funcPanel")].some(shown)) return true;
+  return (document.body ? document.body.innerText.trim().length : 0) > 300;
+}"""
+
+# Cheap check after a click in 1С: is there a start window or a notice the closers above would take?
+ONEC_NEEDS_CLEANUP = r"""() => {
+  const w = [...document.querySelectorAll("[id$=win].cloud")].some((e) => { const r = e.getBoundingClientRect(); return r.width > 1 && r.height > 1; });
+  const t = document.body ? document.body.innerText : "";
+  return w || /версия конфигурации|монитор портала|путеводитель|навигационн\S* ссылк/i.test(t);
+}"""
+
 # What is under a point: the label the guard checks before a click by coordinates.
 AT_POINT = r"""([x, y]) => {
   let el = document.elementFromPoint(x, y);
@@ -442,7 +687,10 @@ SERP = r"""() => {
 
 ONEC_HINT = (
     "(Это 1С. Быстрее всего — browser_open с навигационной ссылкой <база>/ru_RU/#e1cib/list/<Объект> или "
-    "#e1cib/app/Отчет.<Имя>. Поиск в списке: browser_press Control+F, затем browser_type без ref. Если нужного "
+    "#e1cib/app/Отчет.<Имя>. Поле формы: browser_type с ref поля; в поле-ссылке (контрагент, счёт, номенклатура) "
+    "после ввода выбери «вариант» из списка или нажми Tab. Табличная часть (Товары): «Добавить» или клик по "
+    "ячейке, затем browser_press F2 — появится поле ячейки, в него browser_type, Tab — следующая ячейка. Цифры отчёта — в разделе «Отчёт» после «Сформировать». "
+    "Поиск в списке: browser_press Control+F, затем browser_type без ref. Если нужного "
     "нет в списке элементов, сделай browser_screenshot и нажми browser_click по координатам x, y с картинки.)"
 )
 
@@ -451,6 +699,13 @@ ONEC_LINK_FAILED = (
     "nav_link_failed=true: навигационная ссылка {link} не открылась ({why}). Окно ошибки закрыто. "
     "Не открывай эту ссылку снова. Один раз можно попробовать соседнее имя объекта из подсказки 1С, "
     "иначе иди через меню: раздел слева → нужный список или отчёт, или ☰ → «Все функции»."
+)
+
+
+ONEC_GO_FAILED = (
+    "Навигационную ссылку не открыл: окно «Перейти по ссылке» (Shift+F11) не появилось, скорее всего поверх "
+    "открыто другое окно. Базу не перезагружал: это сбросило бы вход в 1С. Ответь в открытом окне или закрой его, "
+    "потом открой ссылку снова, или иди через меню раздела."
 )
 
 
@@ -467,16 +722,26 @@ def format_snapshot(snap: dict) -> str:
         buttons = dialog.get("buttons") or []
         shown = (", кнопки: " + ", ".join(f"«{b}»" for b in buttons)) if buttons else ""
         lines[2:2] = [DIALOG_NOTE.format(title=dialog.get("title") or "окно", buttons=shown), ""]
+    if isinstance(dialog, dict) and dialog.get("onec"):
+        lines.append("Текст окна (форма за ним скрыта, пока окно открыто):")
     lines.append((snap.get("text") or "").strip() or "(текста нет)")
     if snap.get("fields"):
         lines += ["", "Поля формы:", *snap["fields"]]
     if snap.get("rows"):
         lines += ["", "Таблица (строки, ячейки через |):", *snap["rows"]]
+    if snap.get("report"):
+        lines += ["", "Отчёт (табличный документ 1С, строки сверху вниз, ячейки через |):", *snap["report"]]
+        if snap.get("reportCut"):
+            lines.append("(Отчёт длиннее: показано начало. Сузь отбор или период, если нужной строки нет.)")
     elements = snap.get("elements") or []
     if elements:
         lines += ["", "Элементы:"]
         for el in elements:
+            if el.get("inline"):
+                continue  # a table cell: its ref is in the table above
             label = f" «{el['label']}»" if el.get("label") else ""
+            if "value" in el:
+                label += f" = «{el['value']}»" if el["value"] else " (пусто)"
             lines.append(f"[{el['ref']}] {el['kind']}{label}")
     if snap.get("partial"):
         lines += ["", "(Страница большая: прочитана не целиком.)"]
@@ -659,8 +924,23 @@ class Page:
                 return ONEC_LINK_FAILED.format(link=key, why="уже не открылась в этом сеансе") + "\n\n" + self.read()
         if link and same_base(self.page.url, url) and self.is_onec():
             # 1С is open: changing only the #e1cib hash does not open the form. «Перейти по ссылке» does.
-            if self.onec_go(url):
+            self.onec_wait_ready()
+            opened = False
+            for attempt in range(2):
+                # Start windows and the version notice right after sign-in swallow Shift+F11: close them first.
+                if attempt:
+                    self.page.wait_for_timeout(1500)
+                pre = self.onec_cleanup()
+                if pre:
+                    notes.append(pre.strip())
+                if self.onec_go(url):
+                    opened = True
+                    break
+            if opened:
                 notes.append("Открыл навигационную ссылку 1С через «Перейти по ссылке» (Shift+F11).")
+            elif self.onec_signed_in():
+                # A reload ends the 1С session: the model is back at the sign-in form (1c-06).
+                return ONEC_GO_FAILED + "\n\n" + self.read()
             else:
                 # Fallback: load the base again with the link, so 1С reads it on start.
                 try:
@@ -765,10 +1045,62 @@ class Page:
         point = self.page.evaluate(FIND, [ref, text])
         if not point:
             raise CloudError("element_not_found")
+        covered = len(point) > 2 and bool(point[2])
+        if len(point) > 3 and point[3] and self.is_onec():
+            # Behind a modal 1С window: the click would do nothing, and the model would think it did.
+            return (
+                f"Не нажал «{text or ref}»: эта кнопка за открытым окном 1С. Сначала ответь в окне "
+                "или закрой его.\n\n" + self.read()
+            )
         under = str(self.page.evaluate(AT_POINT, [point[0], point[1]]) or "") or (text or "")
-        self.page.mouse.click(point[0], point[1])
+        if covered and self.is_onec():
+            # Another 1С window lies over the button (a guide over the version notice): press the button itself.
+            under = text or under
+            self.page.evaluate(PRESS_TARGET)
+        else:
+            self.page.mouse.click(point[0], point[1])
         self.settle(1200)
-        return self.save_report(under) + self.read()
+        return self.onec_cleanup() + self.save_report(under) + self.read()
+
+    def onec_signed_in(self) -> bool:
+        try:
+            return not self.page.evaluate(
+                "() => [...document.querySelectorAll('input[type=password]')].some((e) => {"
+                " const r = e.getBoundingClientRect(); return r.width > 1 && r.height > 1; })"
+            )
+        except Exception:  # noqa: BLE001
+            return False
+
+    def onec_wait_ready(self, seconds: int = 15) -> bool:
+        """Right after «Войти» 1С draws its desktop for several seconds; a link opened or a key pressed then
+        is lost, and a reload in that time drops the session (1c-06: back to the sign-in form)."""
+        for _ in range(seconds):
+            try:
+                if self.page.evaluate(ONEC_READY):
+                    return True
+            except Exception:  # noqa: BLE001
+                return False
+            self.page.wait_for_timeout(1000)
+        return False
+
+    def onec_cleanup(self) -> str:
+        """After an action in 1С: close start windows and the «версия конфигурации» notice that came up
+        (they come right after «Войти»), so the model does not spend its steps on them."""
+        try:
+            if not self.is_onec():
+                return ""
+            self.onec_wait_ready()
+            if not self.page.evaluate(ONEC_NEEDS_CLEANUP):
+                return ""
+        except Exception:  # noqa: BLE001
+            return ""
+        notes = []
+        closed = self.close_start_windows()
+        if closed:
+            notes.append("Закрыл стартовые окна 1С: " + ", ".join(f"«{t}»" for t in closed) + ".")
+        if any(e["kind"] == "version" for e in self.close_error_windows()):
+            notes.append("Закрыл окно 1С о версии конфигурации.")
+        return "\n".join(notes) + "\n\n" if notes else ""
 
     def save_report(self, label: str) -> str:
         """After a «Сохранить» click: say whether the page took it, so the model does not report a lost form."""
@@ -804,21 +1136,44 @@ class Page:
         self.page.mouse.click(x, y)
         self.settle(1200)
         head = f"Нажал в точке ({int(x)}, {int(y)})" + (f" на «{under}»" if under else "") + ".\n\n"
-        return head + self.save_report(under) + self.read()
+        return head + self.onec_cleanup() + self.save_report(under) + self.read()
 
     def type(self, ref: int | None, text: str, submit: bool) -> str:
+        secret = False
         if ref is not None:
             handle = self.page.query_selector(f'[data-heli-ref="{int(ref)}"]')
             if handle is None:
                 raise CloudError("element_not_found")
+            secret = (handle.get_attribute("type") or "").lower() == "password"
             handle.scroll_into_view_if_needed(timeout=5_000)
-            handle.click(timeout=5_000)
+            try:
+                handle.click(timeout=5_000)
+            except Exception:  # noqa: BLE001
+                # Covered by another 1С window or a hint over the field: focus it directly.
+                handle.focus()
             self.page.keyboard.press("Control+A")
-        self.page.keyboard.insert_text(text)
+        onec = not secret and self.is_onec()
+        if onec and len(text) <= 200:
+            # 1С fills its choice list (контрагент, счёт, номенклатура) from key presses; pasted text gets
+            # a stale list or none.
+            # Key by key races with 1С rewriting the field while it looks up variants («шРома» for «Ромаш»):
+            # paste all but the last character and type that one.
+            self.page.wait_for_timeout(300)
+            self.page.keyboard.press("Delete")
+            if len(text) > 1:
+                self.page.keyboard.insert_text(text[:-1])
+            if text:
+                self.page.keyboard.type(text[-1], delay=30)
+        else:
+            self.page.keyboard.insert_text(text)
         if submit:
             self.page.keyboard.press("Enter")
             self.settle(1500)
-            return self.read()
+            return self.onec_cleanup() + self.read()
+        if onec:
+            # Show the field and the variants 1С offers for it. Not for passwords: never echo those.
+            self.settle(900)
+            return "Текст введён.\n\n" + self.read()
         # The typed value may be a password: never echo it back to the model.
         return "Текст введён."
 
@@ -964,7 +1319,7 @@ def run_tool(page: Page, tool: str, args: dict) -> str:
     if tool == "browser_open":
         return page.open(str(args.get("url") or ""))
     if tool == "browser_read":
-        return page.read()
+        return page.onec_cleanup() + page.read()
     if tool == "browser_click":
         text = args.get("text") if isinstance(args.get("text"), str) else None
         x, y = args.get("x"), args.get("y")
