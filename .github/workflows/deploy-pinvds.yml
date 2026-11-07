@@ -30,6 +30,11 @@ on:
         type: choice
         options: ["", "1", "0"]
         default: ""
+      paid_signup:
+        description: "Платная регистрация: 1 = свободная регистрация + пробная неделя и тарифы (HELI_INVITE_ONLY=0, HELI_BILLING=1), 0 = обратно по приглашениям без тарифов. Пусто — не менять."
+        type: choice
+        options: ["", "1", "0"]
+        default: ""
       admin_emails:
         description: "Почты админов → HELI_ADMIN_EMAILS (через запятую; заменяет список целиком). Пусто — не менять."
         type: string
@@ -80,6 +85,7 @@ jobs:
       GA4_IDS: ${{ inputs.ga4_sandbox_ids }}
       ADMIN_EMAILS: ${{ inputs.admin_emails }}
       DOCS_CRAWL: ${{ inputs.docs_crawl }}
+      PAID_SIGNUP: ${{ inputs.paid_signup }}
     steps:
       - uses: actions/checkout@v4
 
@@ -94,6 +100,12 @@ jobs:
           if [ -n "$GA4_IDS" ] && ! printf '%s' "$GA4_IDS" | grep -Eq '^G-[A-Z0-9]{4,16}(,G-[A-Z0-9]{4,16})*$'; then
             echo "ga4_sandbox_ids: нужен Measurement ID вида G-XXXXXXX (через запятую)"; exit 1; fi
           echo "AMO_HOSTS=$AMO_HOSTS" >> "$GITHUB_ENV"
+          # Open sign-up only together with plans: without HELI_BILLING a new account would get the old free limits.
+          case "${PAID_SIGNUP:-}" in
+            1) echo "INVITE_ONLY=0" >> "$GITHUB_ENV"; echo "BILLING=1" >> "$GITHUB_ENV" ;;
+            0) echo "INVITE_ONLY=1" >> "$GITHUB_ENV"; echo "BILLING=0" >> "$GITHUB_ENV" ;;
+            *) echo "INVITE_ONLY=" >> "$GITHUB_ENV"; echo "BILLING=" >> "$GITHUB_ENV" ;;
+          esac
           ADMIN_EMAILS="$(printf '%s' "$ADMIN_EMAILS" | tr -d ' ' | tr 'A-Z' 'a-z')"
           mail='[a-z0-9._+-]+@[a-z0-9-]+(\.[a-z0-9-]+)+'
           if [ -n "$ADMIN_EMAILS" ] && ! printf '%s' "$ADMIN_EMAILS" | grep -Eq "^$mail(,$mail)*$"; then
@@ -129,4 +141,4 @@ jobs:
           ssh pinvds 'chmod +x /tmp/deploy.sh'
 
       - name: ${{ inputs.mode }}
-        run: ssh pinvds "SET_HELI_AMO_SANDBOX_HOSTS='$AMO_HOSTS' SET_HELI_GA4_SANDBOX_IDS='$GA4_IDS' SET_HELI_ADMIN_EMAILS='$ADMIN_EMAILS' SET_HELI_DOCS_CRAWL='$DOCS_CRAWL' bash /tmp/deploy.sh '$MODE' /tmp/heli-bot-server.tgz; rc=\$?; rm -f /tmp/heli-bot-server.tgz /tmp/deploy.sh; exit \$rc"
+        run: ssh pinvds "SET_HELI_AMO_SANDBOX_HOSTS='$AMO_HOSTS' SET_HELI_GA4_SANDBOX_IDS='$GA4_IDS' SET_HELI_ADMIN_EMAILS='$ADMIN_EMAILS' SET_HELI_DOCS_CRAWL='$DOCS_CRAWL' SET_HELI_INVITE_ONLY='$INVITE_ONLY' SET_HELI_BILLING='$BILLING' bash /tmp/deploy.sh '$MODE' /tmp/heli-bot-server.tgz; rc=\$?; rm -f /tmp/heli-bot-server.tgz /tmp/deploy.sh; exit \$rc"
